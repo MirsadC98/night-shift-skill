@@ -200,6 +200,32 @@ function recordAssignments(words, vars, env) {
 
 const isAbsolute = (t) => /^[a-z]:[\\/]/i.test(t) || /^[\\/]/.test(t);
 
+// A wildcard target is not known until the shell expands it, so it is compared segment by segment
+// with what a night session must not lose: if it can be that folder or file, inside it, or a folder
+// above it (`C:/temp/x-night/run.*`, `.cl*/settings.json`, `<repo>/*`), it is refused.
+const GLOB = /[*?[]/;
+const segMatch = (pat, seg) => {
+  if (!GLOB.test(pat)) return pat === seg;
+  // A [set] counts as any one character: more than it matches, so a refusal errs on the safe side.
+  const re = pat.replace(/\[[^\]]*\]?|[*?]|[\\^$.+(){}|\]]/g, (m) => (m === "*" ? "[^/]*" : m === "?" || m[0] === "[" ? "[^/]" : "\\" + m));
+  return new RegExp(`^${re}$`).test(seg);
+};
+const overlaps = (g, c) => {
+  const a = g.split("/"), b = c.split("/");
+  return a.slice(0, b.length).every((s, i) => segMatch(s, b[i]));
+};
+function protectedTargets(r) {
+  return [
+    [r.state, "the run's state folder"],
+    [r.repo && `${r.repo}/.git`, "the .git directory"],
+    [r.repo && `${r.repo}/.claude`, "the project's .claude folder"],
+    [`${r.home}/.claude/skills/night-shift`, "the night-shift skill itself"],
+    [`${r.home}/.claude/settings.json`, "Claude settings"],
+    [`${r.home}/.claude/settings.local.json`, "Claude settings"],
+    [`${r.home}/.claude/claude.md`, "the user's global CLAUDE.md"],
+  ].filter(([c]) => c);
+}
+
 // Deletes: a recursive one anywhere in a simple command, and a plain one (rm, del, Remove-Item,
 // unlink, find -delete) where it is the command. cwd is the folder the hook says the command
 // starts in; a cd inside the command moves it, so a relative target is read from where the
@@ -227,6 +253,9 @@ function checkDeletes(cmd, env, cwd) {
     const plain = !recursive && DELETE_WORD.test(name) && (!/find(\.exe)?$/i.test(name) || words.includes("-delete") || (words.includes("-exec") && words.some((w) => /^(rm|unlink)$/.test(w))));
     if (!recursive && !plain) continue;
     const kind = recursive ? "recursive deletes" : "deletes";
+    // find's own tests (-name "*.tmp") follow its first -option: patterns, not targets.
+    const isFind = /find(\.exe)?$/i.test(name);
+    let expr = false;
     // Its targets come after the delete's own word.
     for (const raw of words.slice(words.findIndex((w) => DELETE_WORD.test(w)) + 1)) {
       const t = expand(raw, vars, env);
@@ -235,6 +264,7 @@ function checkDeletes(cmd, env, cwd) {
         if (!recursive) continue;
         return `refusing a recursive delete through a variable path that cannot be resolved (${raw.replace(/\0/g, "$")})`;
       }
+      if (isFind && /^[-(!]/.test(t)) expr = true;
       if (/^-/.test(t) || /^\/[sqfa]$/i.test(t) || /^(\/dev\/null|nul)$/i.test(t)) continue;
       if (/^~([\\/]|$)/.test(t)) return `refusing a ${recursive ? "recursive delete" : "delete"} in the home folder ("${t}")`;
       if (recursive && (/^(\.|\.\/|\*|\.\/\*|\/|\.git|\.git\/.*)$/.test(t) || /(^|[\\/])\.\.([\\/]|$)/.test(t))) return `refusing a recursive delete of "${t}"`;
@@ -250,6 +280,10 @@ function checkDeletes(cmd, env, cwd) {
       if (prot) return `refusing a delete of ${prot} (${t})`;
       // The state folder itself, or a folder above it, takes the runner's files and the handover with it.
       if (r.state && under(r.state, p)) return `refusing a delete of the run's state folder (${t})`;
+      if (!(isFind && expr) && GLOB.test(p)) {
+        const hit = protectedTargets(r).find(([c]) => overlaps(p, c));
+        if (hit) return `refusing a delete of ${hit[1]} through a wildcard (${t})`;
+      }
       if (!r.writable.some((root) => under(p, root) && !(recursive && p === root))) return `${kind} are limited to the repository and temp folders (got ${t})`;
     }
   }
@@ -324,6 +358,7 @@ function selfTest() {
     [write("C:/work/repo/src/a.ts:hidden"), true], [write("C:/work/repo/.claude/SETTIN~1.JSO"), true], [write("C:/work/repo/src/a~b.ts"), false],
     [bash("rm -rf C:/temp/x-night"), true], [bash("rm -f C:/temp/x-night/run.json"), true], [bash("rm -f C:/temp/x-night/scratch.txt"), false],
     [write("C:/Users/u/Documents/.claude/projects/p/memory/a.txt"), true],
+    [bash("rm -f C:/temp/x-night/run.*"), true], [bash("rm -f C:/work/repo/.cl*/settings.json"), true], [bash("rm -rf dist/*"), false],
     [bash("gh api --method=DELETE repos/o/r"), true], [bash("gh api repos/o/r/issues -f title=x"), true], [bash("gh api repos/o/r/pulls"), false],
   ];
   let failed = 0;

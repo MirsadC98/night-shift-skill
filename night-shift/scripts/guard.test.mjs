@@ -241,3 +241,18 @@ test("the hook answers deny when it cannot read its input or throws", () => {
     assert.match(out.hookSpecificOutput.permissionDecisionReason, /could not check this call/, input);
   }
 });
+
+test("a wildcard delete that can reach the state folder or a protected one is refused", () => {
+  for (const c of [
+    "rm -rf C:/temp/x-night/*", "rm -f C:/temp/x-night/run.*", "rm -f C:/temp/x-night/?un.json", 'rm -rf "$NIGHT_SHIFT_STATE"/*',
+    "rm -f C:/work/repo/.claude/*.json", "rm -f C:/work/repo/.claude/settings.*", "rm -f C:/work/repo/.cl*/settings.json",
+    "rm -f C:/temp/x-night/[r]un.json", "rm -rf C:/temp/x-*", "rm -rf C:/work/repo/*", "rm -f C:/work/repo/.g*/hooks/pre-commit",
+    "rm -f C:/work/repo/.*/config", "cd C:/temp/x-night && rm -f run.*", "rm -f C:/Users/u/.claude/skills/night-*/scripts/guard.mjs",
+  ]) assert.match(bash(c), /through a wildcard|state folder|recursive delete/, c);
+  assert.match(bash("rm -f C:/temp/x-night/run.*"), /refusing a delete of the run's state folder through a wildcard/);
+  assert.match(bash("rm -f C:/work/repo/.claude/settings.*"), /refusing a delete of the project's \.claude folder through a wildcard/);
+  for (const c of [
+    "rm -rf dist/*", "rm -rf build/.cache", "rm -f C:/temp/x-night/scratch.txt", 'find . -name "*.tmp" -delete', 'find . -name "*" -delete',
+    "rm -f C:/temp/*.txt", "rm -f src/*.bak", "rm -rf C:/temp/demo-*", "rm -f C:/work/repo/.cache/*",
+  ]) assert.equal(bash(c), null, c);
+});
