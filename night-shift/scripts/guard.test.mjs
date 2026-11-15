@@ -5,6 +5,8 @@ import assert from "node:assert/strict";
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import { decide } from "./guard.mjs";
 
 const env = { NIGHT_SHIFT_REPO: "C:/work/repo", NIGHT_SHIFT_STATE: "C:/temp/x-night", USERPROFILE: "C:\\Users\\u" };
@@ -198,4 +200,44 @@ test("a state folder that is too wide adds nothing to what may be written", () =
   assert.ok(bash("rm -rf C:/Users/u/Documents", wide));
   assert.ok(write("C:/Users/u/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/x.cmd", wide));
   assert.equal(write("C:/temp/x-night/next-prompt.md"), null);
+});
+
+// ---------------------------------------------------------------- stream and short names, failing closed
+test("a path that names an NTFS stream or a short name is refused", () => {
+  assert.ok(write("C:/work/repo/.git::$INDEX_ALLOCATION/config"));
+  assert.ok(write("C:/temp/x-night/night-settings.json::$DATA"));
+  assert.ok(write("C:/work/repo/src/a.ts:hidden"));
+  assert.ok(write("C:/work/repo/.claude/SETTIN~1.JSO"));
+  assert.ok(bash("rm -f C:/work/repo/SRC~1/a.ts"));
+  assert.ok(bash("rm -f C:/work/repo/src/a.ts:hidden"));
+  assert.match(write("C:/work/repo/src/a.ts:hidden"), /refusing a path with an NTFS stream name/);
+  assert.match(write("C:/work/repo/SRC~1/a.ts"), /refusing a path with a short \(8\.3\) name/);
+  assert.equal(write("C:/work/repo/src/a~b.ts"), null);
+});
+
+test("only the user's own memory folders are the memory exception", () => {
+  assert.equal(write("C:/Users/u/.claude/projects/p/memory/a.md"), null);
+  assert.ok(write("C:/Users/u/Documents/.claude/projects/p/memory/a.txt"));
+  assert.ok(write("C:/Users/u/.claude/projects/p/other/a.txt"));
+});
+
+test("the runner's files and the state folder cannot be deleted", () => {
+  assert.match(bash("rm -f C:/temp/x-night/run.json"), /refusing a delete of the runner's own files/);
+  assert.match(bash("rm -rf C:/temp/x-night"), /refusing a delete of the run's state folder/);
+  assert.match(bash("rm -rf $NIGHT_SHIFT_STATE"), /refusing a delete of the run's state folder/);
+  assert.ok(write("C:/temp/x-night/fable.json"));
+  assert.equal(bash("rm -f C:/temp/x-night/scratch.txt"), null);
+  assert.match(bash("rm -f C:/Users/u/.claude/settings.json"), /refusing a delete of Claude settings/);
+  assert.match(bash("rm C:/work/repo/.claude/night-shift.json"), /refusing a delete of the project's night-shift rules/);
+});
+
+test("the hook answers deny when it cannot read its input or throws", () => {
+  const GUARD = fileURLToPath(new URL("./guard.mjs", import.meta.url));
+  for (const input of ["{ not json", "null"]) {
+    const r = spawnSync(process.execPath, [GUARD], { input, encoding: "utf8" });
+    assert.equal(r.status, 0, input);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.hookSpecificOutput.permissionDecision, "deny", input);
+    assert.match(out.hookSpecificOutput.permissionDecisionReason, /could not check this call/, input);
+  }
 });

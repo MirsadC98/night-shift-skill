@@ -19,7 +19,7 @@ const under = (p, root) => root && (p === root || p.startsWith(root + "/"));
 
 // What the runner keeps in the state folder: the settings file that loads this guard, the file
 // that names the program each session starts, and its own logs and marks.
-const RUNNER_FILES = /^(night-settings\.json|run\.json|launch\.cmd|resume\.json|chain\.log|reload-request|watch\.pid|notified\.json|session-\d+\.(jsonl|err))$/;
+const RUNNER_FILES = /^(night-settings\.json|run\.json|launch\.cmd|resume\.json|chain\.log|reload-request|watch\.pid|notified\.json|fable\.json|session-\d+\.(jsonl|err))$/;
 
 function roots(env) {
   const home = norm(env.USERPROFILE || env.HOME || homedir());
@@ -41,6 +41,19 @@ function roots(env) {
   };
 }
 
+// Windows opens a path through a stream name (a.ts:x, .git::$INDEX_ALLOCATION) or an 8.3 short
+// name (SETTIN~1.JSO) as a file the rules below never named, so these are refused outright
+// rather than resolved. p is already normalized.
+export function oddPath(p) {
+  if (p.replace(/^[a-z]:(?=\/|$)/, "").includes(":")) return "an NTFS stream name";
+  if (p.split("/").some((s) => /~\d/.test(s))) return "a short (8.3) name";
+  return null;
+}
+const oddReason = (p, shown) => {
+  const what = oddPath(p);
+  return what && `refusing a path with ${what} (${shown}): the guard cannot tell which file it is`;
+};
+
 // Paths a night session may never write, even inside writable roots.
 function protectedPath(p, r) {
   if (under(p, `${r.home}/.claude/skills/night-shift`)) return "the night-shift skill itself";
@@ -55,10 +68,13 @@ function protectedPath(p, r) {
 function checkWrite(file, env) {
   const p = norm(file);
   const r = roots(env);
+  const odd = oddReason(p, file);
+  if (odd) return odd;
   const prot = protectedPath(p, r);
   if (prot) return `writing ${prot} is not allowed during a night run`;
-  const memory = /^.*\/\.claude\/projects\/[^/]+\/memory(\/|$)/.test(p) && p.startsWith(r.home + "/");
-  if (memory) return null;
+  // Only the user's own memory folders: a `.claude/projects/x/memory` anywhere else is not one.
+  const mem = `${r.home}/.claude/projects/`;
+  if (p.startsWith(mem) && /^[^/]+\/memory(\/|$)/.test(p.slice(mem.length))) return null;
   if (!r.writable.some((root) => under(p, root)))
     return `writes are limited to the repository, C:\\temp and the temp folder (got ${file})`;
   return null;
@@ -224,10 +240,16 @@ function checkDeletes(cmd, env, cwd) {
       if (recursive && (/^(\.|\.\/|\*|\.\/\*|\/|\.git|\.git\/.*)$/.test(t) || /(^|[\\/])\.\.([\\/]|$)/.test(t))) return `refusing a recursive delete of "${t}"`;
       const abs = isAbsolute(t);
       if (!abs && lost) return `refusing a delete after a cd the guard cannot follow: it cannot tell which folder "${t}" is in`;
-      if (!abs && !at) continue;
+      if (!abs && !at) { const odd = oddReason(norm(t), t); if (odd) return odd; continue; }
       const p = norm(abs ? t : `${at}/${t}`);
+      const odd = oddReason(p, t);
+      if (odd) return odd;
       if (r.repo && under(p, `${r.repo}/.git`)) return `refusing a delete inside .git (${t})`;
       if (recursive && r.repo && p === r.repo) return `refusing a recursive delete of the repository (${t})`;
+      const prot = protectedPath(p, r);
+      if (prot) return `refusing a delete of ${prot} (${t})`;
+      // The state folder itself, or a folder above it, takes the runner's files and the handover with it.
+      if (r.state && under(r.state, p)) return `refusing a delete of the run's state folder (${t})`;
       if (!r.writable.some((root) => under(p, root) && !(recursive && p === root))) return `${kind} are limited to the repository and temp folders (got ${t})`;
     }
   }
@@ -298,6 +320,10 @@ function selfTest() {
     [bash("rm -f /c/Users/u/Documents/a.docx"), true], [bash("rm -f src/old.ts"), false],
     [bash(`git push "--force" origin main`), true], [bash("git push -uf origin main"), true], [bash("git push -u origin night"), false],
     [bash("git checkout -- ."), true], [bash("git checkout -- src/a.ts"), false], [bash("git restore ."), true],
+    // Stream and short names, the state folder, the memory exception.
+    [write("C:/work/repo/src/a.ts:hidden"), true], [write("C:/work/repo/.claude/SETTIN~1.JSO"), true], [write("C:/work/repo/src/a~b.ts"), false],
+    [bash("rm -rf C:/temp/x-night"), true], [bash("rm -f C:/temp/x-night/run.json"), true], [bash("rm -f C:/temp/x-night/scratch.txt"), false],
+    [write("C:/Users/u/Documents/.claude/projects/p/memory/a.txt"), true],
     [bash("gh api --method=DELETE repos/o/r"), true], [bash("gh api repos/o/r/issues -f title=x"), true], [bash("gh api repos/o/r/pulls"), false],
   ];
   let failed = 0;
@@ -312,15 +338,18 @@ const imported = !process.argv[1] || resolve(process.argv[1]).toLowerCase() !== 
 if (imported) { /* the tests import decide() */ }
 else if (process.argv.includes("--self-test")) selfTest();
 else {
-  const input = JSON.parse(readFileSync(0, "utf8") || "{}");
-  const reason = decide(input);
-  if (reason) {
-    process.stdout.write(JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason: `night-shift guard: ${reason}. Do not work around it; note it for the morning and take other work.`,
-      },
-    }));
+  const deny = (reason) => process.stdout.write(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: `night-shift guard: ${reason}. Do not work around it; note it for the morning and take other work.`,
+    },
+  }));
+  // A hook that crashes leaves the call to the permission mode, so unreadable input or a throw is a deny.
+  try {
+    const reason = decide(JSON.parse(readFileSync(0, "utf8") || "{}"));
+    if (reason) deny(reason);
+  } catch (e) {
+    deny(`the guard could not check this call (${String((e && e.message) || e).split("\n")[0]})`);
   }
 }

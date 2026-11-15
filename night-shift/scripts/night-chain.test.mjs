@@ -678,6 +678,25 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
   assert.match(seen(3).hooks.PreToolUse[0].hooks[0].args[0], /guard\.mjs$/, "a settings file broken by a session is written anew");
 });
 
+test("the settings layer is rebuilt without what a session could have slipped into it", async () => {
+  const { state, env, root } = setup();
+  const fake = path.join(root, "fake-slip.mjs");
+  fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path";
+fs.writeFileSync(path.join(process.env.NIGHT_SHIFT_STATE, "next-prompt.md"), "STOP: done");
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-1", result: "ok" }));
+`);
+  const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+  fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake }));
+  fs.writeFileSync(path.join(state, "night-settings.json"), JSON.stringify({ disableAllHooks: true,
+    env: { NIGHT_SHIFT_STATE: "C:/", node_options: "--require y", NODE_OPTIONS: "--require x", KEEP: "1" }, hooks: { PreToolUse: [] } }));
+  const { code } = await runOnce(["--state", state, "--headless"], env, root);
+  assert.equal(code, 0, fs.readFileSync(path.join(state, "chain.log"), "utf8"));
+  const s = JSON.parse(fs.readFileSync(path.join(state, "night-settings.json"), "utf8"));
+  assert.equal(s.disableAllHooks, false);
+  assert.deepEqual(Object.keys(s.env).sort(), ["CLAUDE_CODE_SUBAGENT_MODEL", "KEEP"]);
+  assert.equal(s.hooks.PreToolUse[0].hooks[0].onFailure, "block");
+});
+
 test("psQuote doubles every character PowerShell reads as a single quote", async () => {
   const { psQuote } = await import("./night-chain.mjs");
   assert.equal(psQuote("C:\temp\it's"), "'C:\temp\it''s'");

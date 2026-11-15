@@ -337,13 +337,17 @@ async function runChain(opt) {
       ...prev,
       hooks: { ...prev.hooks, PreToolUse: [{ matcher: "Bash|PowerShell|Write|Edit|MultiEdit|NotebookEdit",
         hooks: [{ type: "command", command: NODE, args: [GUARD], timeout: 15, onFailure: "block" }] }] },
+      // A session that set this to true would turn every hook, the guard's included, off.
+      disableAllHooks: false,
       autoContinueAtUsageLimit: true,
       // No one reads a headless session's prose: the user's Explanatory style only added insight blocks.
       outputStyle: prev.outputStyle ?? "default",
       // In this layer, above the user's and the project's files: VS Code's and Desktop's pickers
       // save their pick as the user's default (run 2's #08–#20 ran at high, 2026-10-30), and the
       // user may work on Fable while the chain runs. --effort is kept for max (effort.mjs).
-      env: { ...prev.env, CLAUDE_CODE_SUBAGENT_MODEL: SUB_MODEL },
+      // Not NODE_OPTIONS or NIGHT_SHIFT_*: a session could plant a --require or point the guard's
+      // state folder elsewhere through them (Windows names are case-blind, hence the i).
+      env: { ...Object.fromEntries(Object.entries(prev.env && typeof prev.env === "object" ? prev.env : {}).filter(([k]) => !/^(NODE_OPTIONS$|NIGHT_SHIFT_)/i.test(k))), CLAUDE_CODE_SUBAGENT_MODEL: SUB_MODEL },
       modelSettings: nightModelSettings(prev.modelSettings, lowerSettings(repo), { opus: run.effort || "xhigh", fable: MAIN_EFFORT.fable, ...levels }),
     }, null, 2));
   };
