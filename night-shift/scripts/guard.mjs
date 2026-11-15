@@ -255,7 +255,7 @@ function checkDeletes(cmd, env, cwd) {
     const kind = recursive ? "recursive deletes" : "deletes";
     // find's own tests (-name "*.tmp") follow its first -option: patterns, not targets.
     const isFind = /find(\.exe)?$/i.test(name);
-    let expr = false;
+    let expr = false, dNext = false;
     // Its targets come after the delete's own word.
     for (const raw of words.slice(words.findIndex((w) => DELETE_WORD.test(w)) + 1)) {
       const t = expand(raw, vars, env);
@@ -264,7 +264,12 @@ function checkDeletes(cmd, env, cwd) {
         if (!recursive) continue;
         return `refusing a recursive delete through a variable path that cannot be resolved (${raw.replace(/\0/g, "$")})`;
       }
-      if (isFind && /^[-(!]/.test(t)) expr = true;
+      if (isFind && !expr) {
+        // find's leading options (-H -L -P -Olevel -D opts) come before its paths: the paths are still targets.
+        if (dNext) { dNext = false; continue; }
+        if (t === "-D") dNext = true;
+        else if (!/^-([HLP]|O\d*|D\S+)$/.test(t) && /^[-(!]/.test(t)) expr = true;
+      }
       if (/^-/.test(t) || /^\/[sqfa]$/i.test(t) || /^(\/dev\/null|nul)$/i.test(t)) continue;
       if (/^~([\\/]|$)/.test(t)) return `refusing a ${recursive ? "recursive delete" : "delete"} in the home folder ("${t}")`;
       if (recursive && (/^(\.|\.\/|\*|\.\/\*|\/|\.git|\.git\/.*)$/.test(t) || /(^|[\\/])\.\.([\\/]|$)/.test(t))) return `refusing a recursive delete of "${t}"`;
