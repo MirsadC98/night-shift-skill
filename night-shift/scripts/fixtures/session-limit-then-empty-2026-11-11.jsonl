@@ -1,0 +1,4 @@
+{"type":"rate_limit_event","session_id":"00000000-0000-4000-8000-000000000006","rate_limit_info":{"status":"rejected","resetsAt":1794421800,"rateLimitType":"five_hour","unifiedWindows":{"five_hour":{"utilization":1,"resetsAt":1794421800,"status":"rejected"},"seven_day":{"utilization":0.85,"resetsAt":1794481200,"status":"allowed_warning"}}}}
+{"type":"result","subtype":"success","is_error":false,"num_turns":17,"total_cost_usd":12.6,"session_id":"00000000-0000-4000-8000-000000000006","result":"Waiting for the build."}
+{"type":"result","subtype":"success","is_error":true,"api_error":"usage_limit_reached","api_error_status":429,"num_turns":5,"total_cost_usd":12.84,"session_id":"00000000-0000-4000-8000-000000000006","result":"You've hit your 5-hour limit · resets 9:30pm (Europe/Istanbul)"}
+{"type":"result","subtype":"success","is_error":false,"num_turns":0,"total_cost_usd":12.84,"session_id":"00000000-0000-4000-8000-000000000006","result":""}

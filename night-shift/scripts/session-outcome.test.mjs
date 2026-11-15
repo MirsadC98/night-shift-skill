@@ -107,3 +107,41 @@ test("windowSpan spans the first and the last event, each window that either has
   const b = { five_hour: { utilization: 0.41 }, seven_day: { utilization: 0.33 }, seven_day_overage_included: { utilization: 0.17 } };
   assert.equal(windowSpan({ first: a, last: b }), "5h 39%→41% · 7d 32%→33% · fable ?→17%");
 });
+
+test("a limit result followed by the CLI's empty result is still a limit, with the earlier event's reset", () => {
+  const o = sessionOutcome(fixture("session-limit-then-empty-2026-11-11.jsonl"), "", 1);
+  assert.equal(o.limited, true);
+  assert.equal(o.resetAt, 1794421800 * 1000 + 60_000);
+  assert.equal(o.limitType, "five_hour");
+  assert.equal(o.summary, "success (error), 5 turns, $12.84");
+  assert.equal(o.transient, false);
+});
+
+test("empty results never decide when a real one exists; alone, one is a session that did nothing", () => {
+  const empty = result({ is_error: false, num_turns: 0, result: "" });
+  const limit = result({ is_error: true, api_error: "usage_limit_reached", num_turns: 5 });
+  assert.equal(sessionOutcome([limit, empty, empty].join("\n")).limited, true);
+  assert.equal(sessionOutcome([result({ num_turns: 9 }), empty, result({ num_turns: 4 })].join("\n")).summary, "success, 4 turns, $1.00");
+  const alone = sessionOutcome(empty);
+  assert.equal(alone.limited, false);
+  assert.equal(alone.summary, "success, 0 turns, $1.00");
+});
+
+test("an errored session whose last words mention a rate limiter is not a usage limit", () => {
+  const o = sessionOutcome(result({ subtype: "error_max_turns", is_error: true, num_turns: 200, result: "I finished the rate limiter module and its tests." }), "", 1);
+  assert.equal(o.limited, false);
+  assert.equal(o.transient, false);
+  assert.equal(o.fatal, false);
+});
+
+test("an API or network failure is transient; a refused login is fatal", () => {
+  const api = sessionOutcome(result({ subtype: "error_during_execution", is_error: true, num_turns: 0, result: "API Error: 500 Internal server error" }), "", 1);
+  assert.deepEqual([api.transient, api.fatal, api.errorText], [true, false, "API Error: 500 Internal server error"]);
+  const status = sessionOutcome(result({ is_error: true, api_error: "overloaded_error", api_error_status: 529, result: "Overloaded" }), "", 1);
+  assert.equal(status.transient, true);
+  const net = sessionOutcome("", "Error: getaddrinfo ENOTFOUND api.anthropic.com\n", 1);
+  assert.deepEqual([net.transient, net.errorText], [true, "Error: getaddrinfo ENOTFOUND api.anthropic.com"]);
+  const login = sessionOutcome(result({ is_error: true, api_error_status: 401, result: "Invalid API key · Please run /login" }), "", 1);
+  assert.deepEqual([login.transient, login.fatal], [false, true]);
+  assert.equal(sessionOutcome(result({})).transient, false);
+});

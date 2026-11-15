@@ -4,7 +4,10 @@
 // The structured fields come first: the CLI's wording changes ("usage limit
 // reached|<epoch>" became "You've hit your session limit · resets 8:20pm"),
 // while the result's api_error and the rate_limit_event's resetsAt do not.
-// The text match stays for a session that died without a result line.
+// The text match is anchored to the start of a result line ("You've hit your … limit"): a session
+// that merely talks about a rate limiter, or a build that failed on one, must not be read as the
+// account's limit and sleep the chain (R3). Only stderr without any result line is matched loosely.
+// The CLI may also append an empty result line after a limit one; it never decides (R1).
 //
 // Fable's weekly allowance (claude 2.1.325, read from its code on 2026-11-15; no real sample yet,
 // so chain.log keeps the raw record of every limit to confirm or correct this):
@@ -20,19 +23,26 @@
 const FABLE_REFUSALS = new Set(["model_requires_usage_credits", "model_substitution_disabled", "consent_unanswered", "no_allowed_fallback"]);
 const FABLE_WINDOW = "seven_day_overage_included";
 
+const LIMIT_TEXT = /^\s*(?:Claude AI usage limit reached|You(?:'|’)ve hit your [\w -]{1,30}limit)/i;
+const LOOSE = /usage limit|limit reached|rate.?limit|hit your [\w-]+ limit/i;
+
 export function sessionOutcome(stream, errText = "", code = null) {
   // A resumed session appends to the same stream: a rejected event belongs to
   // the result that follows it, not to a later part of the conversation.
-  let res = null, pending = null, rejected = null, sessionId = null, model = null, switchedTo = null;
+  let res = null, cost = 0, pending = null, rejected = null, lastRejected = null, sessionId = null, model = null, switchedTo = null;
   let first = null, last = null;
   const mainModels = new Set();
   for (const line of String(stream).trim().split("\n")) {
     let j;
     try { j = JSON.parse(line); } catch { continue; }
     sessionId = j.session_id || sessionId;
-    if (j.type === "result") { res = j; rejected = pending; pending = null; }
-    else if (j.type === "rate_limit_event") {
-      if (j.rate_limit_info?.status === "rejected") pending = j.rate_limit_info;
+    if (j.type === "result") {
+      const empty = j.is_error !== true && !j.num_turns && !String(j.result ?? "").trim();
+      if (res && empty) cost = Math.max(cost, Number(j.total_cost_usd) || 0);
+      else { res = j; cost = Number(j.total_cost_usd) || 0; rejected = pending; pending = null; }
+    } else if (j.type === "rate_limit_event") {
+      if (j.rate_limit_info?.status === "rejected") pending = lastRejected = j.rate_limit_info;
+      else if (j.rate_limit_info) lastRejected = null;
       const w = j.rate_limit_info?.unifiedWindows;
       if (w) { first ||= w; last = w; }
     } else if (j.type === "system" && j.subtype === "init") model = j.model || model;
@@ -40,18 +50,26 @@ export function sessionOutcome(stream, errText = "", code = null) {
     else if (j.type === "assistant" && !j.parent_tool_use_id && j.message?.model && j.message.model !== "<synthetic>") mainModels.add(j.message.model);
   }
   if (!res) rejected = pending;
-  const text = `${res?.result ?? ""}\n${String(errText).slice(-2000)}`;
-  const info = res?.api_error_params?.rate_limit_info || rejected;
+  const errTail = String(errText).slice(-2000), resText = res?.result ?? "";
   const cut = !res || res.is_error === true;
-  const limited = cut && (
-    res?.api_error === "usage_limit_reached" || res?.api_error_status === 429 || Boolean(rejected) ||
-    /usage limit|limit reached|rate.?limit|hit your [\w-]+ limit/i.test(text));
-  const epoch = info?.resetsAt || Number(/\|(\d{10})\b/.exec(text)?.[1]) || null;
+  const structuredLimit = res?.api_error === "usage_limit_reached" || res?.api_error_status === 429;
+  const info = res?.api_error_params?.rate_limit_info || rejected || (structuredLimit ? lastRejected : null);
+  const limited = cut && (structuredLimit || Boolean(rejected) || LIMIT_TEXT.test(resText) || (!res && LOOSE.test(errTail)));
+  const rejectedAt = Object.values(last || {}).filter((w) => w?.status === "rejected" && w.resetsAt).map((w) => w.resetsAt);
+  const epoch = info?.resetsAt || Number(/\|(\d{10})\b/.exec(`${resText}\n${errTail}`)?.[1]) || (limited && rejectedAt.length ? Math.min(...rejectedAt) : null);
   // Cut off because Fable's allowance is used up: by the refusal, or by a limit named as Fable's.
   const fableOut = cut && (FABLE_REFUSALS.has(res?.api_error) || info?.rateLimitType === FABLE_WINDOW);
   const fableEpoch = (info?.rateLimitType === FABLE_WINDOW && info.resetsAt) || last?.[FABLE_WINDOW]?.resetsAt || null;
+  const fatal = cut && !limited && !fableOut && ([400, 401, 403, 404].includes(res?.api_error_status) || /^\s*API Error: (?:400|401|403|404)\b|Please run \/login/.test(resText));
+  const transient = cut && !limited && !fableOut && !fatal && (!res || res.api_error != null || res.api_error_status != null || /^\s*API Error\b/.test(resText));
+  const lastErrLine = errTail.split("\n").map((l) => l.trim()).filter(Boolean).pop();
+  const errorText = !cut ? "" : (res ? resText.trim().split("\n")[0] : lastErrLine || `exit ${code}, no output`).slice(0, 160);
   return {
     limited,
+    transient,
+    fatal,
+    // Why a cut-off session ended, one line for chain.log and the card ("" when it was not cut).
+    errorText,
     resetAt: limited && epoch ? epoch * 1000 + 60_000 : null,
     sessionId,
     // Which limit (five_hour, seven_day, seven_day_overage_included, …), as the CLI named it, and
@@ -69,7 +87,7 @@ export function sessionOutcome(stream, errText = "", code = null) {
     // The limit windows of the session's first and last rate_limit_event (the whole account's).
     windows: { first, last },
     summary: res
-      ? `${res.subtype}${res.is_error ? " (error)" : ""}, ${res.num_turns} turns, $${Number(res.total_cost_usd || 0).toFixed(2)}`
+      ? `${res.subtype}${res.is_error ? " (error)" : ""}, ${res.num_turns} turns, $${cost.toFixed(2)}`
       : `exit ${code}, no result line`,
   };
 }
