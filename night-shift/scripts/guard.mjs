@@ -333,6 +333,37 @@ const configuredAlias = (name, cwd) => {
   } catch { return null; }
 };
 
+// What a git subcommand runs besides itself: [{ shell }] for a command line it hands to a shell,
+// [{ git }] for git words it runs again. The shell joins the words after foreach / run with spaces.
+function gitRuns(cmd, a) {
+  const first = firstArg(a), after = first === undefined ? [] : a.slice(a.indexOf(first) + 1);
+  const out = [];
+  const shell = (words) => { const rest = [...words]; while (rest[0]?.startsWith("-")) rest.shift(); if (rest.length) out.push({ shell: rest.join(" ") }); };
+  if (cmd === "submodule" && first === "foreach") shell(after);
+  else if (cmd === "bisect" && first === "run") out.push({ shell: after.join(" ") });
+  else if (cmd === "for-each-repo") {
+    // --config=<key> names the repositories; the rest are git's own words, run in each.
+    const k = a.findIndex((w, i) => !w.startsWith("-") && a[i - 1] !== "--config");
+    if (k >= 0) out.push({ git: a.slice(k) });
+  } else if (cmd === "difftool") {
+    // -x <cmd>, -x<cmd>, --extcmd=<cmd>, --extcmd <cmd>
+    const w = upToDashes(a);
+    w.forEach((x, i) => {
+      const m = /^--([a-z][a-z-]*)(?:=(.*))?$/.exec(x);
+      if (m && "extcmd".startsWith(m[1])) out.push({ shell: m[2] ?? w[i + 1] ?? "" });
+      else if (!m && x.startsWith("-x")) out.push({ shell: x.length > 2 ? x.slice(2) : w[i + 1] ?? "" });
+    });
+  } else if (cmd === "grep") {
+    // -O<pager>, --open-files-in-pager=<pager>
+    for (const x of upToDashes(a)) {
+      const m = /^--([a-z][a-z-]*)=(.*)$/.exec(x);
+      if (m && "open-files-in-pager".startsWith(m[1])) out.push({ shell: m[2] });
+      else if (/^-O./.test(x)) out.push({ shell: x.slice(2) });
+    }
+  }
+  return out;
+}
+
 // The reason a git command (the words after `git`) is refused, or null. An alias is read as what it
 // stands for: `!cmd` runs as a shell command with the arguments appended, any other value is git's own
 // words again. Git never lets an alias replace one of its commands, so those are not looked up.
@@ -345,14 +376,19 @@ export function gitRule(args, ctx) {
   if (sub >= args.length) return null;
   const name = args[sub], a = args.slice(sub + 1), cmd = name.toLowerCase();
   if (Object.hasOwn(GIT_RULES, cmd)) return GIT_RULES[cmd](a) || null;
+  let cwd = ctx.cwd ?? (where.at && !where.lost ? where.at : env.NIGHT_SHIFT_REPO);
+  for (const d of dirs) cwd = !cwd || isAbsolute(d) ? norm(d) : norm(`${cwd}/${d}`);
+  const inner = { ...opts, vars: new Map() };
+  // The command a subcommand hands to a shell, or the git it runs, is read like any other.
+  for (const { shell, git } of gitRuns(cmd, a)) {
+    const why = shell != null ? checkCommand(shell, env, { ...where }, inner, depth + 1) : gitRule(git, { env, where, opts: inner, depth: depth + 1, cwd });
+    if (why) return why;
+  }
   if (GIT_PLAIN.has(cmd)) return null;
   // The alias is read in the folder git will run in: the -C folders on top of where the command
   // stands (or the repository when that is not known).
-  let cwd = ctx.cwd ?? (where.at && !where.lost ? where.at : env.NIGHT_SHIFT_REPO);
-  for (const d of dirs) cwd = !cwd || isAbsolute(d) ? norm(d) : norm(`${cwd}/${d}`);
   const value = (opts.gitAlias ?? configuredAlias)(name, cwd || undefined);
   if (!value) return null;
-  const inner = { ...opts, vars: new Map() };
   if (value.startsWith("!")) return checkCommand([value.slice(1), ...a.map(quoteArg)].join(" "), env, { ...where }, inner, depth + 1);
   return gitRule([...simpleCommands(value).flatMap((c) => c.words), ...a], { env, where, opts: inner, depth: depth + 1, cwd });
 }

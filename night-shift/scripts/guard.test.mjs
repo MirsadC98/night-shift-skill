@@ -475,3 +475,14 @@ test("git behind a launcher or a block the walker does not read is still git", (
   for (const c of [`gh pr create --title "git push -f"`, `man git`, `npm run git-hooks`, `echo git push -f`, `grep -r "git push -f" docs/`, `wsl git status`, `ssh host git log`, `which git`])
     assert.equal(git(c), null, c);
 });
+
+test("what git submodule foreach, bisect run, difftool, grep -O and for-each-repo hand on is read", () => {
+  for (const c of [`git submodule foreach git push -f`, `git submodule foreach --recursive git reset --hard`, `git bisect run git reset --hard`, `git -C x submodule foreach git push -f`,
+    `git submodule foreach 'rm -rf /c/Users/u/Documents'`, `git submodule --quiet foreach "git push --force origin main"`, `git difftool -x 'rm -rf /c/Users/u/Documents'`,
+    `git difftool --extcmd="git push -f"`, `git difftool --extcmd 'git reset --hard'`, `git grep -O'git push -f' x`, `git grep --open-files-in-pager='rm -rf /c/Users/u/Documents' x`,
+    `git for-each-repo --config=maintenance.repo push --force`, `git for-each-repo --config maintenance.repo reset --hard`])
+    assert.ok(git(c), c);
+  for (const c of [`git submodule foreach git status`, `git bisect run npm test`, `git submodule update --init`, `git bisect start`, `git difftool -x meld`, `git grep -n TODO`, `git grep -O less x`,
+    `git for-each-repo --config=maintenance.repo fetch`, `git submodule foreach --recursive 'echo $name'`])
+    assert.equal(git(c), null, c);
+});
