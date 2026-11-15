@@ -398,7 +398,7 @@ test("git options are read as git reads them: abbreviated, clustered, after glob
     `git branch --show-current`, `git reset --soft HEAD~1`, `git reflog`, `git clean -n`, `git commit -m "docs: --amend and --force notes"`,
     `git -C app status`, `git restore --staged .`, `git stash push -u -m wip`, `git log --oneline | grep -i merge`, `git merge-base HEAD origin/main`,
     `git push --no-force origin night`, `git push -- --force`, `git branch --format='%(refname)'`, `git pull --ff-only`, `git remote -v`,
-    `git commit -m x --no-amend`, `git status -sb`, `git -c core.pager=cat log`, `git rm src/a.ts`, `git checkout main -- src/a.ts`])
+    `git commit -m x --no-amend`, `git status -sb`, `git -c color.ui=always log`, `git rm src/a.ts`, `git checkout main -- src/a.ts`])
     assert.equal(git(c), null, c);
 });
 test("an alias is read as what it stands for, and defining one is refused", () => {
@@ -430,4 +430,48 @@ test("git's global options are read the same way for git rm", () => {
 test("a command named like an object property is just a command", () => {
   for (const c of ["constructor a b", "__proto__ x", "toString", "hasOwnProperty -x"]) assert.equal(bash(c), null, c);
   assert.ok(bash("constructor; rm -rf /c/Users/u/Documents"));
+});
+
+test("git's global options that take a value are all read (--attr-source), and reset --merge discards", () => {
+  for (const c of [`git --attr-source HEAD push --force`, `git --attr-source HEAD reset --hard`, `git --attr-source HEAD rm -rf /c/Users/u/Documents`, `git reset --merge`])
+    assert.ok(git(c), c);
+  assert.equal(git(`git --attr-source=HEAD status`), null);
+  assert.equal(git(`git reset --mixed HEAD~1`), null);
+});
+test("config the night session writes itself cannot define a command git runs", () => {
+  for (const c of [`git config include.path ../ev.cfg`, `git config --add includeIf.gitdir:x.path y`, `git -C /c/temp/y config include.path z`, `git config INCLUDE.path z`,
+    `git config core.editor 'rm -rf /c/Users/u/Documents'`, `git config core.sshCommand x`, `git config core.hooksPath /c/temp/h`, `git config --local core.fsmonitor x`,
+    `git config core.pager x`, `git config sequence.editor x`, `git config credential.helper x`, `git config credential.https://h.helper x`, `git config diff.external x`,
+    `git config diff.a.textconv x`, `git config filter.a.clean x`, `git config filter.a.smudge x`, `git config filter.a.process x`, `git config merge.a.driver x`,
+    `git config gpg.program x`, `git config help.autocorrect immediate`, `git -c core.editor=x commit`, `git -c core.sshCommand=x fetch`, `git --config-env=core.pager=V log`,
+    `git --config-env core.hooksPath=V status`, `git -c core.fsmonitor=x status`])
+    assert.ok(git(c), c);
+  for (const c of [`git config core.editor`, `git config --get core.pager`, `git config --unset core.editor`, `git config user.email a@b.c`, `git config core.autocrlf false`, `git -c user.name=x status`])
+    assert.equal(git(c), null, c);
+});
+test("a variable that points git at other config or another repository refuses the git command after it", () => {
+  for (const c of [`HOME=/c/temp/h git status`, `XDG_CONFIG_HOME=/c/temp/h git log`, `GIT_DIR=/c/temp/g git status`, `GIT_COMMON_DIR=/c/temp/g git status`, `env HOME=/c/temp/h git status`,
+    `export HOME=/c/temp/h; git status`, `set GIT_DIR=/c/temp/g && git status`, `home=/c/temp/h git status`])
+    assert.ok(git(c), c);
+  const ps = (command) => decide({ tool_name: "PowerShell", tool_input: { command } }, env, { gitAlias: () => null });
+  for (const c of [`$env:GIT_CONFIG_COUNT = "1"; git status`, `$env:HOME="C:\\temp\\h"; git status`, `$env:GIT_DIR = 'C:\\temp\\g'; git log`]) assert.ok(ps(c), c);
+  assert.equal(git(`GIT_CONFIG_NOSYSTEM=1 git status`), null);
+  assert.equal(git(`GIT_TERMINAL_PROMPT=0 git fetch`), null);
+});
+test("the alias lookup runs in the folder git will use", () => {
+  const seen = [];
+  const at = (command, cwd) => decide({ tool_name: "Bash", cwd, tool_input: { command } }, env, { gitAlias: (n, dir) => { seen.push(dir); return null; } });
+  at("git zz", undefined); at("git zz", "C:\\Users\\u\\proj"); at("git -C sub zz", "C:\\Users\\u\\proj"); at("git -C /c/temp/y zz", "C:\\Users\\u\\proj"); at("git -C /c/temp/y -C z zz", undefined);
+  assert.deepEqual(seen.map((d) => String(d).toLowerCase()), ["c:/work/repo", "c:/users/u/proj", "c:/users/u/proj/sub", "c:/temp/y", "c:/temp/y/z"]);
+});
+test("git behind a launcher or a block the walker does not read is still git", () => {
+  for (const c of [`wsl git push --force`, `ssh host git push -f`, `docker exec c git push -f`, `call git push -f`, `flock /tmp/x git push -f`, `taskset 1 git push -f`,
+    `winpty git push -f`, `doas git push -f`, `runuser -u x git push -f`, `npx git push -f`, `parallel git push -f ::: a`, `su -c git push -f`, `wsl git -C app reset --hard`])
+    assert.ok(git(c), c);
+  const ps = (command) => decide({ tool_name: "PowerShell", tool_input: { command } }, env, { gitAlias: () => null });
+  for (const c of [`1 | ForEach-Object { git push -f }`, `try { git push -f } catch {}`, `Invoke-Command { git push -f }`, `$x = git push -f`, `function f { git push -f }; f`,
+    `& git push --force`, `Start-Job { git reset --hard }`])
+    assert.ok(ps(c), c);
+  for (const c of [`gh pr create --title "git push -f"`, `man git`, `npm run git-hooks`, `echo git push -f`, `grep -r "git push -f" docs/`, `wsl git status`, `ssh host git log`, `which git`])
+    assert.equal(git(c), null, c);
 });

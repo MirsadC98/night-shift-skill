@@ -268,23 +268,26 @@ const isPipe = (sep) => /\|&?$/.test(sep) && !/\|\|$/.test(sep);
 const scriptText = (s, vars, env) => expand(s, vars, env) ?? txt(s);
 
 // Git's words, read as git reads them. Global options come before the subcommand: -C and -c take the
-// next word, a few long ones take it too (or `=value`), the rest are flags. `-c alias.x=…` (and
-// include.path, which can pull aliases in from a file) would define a command the guard cannot read.
-// The delete check shares this reader, so both see the same subcommand.
+// next word, a few long ones take it too (or `=value`), the rest are flags. Returns the subcommand's
+// index, the config keys given on the command line and the -C folders. The delete check shares this
+// reader, so both see the same subcommand.
 function gitGlobals(args) {
-  let i = 0, aliasing = false;
+  let i = 0;
+  const keys = [], dirs = [];
   for (; i < args.length && args[i].startsWith("-"); i++) {
     const a = args[i];
-    let value = null;
-    if (a === "-C") i++;
-    else if (a === "-c") value = args[++i];
-    else if (/^--(git-dir|work-tree|namespace|super-prefix)$/.test(a)) i++;
-    else if (a === "--config-env") value = args[++i];
-    else if (a.startsWith("--config-env=")) value = a.slice(13);
-    if (/^(alias|include|includeif)\./i.test(value ?? "")) aliasing = true;
+    if (a === "-C") dirs.push(args[++i]);
+    else if (a === "-c" || a === "--config-env") keys.push((args[++i] ?? "").split("=")[0]);
+    else if (a.startsWith("--config-env=")) keys.push(a.slice(13).split("=")[0]);
+    else if (/^--(git-dir|work-tree|namespace|super-prefix|attr-source)$/.test(a)) i++;
   }
-  return { sub: i, aliasing };
+  return { sub: i, keys, dirs };
 }
+// Config that makes git run something the guard cannot read: an alias, a file that can define one
+// (include), or a command git calls (editor, pager, hooks, helpers, drivers). Reading a key is fine.
+const CONFIG_ALIAS = /^(alias|include|includeif)\./i;
+const CONFIG_RUNS = /^(core\.(fsmonitor|sshcommand|hookspath|editor|pager)|sequence\.editor|credential\.(.+\.)?helper|diff\.external|diff\..+\.textconv|filter\..+\.(clean|smudge|process)|merge\..+\.driver|gpg\.program|help\.autocorrect)$/i;
+const configReason = (key) => CONFIG_ALIAS.test(key) ? "git aliases are not read during a night run" : CONFIG_RUNS.test(key) ? "git settings that run commands are not changed during a night run" : null;
 // Options stop at a bare `--`. A long option may be cut short as long as it stays unambiguous
 // (`--forc`, even `--f` for clean), so any prefix of the name counts; short ones may be clustered (-uf).
 const upToDashes = (a) => { const k = a.indexOf("--"); return k < 0 ? a : a.slice(0, k); };
@@ -297,7 +300,7 @@ const wholeTree = (a) => a.some((w) => /^(\.\/?|:\/\.?)$/.test(w));
 const firstArg = (a) => a.find((w) => !w.startsWith("-"));
 const GIT_RULES = {
   push: (a) => (anyLong(a, "force", "force-with-lease", "force-if-includes", "delete", "mirror", "prune") || anyShort(a, "fd") || a.some((w) => /^[+:]/.test(w))) && "force or deleting pushes rewrite shared history",
-  reset: (a) => long(a, "hard") && "git reset --hard discards work",
+  reset: (a) => anyLong(a, "hard", "merge") && "git reset --hard discards work",
   checkout: (a) => (long(a, "force") || anyShort(a, "fB") || wholeTree(a)) && "checking out over the whole tree discards work",
   switch: (a) => (anyLong(a, "force", "discard-changes", "force-create") || anyShort(a, "fC")) && "switching by force discards work",
   // --staged alone (-S) touches the index only, nothing is lost; -s is --source, so these two stay case-sensitive.
@@ -315,16 +318,17 @@ const GIT_RULES = {
   stash: (a) => /^(drop|clear)$/.test(a[0]) && "dropping stashes discards work",
   // `git remote -v add x url` works: the options come first.
   remote: (a) => /^(add|remove|rm|set-url|rename)$/.test(firstArg(a)) && "changing remotes needs the user",
-  config: (a) => (anyLong(a, "global", "system") && "global git config is the user's") || (a.some((w, i) => /^alias\./i.test(w) && i + 1 < a.length) && "git aliases are not read during a night run"),
+  config: (a) => (anyLong(a, "global", "system") && "global git config is the user's") || a.map((w, i) => i + 1 < a.length && configReason(w)).find(Boolean) || null,
 };
 // Git's own commands the guard has no rule for: an alias cannot replace them, so nothing is looked up.
 const GIT_PLAIN = new Set(`status add log diff show fetch rev-parse ls-files describe blame grep tag mv rm init worktree cherry-pick revert apply
   bisect shortlog cat-file ls-tree rev-list for-each-ref show-ref symbolic-ref check-ignore merge-base name-rev submodule notes format-patch am archive gc help version`.split(/\s+/));
-const GIT_CONFIG_VAR = /^GIT_CONFIG_(COUNT|PARAMETERS|KEY_\d+|VALUE_\d+|GLOBAL|SYSTEM)(=|$)/;
+// Variables that point git at other config or another repository, as prefix words or an earlier assignment.
+const GIT_ENV_VAR = /^(\$env:|set:)?(GIT_CONFIG_(COUNT|PARAMETERS|KEY_\d+|VALUE_\d+|GLOBAL|SYSTEM)|HOME|XDG_CONFIG_HOME|GIT_DIR|GIT_COMMON_DIR)(=|$)/i;
 const quoteArg = (w) => `"${w.replace(/(["\\$`])/g, "\\$1")}"`;
-const configuredAlias = (name, env) => {
+const configuredAlias = (name, cwd) => {
   try {
-    const r = spawnSync("git", ["config", "--get", `alias.${name}`], { cwd: env.NIGHT_SHIFT_REPO || undefined, timeout: 3000, encoding: "utf8", windowsHide: true });
+    const r = spawnSync("git", ["config", "--get", `alias.${name}`], { cwd, timeout: 3000, encoding: "utf8", windowsHide: true });
     return r.status === 0 && r.stdout.trim() ? r.stdout.trim() : null;
   } catch { return null; }
 };
@@ -336,17 +340,21 @@ export function gitRule(args, ctx) {
   const { env, where, opts, depth } = ctx;
   if (depth > 4) return NESTED;
   args = args.map(unmark);
-  const { sub, aliasing } = gitGlobals(args);
-  if (aliasing) return "git aliases are not read during a night run";
+  const { sub, keys, dirs } = gitGlobals(args);
+  for (const k of keys) { const why = configReason(k); if (why) return why; }
   if (sub >= args.length) return null;
   const name = args[sub], a = args.slice(sub + 1), cmd = name.toLowerCase();
   if (Object.hasOwn(GIT_RULES, cmd)) return GIT_RULES[cmd](a) || null;
   if (GIT_PLAIN.has(cmd)) return null;
-  const value = (opts.gitAlias ?? ((n) => configuredAlias(n, env)))(name);
+  // The alias is read in the folder git will run in: the -C folders on top of where the command
+  // stands (or the repository when that is not known).
+  let cwd = ctx.cwd ?? (where.at && !where.lost ? where.at : env.NIGHT_SHIFT_REPO);
+  for (const d of dirs) cwd = !cwd || isAbsolute(d) ? norm(d) : norm(`${cwd}/${d}`);
+  const value = (opts.gitAlias ?? configuredAlias)(name, cwd || undefined);
   if (!value) return null;
   const inner = { ...opts, vars: new Map() };
   if (value.startsWith("!")) return checkCommand([value.slice(1), ...a.map(quoteArg)].join(" "), env, { ...where }, inner, depth + 1);
-  return gitRule([...simpleCommands(value).flatMap((c) => c.words), ...a], { env, where, opts: inner, depth: depth + 1 });
+  return gitRule([...simpleCommands(value).flatMap((c) => c.words), ...a], { env, where, opts: inner, depth: depth + 1, cwd });
 }
 
 // The commands inside "$(...)" and "`...`": the splitter cannot see them in a quoted word.
@@ -520,6 +528,10 @@ function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r) {
     if (why) return why;
   }
   recordAssignments(c.words, vars, env);
+  // PowerShell's `$env:NAME = x` and cmd's `set NAME=x` change the environment of the git after them;
+  // kept apart from the shell variables (a key no $NAME can match) and read by the git check below.
+  const pe = /^\$env:(\w+)/i.exec(c.words[0]) ?? (/^set$/i.test(c.words[0]) ? /^(\w+)=/.exec(c.words[1] ?? "") : null);
+  if (pe) vars.set(`${/^set$/i.test(c.words[0]) ? "set:" : "$env:"}${pe[1]}`, "");
   const { args, writes, here, input } = splitRedirects(c);
   for (const t of writes) { const why = writeDenial(t, env, where, vars, r); if (why) return why; }
   let ni = nameIndex(args);
@@ -587,7 +599,7 @@ function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r) {
   // Git reads GIT_CONFIG_* the way it reads -c: a variable can define an alias too. `git-push` and the
   // like are the same commands under their dashed names.
   if (nm === "git" || nm.startsWith("git-")) {
-    if (args.slice(0, ni).some((w) => GIT_CONFIG_VAR.test(w)) || [...vars.keys()].some((k) => GIT_CONFIG_VAR.test(k))) return "git aliases are not read during a night run";
+    if (args.slice(0, ni).some((w) => GIT_ENV_VAR.test(w)) || [...vars.keys()].some((k) => GIT_ENV_VAR.test(k))) return "git is not pointed at other config or another repository during a night run";
     const why = gitRule(nm === "git" ? rest : [nm.slice(4), ...rest], { env, where, opts, depth });
     if (why) return why;
   }
@@ -597,6 +609,15 @@ function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r) {
   }
   for (const t of writeTargets(nm, rest)) { const why = writeDenial(t, env, where, vars, r); if (why) return why; }
   if (PRINTS.test(nm)) return null;
+  // A launcher the walker does not read (wsl, ssh, docker exec, call, flock, a PowerShell block):
+  // wherever a word is git, the words after it are git's.
+  if (nm !== "git" && !nm.startsWith("git-")) {
+    for (let k = ni + 1; k < args.length; k++) {
+      if (base(args[k]) !== "git") continue;
+      const why = gitRule(args.slice(k + 1), { env, where, opts, depth });
+      if (why) return why;
+    }
+  }
   // Of git only `git rm` deletes; a commit message that mentions `rm -rf` is text.
   if (nm === "git") {
     if (rest[gitGlobals(rest).sub] !== "rm") return null;
