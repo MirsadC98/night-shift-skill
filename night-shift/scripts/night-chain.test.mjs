@@ -3,7 +3,8 @@
 // starts the next runner as a plain detached process instead of through Task Scheduler.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, spawnSync, execFileSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -113,11 +114,13 @@ test("reload refuses a runner from before reload, which would ignore the request
   const { repo, state, env, home } = setup();
   const ptrDir = path.join(home, ".claude", "night-shift", "runs");
   fs.mkdirSync(ptrDir, { recursive: true });
-  // The pointer of an older runner: alive (this test's pid), no "reloadable".
+  // The pointer of an older runner: alive, its command line names night-chain.mjs, no "reloadable".
+  const older = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)", "night-chain.mjs"], { stdio: "ignore" });
   const slugged = execFileSync(process.execPath, ["-e",
     `const c=require("crypto"),p=require("path");console.log(p.basename(process.argv[1])+"-"+c.createHash("sha1").update(process.argv[1].toLowerCase()).digest("hex").slice(0,8))`, repo], { encoding: "utf8" }).trim();
-  fs.writeFileSync(path.join(ptrDir, `${slugged}.json`), JSON.stringify({ pid: process.pid, state, finished: false }));
-  const out = execFileSync(process.execPath, [CHAIN, "reload", "--repo", repo], { env, encoding: "utf8" });
+  fs.writeFileSync(path.join(ptrDir, `${slugged}.json`), JSON.stringify({ pid: older.pid, state, finished: false }));
+  let out;
+  try { out = execFileSync(process.execPath, [CHAIN, "reload", "--repo", repo], { env, encoding: "utf8" }); } finally { older.kill(); }
   assert.match(out, /predates reload/);
   assert.equal(fs.existsSync(path.join(state, "RELOAD-REQUEST")), false);
 });
@@ -880,4 +883,48 @@ test("a runner that crashes writes why into chain.log and marks the run finished
   const log = await waitForLog(state, /chain ends: /);
   assert.match(log, /chain ends: the runner crashed: ENOENT/);
   assert.equal(pointerOf(home).finished, true);
+});
+
+// Pointer liveness: a throwaway home, and a launch that fails, so a start that gets past the check
+// ends with "launch refused (test)" and no scheduled task exists.
+function pointerCase(ptrOf) {
+  const { root, home, repo, state, env } = setup();
+  const slug = `${path.basename(repo)}-${crypto.createHash("sha1").update(repo.toLowerCase()).digest("hex").slice(0, 8)}`;
+  const file = path.join(home, ".claude", "night-shift", "runs", `${slug}.json`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const write = (p) => fs.writeFileSync(file, JSON.stringify({ state, task: "x", finished: false, ...p }));
+  const run = (cmd, extra = []) => spawnSync(process.execPath, [CHAIN, cmd, "--repo", repo, ...extra],
+    { env: { ...env, NIGHT_SHIFT_LAUNCH: "fail", NIGHT_SHIFT_CLAUDE: process.execPath, TEMP: root, TMP: root }, encoding: "utf8", cwd: root });
+  return { write, run, state, read: () => JSON.parse(fs.readFileSync(file, "utf8")) };
+}
+const stamped = (ms) => new Date(ms).toLocaleString("sv-SE");
+
+test("a pointer whose runner never came up does not block start for ever", () => {
+  const c = pointerCase();
+  c.write({ pid: 0, scheduledAt: "2026-01-01 00:00:00" });
+  assert.match(c.run("start", ["--prompt", "x"]).stderr, /launch refused \(test\)/);
+  c.write({ pid: 0, scheduledAt: stamped(Date.now()) });
+  assert.match(c.run("start", ["--prompt", "x"]).stderr, /a run was scheduled \d+ s ago and its runner has not come up yet; wait, or run stop/);
+});
+
+test("stop clears a pointer whose runner never started or is gone", () => {
+  const c = pointerCase();
+  c.write({ pid: 0, scheduledAt: stamped(Date.now()) });
+  assert.match(c.run("stop").stdout, /its runner never started; marked finished/);
+  assert.equal(c.read().finished, true);
+  assert.equal(c.read().reason, "its runner never started");
+  assert.ok(fs.existsSync(path.join(c.state, "STOP-REQUEST")));
+  const gone = spawnSync(process.execPath, ["-e", ""]);
+  c.write({ pid: gone.pid || 2_000_000_000, scheduledAt: stamped(Date.now()) });
+  assert.match(c.run("stop").stdout, /the runner was already gone/);
+  assert.equal(c.read().finished, true);
+});
+
+test("a pid that now belongs to another program does not block start", () => {
+  const c = pointerCase();
+  const other = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" });
+  try {
+    c.write({ pid: other.pid, scheduledAt: stamped(Date.now()) });
+    assert.match(c.run("start", ["--prompt", "x"]).stderr, /launch refused \(test\)/);
+  } finally { other.kill(); }
 });

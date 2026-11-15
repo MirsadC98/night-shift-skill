@@ -79,7 +79,7 @@ const lowerSettings = (repo) => [path.join(os.homedir(), ".claude", "settings.js
   path.join(repo, ".claude", "settings.local.json")].map((f) => parseOr(read(f), {}));
 // CLAUDE_CODE_EFFORT_LEVEL would set every level, the subagents' included.
 const withoutEffortEnv = (env) => { const { CLAUDE_CODE_EFFORT_LEVEL, ...rest } = env; return rest; };
-const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const alive = (pid) => { if (!pid) return false; try { process.kill(pid, 0); return true; } catch { return false; } };
 const cap = (s) => s[0].toUpperCase() + s.slice(1);
 // "Opus", or "Opus (claude-opus-5-5)" for a full model id: night-report.mjs reads the runs line back.
 const modelText = (p) => `${cap(p.family)}${p.model !== p.family ? ` (${p.model})` : ""}`;
@@ -156,6 +156,10 @@ const commandLine = (pid) => {
   } catch { return null; }
 };
 
+// A live pid may belong to another program once the runner died without an end line (Windows
+// reuses numbers): a runner is a live process whose command line names this file. Not knowing counts as one.
+const isRunner = (pid) => { if (!alive(pid)) return false; const line = commandLine(pid); return line === null || /night-chain\.mjs/i.test(line); };
+
 // Starts `run` for this state through the project's scheduled task and returns the task's name.
 // No trigger, so only start (or a runner handing over) runs it and a finished chain never comes
 // back on its own; no time limit (schtasks' default stops a task after 72 h) and no battery stop,
@@ -187,10 +191,16 @@ function scheduleRun(run, extra = []) {
 }
 
 // ---------------------------------------------------------------- start
+const HANDOVER_MS = 180_000;
 function start(opt) {
   const repo = repoRoot(opt.repo || process.cwd());
   const ptr = readPointer(repo);
-  if (ptr && !ptr.finished && alive(ptr.pid)) fail(`a run is already active (pid ${ptr.pid}, state ${ptr.state}); reload gives it new runner code`);
+  if (ptr && !ptr.finished) {
+    if (isRunner(ptr.pid)) fail(`a run is already active (pid ${ptr.pid}, state ${ptr.state}); reload gives it new runner code`);
+    // pid 0: scheduled, not yet picked up. Only a recent one still counts; an older one never came up.
+    const age = Date.now() - Date.parse(ptr.scheduledAt);
+    if (!ptr.pid && age < HANDOVER_MS) fail(`a run was scheduled ${Math.round(age / 1000)} s ago and its runner has not come up yet; wait, or run stop`);
+  }
 
   const cfg = projectConfig(repo);
   const state = path.resolve(typeof opt.state === "string" ? opt.state
@@ -622,7 +632,6 @@ function status(opt) {
 // pointer file's changes (fs.watch) bring the next runner of a reload. A usage-limit wait passes
 // inside the runner, so it does not wake this. Exit 0 when the chain ended (STOP, two failed
 // handovers, stop, a limit the user set), 2 when its runner died without an end line.
-const HANDOVER_MS = 180_000;
 const pointerOr = (repo) => { try { return readPointer(repo); } catch { return null; } }; // mid-write
 
 // Resolves with the PowerShell's exit code once the process is gone; 3: the pid now belongs to a
@@ -714,16 +723,17 @@ function stop(opt) {
   const ptr = readPointer(repo);
   if (!ptr || ptr.finished) return console.log("no active run");
   fs.writeFileSync(path.join(ptr.state, "STOP-REQUEST"), now());
-  if (opt.now && ptr.pid && alive(ptr.pid)) {
+  if (!isRunner(ptr.pid)) {
+    const reason = ptr.pid ? "its runner was already gone" : "its runner never started";
+    writePointer(repo, { ...ptr, finished: true, finishedAt: now(), reason });
+    return console.log(`${ptr.pid ? "the runner was already gone" : reason}; marked finished`);
+  }
+  if (opt.now) {
     // A runner that died without an end line leaves its pid in the pointer, and Windows gives
     // the number to another program: only a process that still is a runner is killed.
     const line = commandLine(ptr.pid);
     // Not knowing is no reason to kill, nor to call a live chain finished: STOP-REQUEST still ends it.
     if (line === null) return console.log(`could not check what pid ${ptr.pid} is, so nothing was killed; the chain stops after the session in progress`);
-    if (!/night-chain\.mjs/i.test(line)) {
-      writePointer(repo, { ...ptr, finished: true, finishedAt: now(), reason: "its runner was already gone" });
-      return console.log(`the runner was already gone (pid ${ptr.pid} now belongs to another program, left alone); marked finished`);
-    }
     try { execFileSync("taskkill", ["/T", "/F", "/PID", String(ptr.pid)], { stdio: "ignore", windowsHide: true }); } catch {}
     writePointer(repo, { ...ptr, finished: true, finishedAt: now(), reason: "stopped now by the user" });
     console.log("stopped now; the session in progress was killed (check git status)");
@@ -733,7 +743,7 @@ function stop(opt) {
 function reload(opt) {
   const repo = repoRoot(opt.repo || process.cwd());
   const ptr = readPointer(repo);
-  if (!ptr || ptr.finished || !alive(ptr.pid)) return console.log("no active run");
+  if (!ptr || ptr.finished || !isRunner(ptr.pid)) return console.log("no active run");
   // A runner from before reload never looks for the request; only its settings can still change.
   if (!ptr.reloadable) return console.log(`this runner predates reload and would ignore it; settings changes go into ${path.join(ptr.state, "night-settings.json")}, which every new session reads`);
   fs.writeFileSync(path.join(ptr.state, "RELOAD-REQUEST"), now());
