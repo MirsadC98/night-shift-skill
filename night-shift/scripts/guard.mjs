@@ -146,11 +146,14 @@ function dropHeredocs(cmd) {
 }
 
 // Splits a command line into simple commands at unquoted ; & | ( ) ` and newlines. Each has
-//   words  its words with their quotes removed (a $ inside single quotes is literal: kept as \0)
+//   words  its words with their quotes removed. A literal $ (inside single quotes, or \$ inside double
+//          quotes) is kept as \0 and a literal backtick as \x01, so only a live $(...) or backtick pair
+//          is a command substitution; unmark() puts them back.
 //   bare   per word, whether it began outside quotes: `> x` is a redirect, `">x"` is text
 //   sep    the separators before it as written, without ( ) ` and line breaks: "" for the first, "|" for a pipe
 //   lvl    how many ( are open, so that a cd inside ( ) can end at the )
 // An unquoted < or > starts a word of its own (`echo x>f` writes f); `2>f` and `>|f` stay one word.
+const unmark = (s) => s.replace(/\0/g, "$").replace(/\x01/g, "`");
 export function simpleCommands(text) {
   const cmds = [];
   let words = [], bare = [], word = null, wb = false, q = null, run = "", lvl = 0;
@@ -162,10 +165,10 @@ export function simpleCommands(text) {
   };
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
-    if (q === "'") { if (c === "'") q = null; else word += c === "$" ? "\0" : c; continue; }
+    if (q === "'") { if (c === "'") q = null; else word += c === "$" ? "\0" : c === "`" ? "\x01" : c; continue; }
     if (q === '"') {
       if (c === '"') q = null;
-      else if (c === "\\" && /["\\$`]/.test(text[i + 1] || "")) word += text[++i];
+      else if (c === "\\" && /["\\$`]/.test(text[i + 1] || "")) { const n = text[++i]; word += n === "$" ? "\0" : n === "`" ? "\x01" : n; }
       else word += c;
       continue;
     }
@@ -198,7 +201,7 @@ function expand(word, vars, env) {
     return value;
   });
   if (unresolved || out.includes("$")) return null;
-  return out.replace(/\0/g, "$");
+  return unmark(out);
 }
 
 // A command made only of assignments (`D=C:/temp/x`, `export D=...`) sets them for the
@@ -244,9 +247,21 @@ function protectedTargets(r) {
 // Words a command's own name can hide behind: `sudo`, `env X=1`, `builtin`, and the keywords that
 // open a branch or a loop (`if cd x; then rm y`). Skipped, with NAME=value words, to reach the name.
 export const PREFIX_WORDS = /^(sudo|command|exec|time|env|nohup|builtin|if|then|else|elif|do|while|until|!|\{)$/;
+// Launchers run the command that follows them: [options that take a value, positional words of their own, what an option looks like].
+const LAUNCHERS = {
+  timeout: [/^-[ks]$|^--(kill-after|signal)$/, 1], nice: [/^-n$|^--adjustment$/, 0], ionice: [/^-[cnpPu]$/, 0],
+  setsid: [/^$/, 0], stdbuf: [/^-[ioe]$/, 0], watch: [/^-n$|^--interval$/, 0], start: [/^$/, 0, /^\//],
+};
 function nameIndex(words) {
   for (let i = 0; i < words.length; i++) {
     if (/^[A-Za-z_]\w*=/.test(words[i])) continue;
+    const launcher = LAUNCHERS[base(words[i])];
+    if (launcher) {
+      const [value, positional, option = /^-/] = launcher;
+      while (option.test(words[i + 1] ?? "")) { i++; if (value.test(words[i])) i++; }
+      i += positional;
+      continue;
+    }
     if (!PREFIX_WORDS.test(words[i])) return i;
     // env, sudo and the like take options of their own, some with a value (env -u NAME, sudo -u user).
     if (/^(sudo|env|command|exec|time|nohup)$/.test(words[i])) {
@@ -263,7 +278,7 @@ const GIT_RULES = GENERIC.filter(isGitRule), OTHER_RULES = GENERIC.filter((r) =>
 const PRINTS = /^(grep|egrep|fgrep|rg|findstr|select-string|sls|echo|printf|write-output|write-host|cat|type|head|tail|jq|wc)$/;
 const SHELL_NAME = /^(bash|sh|zsh|dash|pwsh|powershell|cmd)$/;
 const base = (w) => w.replace(/^.*[\\/]/, "").replace(/\.exe$/i, "").toLowerCase();
-const txt = (w) => w.replace(/\0/g, "$");
+const txt = unmark;
 const isPipe = (sep) => /\|&?$/.test(sep) && !/\|\|$/.test(sep);
 // A script word as the shell that runs it will see it: this shell's own $NAMEs filled in where
 // they are known, the single-quoted $ left for the inner shell to read.
@@ -277,7 +292,7 @@ function gitDenial(text) {
   for (const [re, reason] of GIT_RULES) if (re.test(unquoted)) return reason;
   return null;
 }
-const quoteJoin = (ws) => ws.map((w) => (/\s/.test(w) ? `"${w}"` : w)).join(" ").replace(/\0/g, "$");
+const quoteJoin = (ws) => ws.map((w) => (/\s/.test(w) ? `"${w}"` : w)).join(" ").replace(/\0/g, "$").replace(/\x01/g, "`");
 
 // The commands inside "$(...)" and "`...`": the splitter cannot see them in a quoted word.
 function substitutions(word) {
@@ -407,7 +422,7 @@ function checkDelete(words, ni, env, where, vars, r) {
     if (t === null) {
       // `for f in *.tmp; do rm "$f"; done` is everyday work; a tree deleted through an unknown path is not.
       if (!recursive) continue;
-      return `refusing a recursive delete through a variable path that cannot be resolved (${raw.replace(/\0/g, "$")})`;
+      return `refusing a recursive delete through a variable path that cannot be resolved (${unmark(raw)})`;
     }
     if (isFind && !expr) {
       // find's leading options (-H -L -P -Olevel -D opts) come before its paths: the paths are still targets.
@@ -455,11 +470,14 @@ function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r) {
   let ni = nameIndex(args);
   if (ni < 0) return null;
   // A name that is a variable can be any command; a PowerShell $x alone is an expression, only `& $x` runs it.
+  // A variable in the folder part ($HOME/bin/tool) leaves the command itself in view.
   if (args[ni].includes("$") && !(opts.ps && !/&$/.test(c.sep))) {
     const v = expand(args[ni], vars, env);
-    if (v === null) return "a command named by a variable cannot be read";
-    args.splice(ni, 1, ...v.split(/\s+/).filter(Boolean));
-    if (ni >= args.length) return null;
+    if (v === null) { if (base(args[ni]).includes("$")) return "a command named by a variable cannot be read"; }
+    else {
+      args.splice(ni, 1, ...v.split(/\s+/).filter(Boolean));
+      if (ni >= args.length) return null;
+    }
   }
   const nm = base(args[ni]), rest = args.slice(ni + 1);
   if (POP_WORD.test(nm)) { where.lost = true; return null; }
@@ -518,6 +536,12 @@ function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r) {
   }
   for (const t of writeTargets(nm, rest)) { const why = writeDenial(t, env, where, vars, r); if (why) return why; }
   if (PRINTS.test(nm)) return null;
+  // Of git only `git rm` deletes; a commit message that mentions `rm -rf` is text.
+  if (nm === "git") {
+    let k = 0;
+    while (k < rest.length && /^-/.test(rest[k])) k += /^-[Cc]$|^--(git-dir|work-tree)$/.test(rest[k]) ? 2 : 1;
+    if (rest[k] !== "rm") return null;
+  }
   return checkDelete(args, ni, env, where, vars, r);
 }
 
