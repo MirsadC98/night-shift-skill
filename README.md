@@ -2,16 +2,16 @@
 
 A [Claude Code](https://claude.com/claude-code) skill that keeps work going for hours while you are away, such as overnight.
 
-It runs a chain of fresh headless sessions (`claude -p`). Each session is like typing `/clear` and pasting a continuation prompt. A session does one finished piece of an approved plan, commits it, adds its section to a night report and writes the prompt for the next session. The chain stops when a session writes `STOP`, when two handovers fail in a row, or when you stop it. When it hits a usage limit, it waits for the reset and resumes the same session.
+It runs a chain of fresh headless sessions (`claude -p`). Each session is like opening a fresh chat and pasting a continuation prompt. A session does one finished piece of an approved plan, commits it, adds its section to a night report and writes the prompt for the next session. The chain stops when a session writes `STOP`, when two handovers fail in a row, or when you stop it. When it hits a usage limit, it waits for the reset and resumes the same session.
 
 ## Read this first
 
 - **Windows only.** The runner starts itself through Task Scheduler in a hidden console (`conhost --headless`) and uses PowerShell, so it keeps running after your editor closes.
 - **Opinionated.** It was built for one person's workflow, and `SKILL.md` quotes that person's rules. Read it and change what doesn't fit you.
 - **Partly in Turkish.** A night session's prompt must start with `Gece vardiyası (night-shift)`. The Telegram cards, the status lines and some rules are in Turkish.
-- **It assumes a `~/.claude/CLAUDE.md` you will have to write yourself.** `SKILL.md` and `references/interactive.md` point to two sections of it: "Subagent models and efforts" and the `/clear` continuation-prompt rule. Write your own versions or edit those lines.
+- **It assumes a `~/.claude/CLAUDE.md` you will have to write yourself.** `SKILL.md` points to one section of it, "Models and effort", for the models and levels subagents run at. Write your own version or edit that line.
 - **It runs unattended with no permission prompts.** Sessions run with `--permission-mode auto --permission-prompts none`, and `AskUserQuestion` and plan mode are turned off. `scripts/guard.mjs` is a hook that blocks dangerous commands (see below). It is a safety net, not a sandbox. Run it only on a repository you have committed and can restore.
-- **It costs tokens.** By default every session runs Opus at `xhigh`, subagents run Sonnet at `medium` and Haiku at `high`, and the chain has no end time. Use `--max-sessions` or `--until` if you want a limit.
+- **It costs tokens.** By default every session runs Opus at `xhigh`, subagents run Sonnet at `medium` and Haiku at `high`, and the chain has no end time. Use `--max-sessions` or `--until` if you want a limit. A session whose prompt opens with `MODEL: fable` runs on Fable at `high`; `SKILL.md` allows that for one hard piece only. Fable has its own weekly allowance, so the runner grants it only while less than 60 % of that allowance is used, and to at most two sessions in a chain while the share is unknown. A piece it refuses, or one the allowance cuts off, runs on Opus at `max`.
 
 ## Requirements
 
@@ -43,7 +43,7 @@ node ~/.claude/skills/night-shift/scripts/night-chain.mjs stop   --repo <dir> [-
 node ~/.claude/skills/night-shift/scripts/night-chain.mjs reload --repo <dir>
 ```
 
-`start` also takes `--until HH:MM`, `--max-sessions <n>`, `--model <m>`, `--effort <level>`, `--state <dir>` (continue in an earlier run's folder) and `--window` (a visible console; closing it stops the chain).
+`start` also takes `--until HH:MM`, `--max-sessions <n>`, `--model <m>`, `--effort <level>`, `--fable-ceiling <share>`, `--fable-sessions <n>`, `--state <dir>` (continue in an earlier run's folder) and `--window` (a visible console; closing it stops the chain).
 
 While a chain runs, write new work or changed rules into `<state>/inbox.md`. The next session reads that file first.
 
@@ -58,6 +58,8 @@ Put a `.claude/night-shift.json` in the target repository. Every key is optional
   "lessons": "docs/agents/NOTES.md",
   "model": "opus",
   "effort": "xhigh",
+  "fableCeiling": 0.6,
+  "fableSessions": 2,
   "deny": [
     { "pattern": "\\bmy-app\\.exe\\b", "reason": "that is the app running on my desktop" }
   ]
@@ -67,6 +69,8 @@ Put a `.claude/night-shift.json` in the target repository. Every key is optional
 - `stateDir`: the folder for the chain's log, prompts and inbox. The default is `<temp>/night-shift-<repo>-{date}`, inside your own profile. A folder under `C:/temp` is shorter to type, but on a PC with other accounts those users can write there too, and the next session reads `inbox.md` and `next-prompt.md` from this folder as instructions. On a shared PC keep the default.
 - `report`: the night report. The default is `NIGHT_RUNS.md`.
 - `lessons`: the notes file where sessions keep lessons that outlast one session.
+- `model`, `effort`: what a session runs on when its prompt names neither.
+- `fableCeiling`, `fableSessions`: the share of Fable's weekly allowance above which a `MODEL: fable` prompt runs on Opus at `max` instead, and how many Fable sessions a chain may run while that share is unknown.
 - `deny`: your own guard rules. `pattern` is a regular expression and `flags` defaults to `i`.
 
 ## The guard

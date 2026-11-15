@@ -137,6 +137,12 @@ test("cutOffSession: only a session that started (or resumed) and never ended co
   assert.equal(cutOffSession(state), null);
   log(["session 36 starts: x"]);
   assert.equal(cutOffSession(state), null, "no stream, no conversation to resume");
+  // From 2026-11-15 the runs line says what it ran on, so the resume goes on on the same model.
+  log(["session 35 starts: x", "session 35 runs Fable at high"]);
+  assert.deepEqual(cutOffSession(state), { nn: "35", sessionId: "cb61ff92-x", model: "fable", effort: "high" });
+  log(["session 35 starts: x", "session 35 asked for Fable, but its allowance is used up until 2026-11-18 10:00; it runs on Opus at max",
+    "session 35 runs Opus (claude-opus-5-5) at max"]);
+  assert.deepEqual(cutOffSession(state), { nn: "35", sessionId: "cb61ff92-x", model: "claude-opus-5-5", effort: "max" });
 });
 
 test("a stopped session resumes with its own header, and settings added by hand survive run", async () => {
@@ -171,18 +177,19 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
   assert.equal(s.env.CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS, "0");
   assert.equal(s.hooks.SessionStart[0].hooks[0].command, "cleanup.ps1");
   assert.match(s.hooks.PreToolUse[0].hooks[0].args[0], /guard\.mjs$/);
-  assert.deepEqual(s.modelSettings, { opus: { effortLevel: "xhigh" }, sonnet: { effortLevel: "medium" }, haiku: { effortLevel: "high" } });
+  assert.deepEqual(s.modelSettings, { opus: { effortLevel: "xhigh" }, fable: { effortLevel: "high" }, sonnet: { effortLevel: "medium" }, haiku: { effortLevel: "high" } });
   assert.equal(s.autoContinueAtUsageLimit, true);
   assert.equal(s.outputStyle, "default");
 });
 
-test("the runner picks model and effort: Opus always, max only for a prompt that opens with EFFORT: max", async () => {
+test("the runner picks model and effort: Opus unless a prompt asks for Fable, max only for a prompt that opens with EFFORT: max", async () => {
   const { state, env, root, home, repo } = setup();
   const fake = path.join(root, "fake-effort.mjs");
   fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path";
 const st = process.env.NIGHT_SHIFT_STATE, n = process.env.NIGHT_SHIFT_SESSION; let input = "";
 for await (const c of process.stdin) input += c;
-fs.writeFileSync(path.join(st, "seen-" + n + ".json"), JSON.stringify({ args: process.argv.slice(2), input, effortEnv: process.env.CLAUDE_CODE_EFFORT_LEVEL ?? null }));
+fs.writeFileSync(path.join(st, "seen-" + n + ".json"), JSON.stringify({ args: process.argv.slice(2), input, effortEnv: process.env.CLAUDE_CODE_EFFORT_LEVEL ?? null,
+  noFallback: process.env.CLAUDE_CODE_NO_MODEL_FALLBACK ?? null }));
 fs.writeFileSync(path.join(st, "next-prompt.md"), n === "1" ? "plain piece" : "STOP: done");
 console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-" + n, result: "ok" }));
 `);
@@ -219,7 +226,10 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
   assert.equal(s.env.CLAUDE_CODE_SUBAGENT_MODEL, "sonnet");
   assert.deepEqual(s.modelSettings, {
     opus: { effortLevel: "xhigh" }, "claude-opus-5-5": { effortLevel: "xhigh" },
+    fable: { effortLevel: "high" }, "claude-fable-5-2": { effortLevel: "high" },
     sonnet: { effortLevel: "medium" }, "claude-sonnet-5-5": { effortLevel: "medium" }, haiku: { effortLevel: "high" } });
+  assert.match(log, /session 02 runs Opus at xhigh\n/);
+  assert.equal(one.noFallback, null, "the model fallback stays on for Opus");
 });
 
 test("a retry keeps the EFFORT line of the prompt it retries on top, so the same piece runs at the same level", async () => {
@@ -245,6 +255,137 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
   assert.doesNotMatch(two.input, /^EFFORT:/m);
   assert.match(log, /session 02 runs Opus at max/);
   assert.match(fs.readFileSync(path.join(state, "prompts", "02.md"), "utf8"), /^EFFORT: max\n/);
+});
+
+// ---------------------------------------------------------------- Fable
+// A stand-in that notes what each session got (its flags, input, env and the settings layer) and
+// then does what the test's SCRIPT says for its session number: write a next prompt, send a limit
+// event, end refused.
+const FABLE_FAKE = `import fs from "node:fs"; import path from "node:path";
+const st = process.env.NIGHT_SHIFT_STATE, n = process.env.NIGHT_SHIFT_SESSION; let input = "";
+for await (const c of process.stdin) input += c;
+const settings = JSON.parse(fs.readFileSync(path.join(st, "night-settings.json"), "utf8")).modelSettings;
+fs.writeFileSync(path.join(st, "seen-" + n + ".json"), JSON.stringify({ args: process.argv.slice(2), input, settings,
+  noFallback: process.env.CLAUDE_CODE_NO_MODEL_FALLBACK ?? null }));
+const step = JSON.parse(process.env.TEST_SCRIPT)[n] || {};
+if (step.fable != null) console.log(JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "allowed",
+  unifiedWindows: { five_hour: { utilization: 0.4 }, seven_day: { utilization: 0.3 }, seven_day_overage_included: { utilization: step.fable, resetsAt: step.resets } } } }));
+if (step.next != null) fs.writeFileSync(path.join(st, "next-prompt.md"), step.next);
+console.log(JSON.stringify(step.refuse
+  ? { type: "result", subtype: "success", is_error: true, api_error: step.refuse, num_turns: 1, total_cost_usd: 0, session_id: "fake-" + n, result: "refused" }
+  : { type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-" + n, result: "ok" }));
+`;
+async function fableRun(first, script, runPatch = {}) {
+  const { state, env, root } = setup();
+  const fake = path.join(root, "fake-fable.mjs");
+  fs.writeFileSync(fake, FABLE_FAKE);
+  const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+  fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake, maxSessions: null, ...runPatch }));
+  fs.writeFileSync(path.join(state, "next-prompt.md"), first);
+  const { code } = await runOnce(["--state", state, "--headless"], { ...env, TEST_SCRIPT: JSON.stringify(script) }, root);
+  const log = fs.readFileSync(path.join(state, "chain.log"), "utf8");
+  assert.equal(code, 0, log);
+  const seen = (n) => JSON.parse(fs.readFileSync(path.join(state, `seen-${n}.json`), "utf8"));
+  const flag = (s, f) => (s.args.includes(f) ? s.args[s.args.indexOf(f) + 1] : null);
+  const fable = () => JSON.parse(fs.readFileSync(path.join(state, "fable.json"), "utf8"));
+  return { state, log, seen, flag, fable };
+}
+
+test("a MODEL: fable prompt runs that session on Fable at high without the model fallback; the next one on Opus", async () => {
+  const resets = Math.floor(Date.now() / 1000) + 3 * 86_400;
+  const { log, seen, flag, fable } = await fableRun("MODEL: fable — the parser resisted Opus twice\nhard piece", {
+    1: { fable: 0.2, resets, next: `plain piece\n${"x".repeat(31_000)}` }, 2: { next: "STOP: done" } });
+  const [one, two] = [seen(1), seen(2)];
+  assert.equal(flag(one, "--model"), "fable");
+  assert.equal(flag(one, "--effort"), null, "high goes through the settings layer");
+  assert.equal(one.settings.fable.effortLevel, "high");
+  assert.equal(one.settings.opus.effortLevel, "xhigh");
+  assert.equal(one.noFallback, "1");
+  assert.doesNotMatch(one.input, /^MODEL:/m);
+  assert.match(one.input, /\n---\nthe parser resisted Opus twice\nhard piece\n$/);
+  assert.match(one.input, /Bu oturum Fable'da, yalnız bu parça için/);
+  assert.equal(flag(two, "--model"), "opus");
+  assert.equal(two.noFallback, null);
+  assert.doesNotMatch(two.input, /Fable'da/);
+  assert.match(log, /session 01 starts: the parser resisted Opus twice\n/);
+  assert.match(log, /session 01 runs Fable at high\n/);
+  assert.match(log, /session 01 limits: 5h 40%→40% · 7d 30%→30% · fable 20%→20%; it ran on no model reply/);
+  assert.match(log, /session 01 wrote a next-prompt\.md of 31 KB \(over 30 KB\)/);
+  assert.match(log, /session 02 runs Opus at xhigh\n/);
+  assert.deepEqual(fable(), { sessions: 1, ratio: 0.2, ratioResetsAt: resets, ratioAt: fable().ratioAt });
+});
+
+test("a Fable session its allowance cuts off goes on from its prompt on Opus at max, and so do later Fable requests", async () => {
+  const resets = Math.floor(Date.now() / 1000) + 3 * 86_400;
+  const { state, log, seen, flag, fable } = await fableRun("MODEL: fable\nhard piece", {
+    1: { fable: 1, resets, refuse: "model_requires_usage_credits" },
+    2: { next: "MODEL: fable\nanother hard piece" }, 3: { next: "STOP: done" } });
+  const [two, three] = [seen(2), seen(3)];
+  assert.equal(flag(two, "--model"), "opus");
+  assert.equal(flag(two, "--effort"), "max");
+  assert.equal(two.noFallback, null);
+  assert.match(two.input, /Önceki Fable oturumu \(01\) Fable payı bittiği için kesildi/);
+  assert.match(two.input, /git status ve git diff/);
+  assert.match(two.input, /\n\nhard piece\n$/);
+  assert.doesNotMatch(two.input, /^(MODEL|EFFORT):/m);
+  assert.match(fs.readFileSync(path.join(state, "prompts", "02.md"), "utf8"), /^EFFORT: max\n/);
+  assert.equal(fs.existsSync(path.join(state, "resume.json")), false);
+  assert.equal(fable().outUntil, resets * 1000 + 60_000);
+  assert.match(log, /session 01: Fable's allowance is used up \(model_requires_usage_credits\) until \S+ \S+; limit record null/);
+  assert.match(log, /session 01's piece goes on in the next session on Opus at max/);
+  assert.match(log, /session 02 runs Opus at max \(its prompt asks for it\)/);
+  // The next Fable request runs on Opus at max until the allowance resets.
+  assert.equal(flag(three, "--model"), "opus");
+  assert.equal(flag(three, "--effort"), "max");
+  assert.match(three.input, /İstem MODEL: fable istedi/);
+  assert.match(three.input, /\n---\nanother hard piece\n$/);
+  assert.match(log, /session 03 asked for Fable, but its allowance is used up until \S+ \S+; it runs on Opus at max\n/);
+  assert.match(log, /session 03 runs Opus at max\n/);
+  const { sessionMessage } = await import("./night-report.mjs");
+  assert.match(sessionMessage(state, "01", process.pid).text, /Fable payı bittiği için kesildi/);
+  assert.match(sessionMessage(state, "03", process.pid).text, /Fable istedi, Opus max'te çalıştı \(Fable payı \S+ \S+'e kadar bitti\)/);
+  assert.doesNotMatch(sessionMessage(state, "03", process.pid).text, /olmalı/);
+});
+
+test("over the Fable ceiling, or past the count while the share is unknown, a Fable request runs on Opus at max", async () => {
+  const resets = Math.floor(Date.now() / 1000) + 3 * 86_400;
+  const over = await fableRun("MODEL: fable\nfirst", { 1: { fable: 0.55, resets, next: "MODEL: fable\nsecond" }, 2: { next: "STOP: done" } },
+    { fableCeiling: 0.5 });
+  assert.equal(over.flag(over.seen(1), "--model"), "fable");
+  assert.equal(over.flag(over.seen(2), "--model"), "opus");
+  assert.equal(over.flag(over.seen(2), "--effort"), "max");
+  assert.match(over.log, /session 02 asked for Fable, but its allowance is at 55%, at or over the 50% ceiling; it runs on Opus at max/);
+  const count = await fableRun("MODEL: fable\nfirst", { 1: { next: "MODEL: fable\nsecond" }, 2: { next: "STOP: done" } }, { fableSessions: 1 });
+  assert.equal(count.flag(count.seen(2), "--model"), "opus");
+  assert.match(count.log, /session 02 asked for Fable, but 1 Fable sessions already ran in this chain while its allowance's share is unknown/);
+  assert.equal(count.fable().sessions, 1);
+});
+
+test("a retry keeps both MODEL and EFFORT; a resume goes on on the model it ran on", async () => {
+  const retry = await fableRun("MODEL: fable\nEFFORT: xhigh\nhard piece", { 2: { next: "STOP: done" } });
+  const two = retry.seen(2);
+  assert.equal(retry.flag(two, "--model"), "fable");
+  assert.equal(retry.flag(two, "--effort"), null);
+  assert.equal(two.settings.fable.effortLevel, "xhigh");
+  assert.match(two.input, /devam promptu yazmadan bitti[^]*\n\nhard piece\n$/);
+  assert.match(fs.readFileSync(path.join(retry.state, "prompts", "02.md"), "utf8"), /^MODEL: fable\nEFFORT: xhigh\nÖnceki gece oturumu/);
+  assert.match(retry.log, /session 02 runs Fable at xhigh\n/);
+
+  const { state, env, root } = setup();
+  const fake = path.join(root, "fake-fable.mjs");
+  fs.writeFileSync(fake, FABLE_FAKE);
+  const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+  fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake, maxSessions: null }));
+  fs.writeFileSync(path.join(state, "next-prompt.md"), "plain piece");
+  fs.writeFileSync(path.join(state, "resume.json"), JSON.stringify({ nn: "03", sessionId: "fake-3", why: "limit", model: "fable", effort: "high" }));
+  const { code } = await runOnce(["--state", state, "--headless"], { ...env, TEST_SCRIPT: JSON.stringify({ 3: { next: "STOP: done" } }) }, root);
+  assert.equal(code, 0, fs.readFileSync(path.join(state, "chain.log"), "utf8"));
+  const three = JSON.parse(fs.readFileSync(path.join(state, "seen-3.json"), "utf8"));
+  assert.deepEqual(three.args.slice(three.args.indexOf("--model"), three.args.indexOf("--model") + 2), ["--model", "fable"]);
+  assert.ok(three.args.includes("--resume"));
+  assert.equal(three.noFallback, "1");
+  assert.match(fs.readFileSync(path.join(state, "chain.log"), "utf8"), /session 03 runs Fable at high\n/);
+  assert.equal(fs.existsSync(path.join(state, "fable.json")), false, "a resumed Fable session is not a new one");
 });
 
 test("a runner in a visible console moves to a hidden one, and puts back the pointer its old parent marks finished", async () => {
@@ -458,6 +599,38 @@ test("a session its prompt put at max is not flagged for running at max; one at 
   fs.writeFileSync(path.join(state, "session-02.jsonl"), `${turn("high")}\n${ok}\n`);
   assert.doesNotMatch(sessionMessage(state, "01", process.pid).text, /olmalı/);
   assert.match(sessionMessage(state, "02", process.pid).text, /düzey high \(xhigh olmalı\)/);
+});
+
+test("a Fable session at high is not flagged, an Opus one at high is, and the cards show Fable's share", async () => {
+  const { sessionMessage, buildReport } = await import("./night-report.mjs");
+  const { state } = setup();
+  fs.writeFileSync(path.join(state, "chain.log"), [
+    "[2026-11-15 22:00:00] chain starts in x, until the work is done, from session 1",
+    "[2026-11-15 22:00:00] session 01 starts: hard piece",
+    "[2026-11-15 22:00:00] session 01 runs Fable at high",
+    "[2026-11-15 22:30:00] session 01 ends: success, 2 turns, $1.00",
+    "[2026-11-15 22:30:00] session 02 starts: plain piece",
+    "[2026-11-15 22:30:00] session 02 runs Opus at xhigh",
+    "[2026-11-15 23:00:00] session 02 ends: success, 2 turns, $1.00",
+  ].join("\n") + "\n");
+  fs.writeFileSync(path.join(state, "prompts", "01.md"), "MODEL: fable\nhard piece");
+  fs.writeFileSync(path.join(state, "prompts", "02.md"), "plain piece");
+  const turn = (e, model) => JSON.stringify({ type: "assistant", perTurnEffort: e, message: { model, usage: { input_tokens: 1, output_tokens: 1 }, content: [] } });
+  const event = (w) => JSON.stringify({ type: "rate_limit_event", rate_limit_info: { unifiedWindows: w } });
+  const ok = JSON.stringify({ type: "result", subtype: "success", is_error: false, session_id: "x" });
+  fs.writeFileSync(path.join(state, "session-01.jsonl"), [event({ five_hour: { utilization: 0.4 }, seven_day: { utilization: 0.3 },
+    seven_day_overage_included: { utilization: 0.25, resetsAt: 1795300000 } }), turn("high", "claude-fable-5-2"), ok].join("\n") + "\n");
+  fs.writeFileSync(path.join(state, "session-02.jsonl"), [event({ five_hour: { utilization: 0.45 }, seven_day: { utilization: 0.31 } }),
+    turn("high", "claude-opus-5-5"), ok].join("\n") + "\n");
+  const one = sessionMessage(state, "01", process.pid).text;
+  assert.doesNotMatch(one, /olmalı/);
+  assert.match(one, /7g %30 · Fable %25/);
+  assert.match(sessionMessage(state, "02", process.pid).text, /düzey high \(xhigh olmalı\)/);
+  assert.doesNotMatch(sessionMessage(state, "02", process.pid).text, /Fable %/);
+  const plain = buildReport(state, { focus: "all", pid: 0 }).plain;
+  assert.match(plain, /limit 5s %40→%40 · 7g %30→%30 · Fable %25→%25/);
+  assert.match(plain, /#01 başı  5s %40  7g %30  F %25/);
+  assert.match(plain, /sıfırlanma: .* · Fable \d\d\.\d\d \d\d:\d\d/);
 });
 
 test("a Telegram request that never answers gives up after its own timeout", { timeout: 15_000 }, async () => {

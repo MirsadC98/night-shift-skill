@@ -21,7 +21,7 @@ import os from "node:os";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { sessionCard, eventLine, chainCard, statusCard, reportCard, reportSection, chainProgress, progressText } from "./telegram-cards.mjs";
-import { promptEffort } from "./effort.mjs";
+import { sessionPlan } from "./effort.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const TELEGRAM = path.join(os.homedir(), ".claude", "night-shift", "telegram.json");
@@ -237,6 +237,12 @@ function collect(state, pid = null) {
       if (s) Object.assign(s, { end: null, resumes: [...(s.resumes || []), e.at] });
     }
     else if ((m = /^session (\d+) ends: (.*)$/.exec(e.text))) Object.assign(sessions.findLast((s) => s.nn === m[1]) || {}, { end: e.at, summary: m[2] });
+    // What the runner said about a session's model and handover (night-chain.mjs, 2026-11-15 on).
+    else if ((m = /^session (\d+)(?::| )/.exec(e.text))) {
+      const s = sessions.findLast((x) => x.nn === m[1]);
+      const note = runnerNote(e.text);
+      if (s && note) s.notes = [...(s.notes || []), note];
+    }
   }
   // A restarted chain logs "chain starts" again; only an end after the last start counts.
   const ended = events.slice(events.findLastIndex((e) => e.text.startsWith("chain starts ")) + 1)
@@ -263,6 +269,7 @@ function collect(state, pid = null) {
     if (s.result?.is_error || (s.result && s.result.subtype !== "success")) issues.push(`❌ #${s.nn} hata ile bitti (${esc(s.result.subtype)})`);
     if (s.end && !s.result) issues.push(`❌ #${s.nn} sonuç satırı olmadan bitti (${esc(s.summary || "")})`);
     if (s.denials.length) issues.push(`⚠️ #${s.nn} guard ${s.denials.length} kez reddetti: ${esc(s.denials.slice(0, 2).join("; "))}`);
+    for (const n of s.notes || []) issues.push(`⚠️ #${s.nn} ${esc(n)}`);
     if (!s.end && running && Date.now() - s.mtime > QUIET_MINUTES * 60_000) {
       issues.push(`⚠️ #${s.nn} ${minutes(Date.now() - s.mtime)}'dır sessiz (son adım: ${esc(s.lastStep || "?")})`);
     }
@@ -275,6 +282,23 @@ function collect(state, pid = null) {
   if (!ended && !running) issues.push("🛑 Runner çalışmıyor ve zincir bitti demedi (pencere kapanmış ya da yeniden başlatılmış olabilir)");
   const nextPrompt = read(path.join(state, "next-prompt.md")).trim();
   return { state, run, events, parsed, ended, running, issues, nextPrompt, sections: new Map() };
+}
+
+// A chain.log line about a session's model or handover, as a problem of that job (null for others).
+const FABLE_WHY = [[/used up until (\S+ \S+)/, (m) => `Fable payı ${m[1]}'e kadar bitti`],
+  [/is at (\S+), at or over the (\S+) ceiling/, (m) => `Fable payı ${m[1]}, ${m[2]} tavanında`],
+  [/(\d+) Fable sessions already ran/, (m) => `zincir ${m[1]} Fable oturumu çalıştırdı, pay bilinmiyor`]];
+function runnerNote(text) {
+  let m;
+  if ((m = /^session \d+ asked for Fable, but (.*); it runs on Opus at max$/.exec(text))) {
+    const why = FABLE_WHY.map(([re, say]) => { const w = re.exec(m[1]); return w && say(w); }).find(Boolean) || m[1];
+    return `Fable istedi, Opus max'te çalıştı (${why})`;
+  }
+  if (/^session \d+: Fable's allowance is used up/.test(text)) return "Fable payı bittiği için kesildi; parçası Opus max'te sürer";
+  if ((m = /^session \d+ was to run on Fable, but (.*)$/.exec(text))) return `Fable'da çalışmadı: ${m[1]}`;
+  if ((m = /^session \d+ wrote a next-prompt\.md of (\d+) KB/.exec(text))) return `devam promptu ${m[1]} KB (30 KB üstü; her çağrıda baştan okunur)`;
+  if ((m = /^session \d+: MODEL: (\S+) is not a model/.exec(text))) return `MODEL: ${m[1]} tanınmadı, Opus'ta çalıştı`;
+  return null;
 }
 
 // A job's night-report section, read once per collect (the report runs to thousands of lines).
@@ -347,7 +371,12 @@ export function buildReport(state, { headline = "", focus = null, pid = null } =
     const u = r.usage;
     return `${`${r.kind} ${modelName(r.model)}`.padEnd(15)} ${count.padEnd(10)} ${cost}\n  gir ${tokens(u.input)} oku ${tokens(u.read)} yaz ${tokens(u.write)} çık ${tokens(u.output)}`;
   }).join("\n");
-  const limitSpan = (ls) => (ls.length ? `5s ${pct(ls[0].unifiedWindows?.five_hour?.utilization)}→${pct(ls.at(-1).unifiedWindows?.five_hour?.utilization)} · 7g ${pct(ls[0].unifiedWindows?.seven_day?.utilization)}→${pct(ls.at(-1).unifiedWindows?.seven_day?.utilization)}` : "—");
+  // Fable's share comes only with Fable calls, so it spans the events that carry it.
+  const fableSpan = (ls) => {
+    const f = ls.map(fableOf).filter(Boolean);
+    return f.length ? ` · Fable ${pct(f[0].utilization)}→${pct(f.at(-1).utilization)}` : "";
+  };
+  const limitSpan = (ls) => (ls.length ? `5s ${pct(ls[0].unifiedWindows?.five_hour?.utilization)}→${pct(ls.at(-1).unifiedWindows?.five_hour?.utilization)} · 7g ${pct(ls[0].unifiedWindows?.seven_day?.utilization)}→${pct(ls.at(-1).unifiedWindows?.seven_day?.utilization)}${fableSpan(ls)}` : "—");
   const sessionCost = (s) => (s.result ? usd(s.result.total_cost_usd || 0)
     : s.rows.some((r) => r.cost != null) ? `≈${usd(s.rows.reduce((a, r) => a + (r.cost || 0), 0))} (sürüyor)` : "iş bitince");
 
@@ -376,13 +405,17 @@ export function buildReport(state, { headline = "", focus = null, pid = null } =
   for (const s of parsed) {
     if (!s.limits.length) continue;
     const w = (l) => l.unifiedWindows || {};
-    timeline.push(`${hm(when(s.start))} #${s.nn} başı  5s ${pct(w(s.limits[0]).five_hour?.utilization).padEnd(4)} 7g ${pct(w(s.limits[0]).seven_day?.utilization)}`);
-    timeline.push(`${s.end ? hm(when(s.end)) : hm(new Date())} #${s.nn} ${s.end ? "sonu " : "şimdi"} 5s ${pct(w(s.limits.at(-1)).five_hour?.utilization).padEnd(4)} 7g ${pct(w(s.limits.at(-1)).seven_day?.utilization)}`);
+    const fs0 = s.limits.map(fableOf).filter(Boolean);
+    const f = (x) => (fs0.length ? ` F ${pct(x?.utilization)}` : "");
+    timeline.push(`${hm(when(s.start))} #${s.nn} başı  5s ${pct(w(s.limits[0]).five_hour?.utilization).padEnd(4)} 7g ${pct(w(s.limits[0]).seven_day?.utilization).padEnd(4)}${f(fs0[0])}`.trimEnd());
+    timeline.push(`${s.end ? hm(when(s.end)) : hm(new Date())} #${s.nn} ${s.end ? "sonu " : "şimdi"} 5s ${pct(w(s.limits.at(-1)).five_hour?.utilization).padEnd(4)} 7g ${pct(w(s.limits.at(-1)).seven_day?.utilization).padEnd(4)}${f(fs0.at(-1))}`.trimEnd());
   }
-  const latest = parsed.flatMap((s) => s.limits).at(-1)?.unifiedWindows;
+  const all = parsed.flatMap((s) => s.limits);
+  const latest = all.at(-1)?.unifiedWindows;
   if (latest) {
     const reset = (t, long) => { const d = new Date(t * 1000); return long ? `${d.toLocaleDateString("tr-TR").slice(0, 5)} ${hm(d)}` : hm(d); };
-    timeline.push(`sıfırlanma: 5s ${reset(latest.five_hour?.resetsAt)} · 7g ${reset(latest.seven_day?.resetsAt, true)}`);
+    const fable = all.map(fableOf).filter(Boolean).at(-1);
+    timeline.push(`sıfırlanma: 5s ${reset(latest.five_hour?.resetsAt)} · 7g ${reset(latest.seven_day?.resetsAt, true)}${fable?.resetsAt ? ` · Fable ${reset(fable.resetsAt, true)}` : ""}`);
   }
   if (timeline.length) out.push(`<b>Limit çizelgesi</b> (hesabın tamamı)\n<pre>${esc(timeline.join("\n"))}</pre>`);
 
@@ -405,6 +438,9 @@ export function buildReport(state, { headline = "", focus = null, pid = null } =
 
 // ---------------------------------------------------------------- cards
 const pctOr = (u) => (u == null ? null : pct(u));
+// Fable's weekly allowance, in the rate_limit_events of Fable calls only.
+const fableOf = (l) => l?.unifiedWindows?.seven_day_overage_included || null;
+const lastFable = (ls) => pctOr(ls.map(fableOf).filter(Boolean).at(-1)?.utilization);
 const okOf = (s) => Boolean(s.result && !s.result.is_error && s.result.subtype === "success");
 const costOf = (s) => (s.result ? s.result.total_cost_usd || 0 : s.rows.reduce((a, r) => a + (r.cost || 0), 0));
 const firstCommit = (f) => f.commits[0]?.replace(/^\S+\s/, "");
@@ -419,6 +455,7 @@ function jobFacts(c, s) {
   return {
     nn: s.nn, ok: okOf(s), took: minutes(workMs(s)),
     cost: `${s.result ? "" : "≈"}${usd(costOf(s))}`, five: pctOr(w.five_hour?.utilization), seven: pctOr(w.seven_day?.utilization),
+    fable: lastFable(s.limits),
     title: section?.title, next: section?.next, waits: section?.waits || [], older: section?.older || 0,
     progress: s.end ? progressOf(c, s) : null,
     commits,
@@ -426,14 +463,22 @@ function jobFacts(c, s) {
       ...(s.result && !okOf(s) ? [`hata ile bitti (${s.result.subtype})`] : []),
       ...(s.end && !s.result ? ["sonuç satırı olmadan bitti"] : []),
       ...(s.denials.length ? [`guard ${s.denials.length} kez reddetti: ${s.denials[0]}`] : []),
-      ...(effortOff(c.state, c.run, s) ? [`düzey ${s.efforts.join("/")} (${wantEffort(c.state, c.run, s.nn)} olmalı)`] : []),
+      ...(effortOff(c.state, c.run, s) ? [`düzey ${s.efforts.join("/")} (${wantOf(c.state, c.run, s.nn).effort} olmalı)`] : []),
+      ...(s.notes || []),
     ],
   };
 }
 
-// The level a session should run at: the run's, or max when its prompt opened with "EFFORT: max".
-const wantEffort = (state, run, nn) => promptEffort(read(path.join(state, "prompts", `${nn}.md`)), run.effort || "xhigh").effort;
-const effortOff = (state, run, s) => s.efforts.some((e) => e !== wantEffort(state, run, s.nn));
+// The model and level a session should run at: its last "runs" line in chain.log (night-chain.mjs,
+// 2026-11-15 on: Fable at high, a Fable request on Opus at max when refused), else what its prompt
+// asks for. The runner pins each level, so any other level is drift, a higher one too.
+function wantOf(state, run, nn) {
+  const m = [...read(path.join(state, "chain.log")).matchAll(new RegExp(`\\] session ${nn} runs (\\w+)(?: \\(([^)]+)\\))? at (\\w+)`, "g"))].at(-1);
+  if (m) return { family: m[1].toLowerCase(), model: m[2] || m[1].toLowerCase(), effort: m[3] };
+  const p = sessionPlan(read(path.join(state, "prompts", `${nn}.md`)), run);
+  return { family: p.family, model: p.model, effort: p.effort };
+}
+const effortOff = (state, run, s) => { const want = wantOf(state, run, s.nn).effort; return s.efforts.some((e) => e !== want); };
 
 export function sessionMessage(state, nn, pid) {
   const c = collect(state, pid);
@@ -455,6 +500,7 @@ export function chainMessage(state, reason, pid) {
     took: jobs.length ? minutes(jobs.reduce((a, s) => a + workMs(s), 0)) : null,
     cost: usd(jobs.reduce((a, s) => a + costOf(s), 0)),
     seven: limits.length ? `${pct(limits[0])}→${pct(limits.at(-1))}` : null,
+    fable: (() => { const f = jobs.flatMap((s) => s.limits).map(fableOf).filter(Boolean); return f.length ? `${pct(f[0].utilization)}→${pct(f.at(-1).utilization)}` : null; })(),
     waits: waitList.length, waitList,
     problems: facts.flatMap((f) => f.problems.map((p) => `#${f.nn} ${p}`)),
   });
@@ -470,8 +516,8 @@ export function reportMessage(state, pid) {
     state: c.ended ? `bitti: ${c.ended.text.slice(12).replace(/^STOP:\s*/i, "")}` : c.running ? "çalışıyor" : "durdu",
     at: hm(new Date()),
     progress: c.running ? progressOf(c) : null,
-    five: pctOr(w.five_hour?.utilization), seven: pctOr(w.seven_day?.utilization),
-    cost: jobs.length ? `${jobs.some((s) => !s.result) ? "≈" : ""}${usd(jobs.reduce((a, s) => a + costOf(s), 0))}` : null,
+    five: pctOr(w.five_hour?.utilization), seven: pctOr(w.seven_day?.utilization), fable: lastFable(jobs.flatMap((s) => s.limits)),
+    cost: jobs.length ?`${jobs.some((s) => !s.result) ? "≈" : ""}${usd(jobs.reduce((a, s) => a + costOf(s), 0))}` : null,
     jobs: jobs.map((s) => (s.end
       ? { nn: s.nn, ok: okOf(s), title: sectionOf(c, s)?.title, took: minutes(workMs(s)) }
       : { nn: s.nn, running: true, took: minutes(workMs(s)), step: s.lastStep && String(s.lastStep).slice(0, 60) })),
@@ -510,8 +556,8 @@ export function statusMessage(state, pid) {
     step: cur && !cur.end && cur.lastStep ? String(cur.lastStep).slice(0, 80) : null,
     effort: cur && !cur.end ? cur.efforts.join("/") || null : null,
     five: pctOr(w.five_hour?.utilization), fiveReset: w.five_hour?.resetsAt ? hm(new Date(w.five_hour.resetsAt * 1000)) : null,
-    seven: pctOr(w.seven_day?.utilization),
-    last: f && { nn: f.nn, ok: f.ok, title: f.title || firstCommit(f) }, next: f?.next,
+    seven: pctOr(w.seven_day?.utilization), fable: lastFable(c.parsed.flatMap((s) => s.limits)),
+    last: f &&{ nn: f.nn, ok: f.ok, title: f.title || firstCommit(f) }, next: f?.next,
     progress: c.running ? progressOf(c) : null,
   });
 }
@@ -642,7 +688,7 @@ async function watch(opt) {
         if (s.efforts.length) {
           mark.effort[current[1]] = s.efforts.join("/");
           save();
-          if (effortOff(state, run, s)) await say(eventLine("effort", { nn: current[1], got: s.efforts.join("/"), want: wantEffort(state, run, current[1]) }));
+          if (effortOff(state, run, s)) await say(eventLine("effort", { nn: current[1], got: s.efforts.join("/"), want: wantOf(state, run, current[1]).effort }));
         }
       }
     }

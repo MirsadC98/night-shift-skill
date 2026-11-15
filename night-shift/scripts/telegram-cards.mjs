@@ -23,7 +23,8 @@ function card(head, blocks, silent = false) {
   return { text: `${top}${open}${inner}${close}`, silent };
 }
 
-const numbers = (f) => [f.took, f.cost, f.five && `5s ${f.five}`, f.seven && `7g ${f.seven}`].filter(Boolean).join(" · ");
+// Fable's share shows only once a Fable call of the night reported it.
+const numbers = (f) => [f.took, f.cost, f.five && `5s ${f.five}`, f.seven && `7g ${f.seven}`, f.fable && `Fable ${f.fable}`].filter(Boolean).join(" · ");
 
 // How far the chain is and when it should end. jobs: this run's jobs in order, each
 // { ok, ended, workMs, remaining }, where remaining is its report's "**Remaining:**" count
@@ -91,7 +92,7 @@ export function chainCard(f) {
   return card([
     `🏁 <b>Zincir bitti · ${esc(f.project)}</b>`,
     esc(String(f.reason ?? "").replace(/^STOP:\s*/i, "")),
-    [`${f.jobs.length} iş`, f.took, f.cost, f.seven && `7g ${f.seven}`].filter(Boolean).join(" · "),
+    [`${f.jobs.length} iş`, f.took, f.cost, f.seven && `7g ${f.seven}`, f.fable && `Fable ${f.fable}`].filter(Boolean).join(" · "),
     f.waits ? `🙋 Seni bekleyen ${f.waits} madde` : null,
   ], [
     { name: "Seni bekleyen", count: true, lines: (f.waitList || []).map((w) => `• ${w}`) },
@@ -109,7 +110,7 @@ export function reportCard(f) {
     : `${mark(j.ok)} #${j.nn}${j.title ? ` ${esc(j.title)}` : ""} · ${j.took}`);
   const parts = [
     [`🌙 <b>${esc(f.project)}</b> · ${esc(f.state)} · ${f.at}`, f.progress && `📊 ${esc(f.progress)}`,
-      [f.five && `5s ${f.five}`, f.seven && `7g ${f.seven}`, f.cost].filter(Boolean).join(" · ")].filter(Boolean).join("\n"),
+      [f.five && `5s ${f.five}`, f.seven && `7g ${f.seven}`, f.fable && `Fable ${f.fable}`, f.cost].filter(Boolean).join(" · ")].filter(Boolean).join("\n"),
     jobs.length && ["<b>İşler</b>", ...(jobs.length > REPORT_JOBS ? [`… ${jobs.length - REPORT_JOBS} iş daha`] : []), ...jobs.slice(-REPORT_JOBS).map(line)].join("\n"),
     f.problems?.length && ["<b>Sorunlar</b>", ...f.problems].join("\n"),
     f.waits?.length && [`<b>Seni bekleyen</b> · ${f.waits.length}`, ...f.waits.map((w) => `• ${esc(w)}`)].join("\n"),
@@ -134,8 +135,8 @@ export function statusCard(f) {
     `🌙 <b>${esc(f.project)}</b> · ${f.running ? "çalışıyor" : esc(f.state || "durdu")}`,
     f.running && f.nn && `#${f.nn} · ${f.took}${f.effort ? ` · ${esc(f.effort)}` : ""}${f.step ? ` · son adım: ${esc(f.step)}` : ""}`,
     f.progress && `📊 ${esc(f.progress)}`,
-    f.five && `5s ${f.five}${f.fiveReset ? ` (${f.fiveReset}'de sıfırlanır)` : ""} · 7g ${f.seven}`,
-    f.last && `Son biten: ${mark(f.last.ok)} #${f.last.nn}${f.last.title ? ` ${esc(f.last.title)}` : ""}`,
+    f.five && `5s ${f.five}${f.fiveReset ? ` (${f.fiveReset}'de sıfırlanır)` : ""} · 7g ${f.seven}${f.fable ? ` · Fable ${f.fable}` : ""}`,
+    f.last &&`Son biten: ${mark(f.last.ok)} #${f.last.nn}${f.last.title ? ` ${esc(f.last.title)}` : ""}`,
     f.next && `➡️ ${esc(f.next)}`,
   ], [], true);
 }

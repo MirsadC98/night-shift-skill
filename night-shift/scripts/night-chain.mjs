@@ -6,7 +6,8 @@
 //
 //   node night-chain.mjs start  --repo <dir> (--prompt-file <f> | --prompt <text>) [--until HH:MM]
 //                               [--max-sessions <n>] [--session-hours 4] [--model <m>] [--allow-dirty]
-//                               [--effort xhigh] [--state <dir>] [--window]
+//                               [--effort xhigh] [--fable-ceiling 0.6] [--fable-sessions 2]
+//                               [--state <dir>] [--window]
 //   (without --until and --max-sessions the chain goes on until a session writes STOP,
 //    two handovers fail in a row, or stop is called; a usage limit pauses it, and the
 //    session it cut off is resumed with --resume once the limit resets. start without
@@ -16,7 +17,11 @@
 //    in an earlier run's folder, from its next-prompt.md and session count. Every session runs
 //    --model opus (or --model, "model" in .claude/night-shift.json) at xhigh (--effort, "effort"),
 //    its subagents on Sonnet at medium (high when a call asks) and Haiku at high, whatever the user's own settings say (effort.mjs); a
-//    prompt whose first line is "EFFORT: max" runs that one session at max)
+//    prompt that opens with "EFFORT: high|xhigh|max" runs that one session at that level, and one that
+//    opens with "MODEL: fable" runs on Fable at high (or its EFFORT) while Fable's weekly allowance is
+//    under --fable-ceiling ("fableCeiling"; while its ratio is unknown, at most --fable-sessions
+//    "fableSessions" in a chain), else on Opus at max; a Fable session its allowance cuts off runs
+//    again from its prompt on Opus at max, and so does every MODEL: fable prompt until the allowance resets)
 //   node night-chain.mjs status --repo <dir>
 //   node night-chain.mjs wait   --repo <dir> [--state <dir>]  (returns once the chain is over: exit 0
 //                               with status's first lines and what waits for the user, 2 if it died;
@@ -43,8 +48,9 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { buildReport, userWaits } from "./night-report.mjs";
-import { sessionOutcome } from "./session-outcome.mjs";
-import { MAIN_MODEL, SUB_MODEL, subEffortText, MAX_NOTE, nightModelSettings, promptEffort } from "./effort.mjs";
+import { sessionOutcome, windowSpan } from "./session-outcome.mjs";
+import { MAIN_MODEL, SUB_MODEL, MAIN_EFFORT, subEffortText, MAX_NOTE, FABLE_NOTE, nightModelSettings, sessionPlan,
+  promptDirectives, directiveLines, fableGate, familyOf } from "./effort.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const GUARD = path.join(path.dirname(SELF), "guard.mjs");
@@ -73,6 +79,18 @@ const lowerSettings = (repo) => [path.join(os.homedir(), ".claude", "settings.js
 // CLAUDE_CODE_EFFORT_LEVEL would set every level, the subagents' included.
 const withoutEffortEnv = (env) => { const { CLAUDE_CODE_EFFORT_LEVEL, ...rest } = env; return rest; };
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const cap = (s) => s[0].toUpperCase() + s.slice(1);
+// "Opus", or "Opus (claude-opus-5-5)" for a full model id: night-report.mjs reads the runs line back.
+const modelText = (p) => `${cap(p.family)}${p.model !== p.family ? ` (${p.model})` : ""}`;
+const stamp = (ms) => new Date(ms).toLocaleString("sv-SE").slice(0, 16);
+// A handover prompt over this many bytes is flagged: the next session reads all of it on every call.
+// Of 127 prompts of 2026-10-30 … 11-15 the median was 15 KB; only the 10-30 run's prompts, which
+// grew by accumulation to 98 KB, and four of 11-11 went over 30 KB.
+export const PROMPT_WARN_BYTES = 30_000;
+// A fraction (0.6) or a percentage (60).
+const ratioArg = (v, d) => { const n = Number(v); return v == null || v === true || Number.isNaN(n) ? d : n > 1 ? n / 100 : n; };
+const countArg = (v, d) => { const n = Number(v); return v == null || v === true || !Number.isFinite(n) || n < 0 ? d : Math.floor(n); };
+const pct = (u) => `${Math.round(u * 100)}%`;
 
 function repoRoot(dir) {
   try {
@@ -120,7 +138,9 @@ export function cutOffSession(state) {
   if (!last || !last[1] || last[2] === "ends") return null;
   const nn = last[1];
   const sessionId = /"session_id":"([^"]+)"/.exec(read(path.join(state, `session-${nn}.jsonl`)))?.[1];
-  return sessionId ? { nn, sessionId } : null;
+  // The model and level it ran on, from its last "runs" line (none in a log from before 2026-11-15).
+  const runs = [...read(path.join(state, "chain.log")).matchAll(new RegExp(`\\] session ${nn} runs (\\w+)(?: \\(([^)]+)\\))? at (\\w+)`, "g"))].at(-1);
+  return sessionId ? { nn, sessionId, ...(runs ? { model: runs[2] || runs[1].toLowerCase(), effort: runs[3] } : {}) } : null;
 }
 
 // A PowerShell single-quoted string. PowerShell ends one at ' and at the typographic quotes
@@ -205,6 +225,10 @@ function start(opt) {
     sessionHours: Number(opt["session-hours"] || 4),
     model: typeof opt.model === "string" ? opt.model : cfg.model || MAIN_MODEL,
     effort: typeof opt.effort === "string" ? opt.effort : cfg.effort || "xhigh",
+    // MODEL: fable prompts: Fable while its weekly allowance is under this share, and at most this
+    // many Fable sessions while the share is unknown (effort.mjs, fableGate).
+    fableCeiling: ratioArg(opt["fable-ceiling"] ?? cfg.fableCeiling, 0.6),
+    fableSessions: countArg(opt["fable-sessions"] ?? cfg.fableSessions, 2),
     claude: findClaude(),
     report: cfg.report || "NIGHT_RUNS.md",
     path: sessionPath,
@@ -212,6 +236,10 @@ function start(opt) {
     startedAt: now(),
   };
   fs.writeFileSync(path.join(state, "run.json"), JSON.stringify(run, null, 2));
+  // Each chain counts its own Fable sessions and measures the allowance anew; one used up stays so.
+  const fableFile = path.join(state, "fable.json");
+  const fable = parseOr(read(fableFile), {});
+  fs.writeFileSync(fableFile, JSON.stringify(fable.outUntil > Date.now() ? { outUntil: fable.outUntil } : {}, null, 2));
   let task;
   try { task = scheduleRun(run); } catch (e) { fail(`Task Scheduler: ${String(e.stderr || e.message).trim().split("\n")[0]}`); }
   writePointer(repo, { pid: 0, state, task, scheduledAt: now(), finished: false });
@@ -267,7 +295,8 @@ async function runChain(opt) {
   // Before every session, not once: the file sits in a folder the sessions can write, and one
   // that dropped the guard's hook from it would run every later session without the guard.
   const settings = path.join(state, "night-settings.json");
-  const writeSettings = () => {
+  // levels: this session's { [family]: level }; Opus keeps the run's level and Fable its own otherwise.
+  const writeSettings = (levels = {}) => {
     const prev = parseOr(read(settings), {});
     fs.writeFileSync(settings, JSON.stringify({
       ...prev,
@@ -280,7 +309,7 @@ async function runChain(opt) {
       // save their pick as the user's default (run 2's #08–#20 ran at high, 2026-10-30), and the
       // user may work on Fable while the chain runs. --effort is kept for max (effort.mjs).
       env: { ...prev.env, CLAUDE_CODE_SUBAGENT_MODEL: SUB_MODEL },
-      modelSettings: nightModelSettings(prev.modelSettings, lowerSettings(repo), run.effort || "xhigh"),
+      modelSettings: nightModelSettings(prev.modelSettings, lowerSettings(repo), { opus: run.effort || "xhigh", fable: MAIN_EFFORT.fable, ...levels }),
     }, null, 2));
   };
   writeSettings();
@@ -329,28 +358,80 @@ async function runChain(opt) {
   let session = Number(pendingResume()?.nn) ||
     fs.readdirSync(path.join(state, "prompts")).filter((f) => /^\d+\.md$/.test(f)).length + 1;
   let failures = 0;
-  log(`chain starts in ${repo}${reloaded ? " (runner reloaded)" : ""}, until ${run.until || "the work is done"}, from session ${session}${run.maxSessions ? ` to ${run.maxSessions}` : ""}, ${run.model || MAIN_MODEL} at ${run.effort || "xhigh"}, subagents ${SUB_MODEL} (${subEffortText()})`);
+
+  // Fable for the sessions that ask for it (MODEL: fable): <state>/fable.json keeps the chain's Fable
+  // sessions, the allowance's last known share and, once it ran out, until when (effort.mjs, fableGate).
+  const fableFile = path.join(state, "fable.json");
+  const readFable = () => parseOr(read(fableFile), {});
+  const writeFable = (patch) => fs.writeFileSync(fableFile, JSON.stringify({ ...readFable(), ...patch }, null, 2));
+  const fableCeiling = run.fableCeiling ?? 0.6, fableSessions = run.fableSessions ?? 2;
+  const opusModel = run.model && familyOf(run.model) === "opus" ? run.model : MAIN_MODEL;
+  const whyText = (g) => (g.why === "out" ? `its allowance is used up until ${stamp(g.until)}`
+    : g.why === "ceiling" ? `its allowance is at ${pct(g.ratio)}, at or over the ${pct(g.ceiling)} ceiling`
+      : `${g.sessions} Fable sessions already ran in this chain while its allowance's share is unknown`);
+
+  log(`chain starts in ${repo}${reloaded ? " (runner reloaded)" : ""}, until ${run.until || "the work is done"}, from session ${session}${run.maxSessions ? ` to ${run.maxSessions}` : ""}, ${run.model || MAIN_MODEL} at ${run.effort || "xhigh"}, subagents ${SUB_MODEL} (${subEffortText()}), Fable on request under ${pct(fableCeiling)} of its allowance (${fableSessions} sessions while unknown)`);
   while (!run.maxSessions || session <= run.maxSessions) {
     if (fs.existsSync(stopFile)) finish("stop requested");
     if (fs.existsSync(reloadFile)) handOver(); // returns only when the hand-over failed
     if (run.deadline && Date.now() >= run.deadline) finish(`reached ${run.until}`);
     const prompt = read(next).trim();
     if (!prompt) finish("next-prompt.md is empty");
-    if (/^STOP\b/i.test(prompt)) finish(prompt.split("\n")[0]);
+    // MODEL and EFFORT lines are the runner's: STOP is looked for in what follows them, and the
+    // session gets only that.
+    const asked = sessionPlan(prompt, run);
+    if (/^STOP\b/i.test(asked.body)) finish(asked.body.split("\n")[0]);
+    if (!asked.body.trim()) finish("next-prompt.md holds only MODEL/EFFORT lines");
 
     const nn = String(session).padStart(2, "0");
     fs.writeFileSync(path.join(state, "prompts", `${nn}.md`), prompt);
     const before = fs.statSync(next).mtimeMs;
     const resume = pendingResume();
+    // A resumed session goes on as it ran (resume.json, or the runs line of a session the last runner
+    // left). A new one that asks for Fable gets it while the gate allows; a resumed one unless the
+    // allowance is used up.
+    let plan = resume?.model ? { ...asked, model: resume.model, family: familyOf(resume.model), effort: resume.effort || asked.effort } : asked;
+    if (plan.family === "fable") {
+      const g = fableGate(readFable(), { ceiling: fableCeiling, maxSessions: fableSessions });
+      if (!g.ok && (!resume || g.why === "out")) plan = { ...plan, model: opusModel, family: "opus", effort: "max", downgrade: g };
+    }
     log(resume ? `session ${nn} resumes ${resume.sessionId} ${resume.why === "stopped" ? "where the last runner stopped" : "after the usage limit"}`
-      : `session ${nn} starts: ${promptEffort(prompt).body.split("\n")[0].slice(0, 120)}`);
-    if (promptEffort(prompt, run.effort || "xhigh").effort === "max") log(`session ${nn} runs Opus at max (its prompt asks for it)`);
-    writeSettings();
-    const result = await runSession(run, session, prompt, nn, resume);
+      : `session ${nn} starts: ${asked.body.split("\n")[0].slice(0, 120)}`);
+    if (asked.note && !resume) log(`session ${nn}: ${asked.note}`);
+    if (plan.downgrade) log(`session ${nn} asked for Fable, but ${whyText(plan.downgrade)}; it runs on Opus at max`);
+    // night-report.mjs and cutOffSession read this line back.
+    log(`session ${nn} runs ${modelText(plan)} at ${plan.effort}${plan.effort === "max" && asked.effort === "max" && !plan.downgrade ? " (its prompt asks for it)" : ""}`);
+    if (plan.family === "fable" && !resume) writeFable({ sessions: (readFable().sessions || 0) + 1 });
+    writeSettings({ [plan.family]: plan.effort });
+    const result = await runSession(run, session, plan, nn, resume);
     log(`session ${nn} ends: ${result.summary}`);
+    const ran = result.mainModels.join(", ") || result.model || "no model reply";
+    log(`session ${nn} limits: ${windowSpan(result.windows)}; it ran on ${ran}`);
+    const fw = result.windows.last?.seven_day_overage_included;
+    if (fw?.utilization != null) writeFable({ ratio: fw.utilization, ratioResetsAt: fw.resetsAt ?? null, ratioAt: Date.now() });
+    if (plan.family === "fable" && (result.switchedTo || result.mainModels.some((m) => familyOf(m) !== "fable")))
+      log(`session ${nn} was to run on Fable, but ${result.switchedTo ? `the CLI switched it to ${result.switchedTo}` : `its turns ran on ${ran}`}`);
 
+    // Fable's allowance cut the session off: its piece goes on from its prompt on Opus at max (a new
+    // conversation, so a session of its own), unless it already wrote the next prompt. Every
+    // MODEL: fable prompt runs on Opus at max until the allowance resets (fableGate).
+    if (plan.family === "fable" && result.fableOut) {
+      const until = result.fableResetAt || Date.now() + 24 * 3_600_000;
+      writeFable({ outUntil: until });
+      log(`session ${nn}: Fable's allowance is used up (${result.apiError || result.limitType || "refused"}) until ${stamp(until)}${result.fableResetAt ? "" : " (a guess: the CLI gave no reset time)"}; limit record ${JSON.stringify(result.limitInfo)}`);
+      fs.rmSync(resumeFile, { force: true });
+      const wrote = fs.statSync(next).mtimeMs > before && read(next).trim() !== prompt;
+      if (!wrote) {
+        fs.writeFileSync(next, `EFFORT: max\nÖnceki Fable oturumu (${nn}) Fable payı bittiği için kesildi; bu parça Opus max'te sürüyor. ` +
+          `Önce git status ve git diff'e bak: yarım kalan iş orada olabilir; bitmiş işi yeniden yapma.\n\n${plan.body}`);
+        log(`session ${nn}'s piece goes on in the next session on Opus at max`);
+      }
+      session++;
+      continue;
+    }
     if (result.limited) {
-      if (result.sessionId) fs.writeFileSync(resumeFile, JSON.stringify({ nn, sessionId: result.sessionId, why: "limit" }));
+      if (result.limitInfo) log(`session ${nn}: ${result.limitType || "a usage limit"} cut it off; limit record ${JSON.stringify(result.limitInfo)}`);
+      if (result.sessionId) fs.writeFileSync(resumeFile, JSON.stringify({ nn, sessionId: result.sessionId, why: "limit", model: plan.model, effort: plan.effort }));
       const until = Math.min(result.resetAt || Date.now() + 30 * 60_000, run.deadline || Infinity);
       log(`usage limit: waiting until ${new Date(until).toLocaleString("sv-SE")}`);
       // In this process, so `wait` (which waits for it to exit) goes on through the limit.
@@ -365,20 +446,25 @@ async function runChain(opt) {
     if (fs.statSync(next).mtimeMs <= before || after === prompt) {
       failures++;
       if (failures >= 2) finish("two sessions in a row ended without writing next-prompt.md");
-      // The retry does the same piece, so an EFFORT line stays the first line.
-      const { effort: level, body } = promptEffort(prompt, "");
-      fs.writeFileSync(next, `${level ? `EFFORT: ${level}\n` : ""}Önceki gece oturumu (${nn}) devam promptu yazmadan bitti (${result.summary}). ` +
-        `Durumu git log, projenin günlükleri ve gece raporundan çıkar; bitmiş işi yeniden yapma.\n\n${level ? body : prompt}`);
+      // The retry does the same piece, so its MODEL and EFFORT lines stay the first lines.
+      const d = promptDirectives(prompt);
+      fs.writeFileSync(next, `${directiveLines(d)}Önceki gece oturumu (${nn}) devam promptu yazmadan bitti (${result.summary}). ` +
+        `Durumu git log, projenin günlükleri ve gece raporundan çıkar; bitmiş işi yeniden yapma.\n\n${d.model || d.effort ? d.body : prompt}`);
       log(`session ${nn} left no continuation prompt; retrying with a recovery note`);
-    } else failures = 0;
+    } else {
+      failures = 0;
+      const size = Buffer.byteLength(after);
+      if (size > PROMPT_WARN_BYTES) log(`session ${nn} wrote a next-prompt.md of ${Math.round(size / 1000)} KB (over ${PROMPT_WARN_BYTES / 1000} KB): the next session reads all of it on every call`);
+    }
     session++;
   }
   finish(`reached ${run.maxSessions} sessions`);
 }
 
-function runSession(run, session, prompt, nn, resume) {
+// plan: sessionPlan's { model, family, effort, body }, with downgrade when Fable was refused.
+function runSession(run, session, plan, nn, resume) {
   const resumeId = resume?.sessionId;
-  const { effort, body } = promptEffort(prompt, run.effort || "xhigh");
+  const { effort, body } = plan;
   const header = resumeId ? [
     ...(resume.why === "stopped" ? [
       `Oturum yarıda kesildi: runner durdu (bilgisayar kapanmış ya da yeniden başlamış olabilir); gece vardiyası, ${now()}.`,
@@ -391,6 +477,8 @@ function runSession(run, session, prompt, nn, resume) {
     `Kullanıcı ${run.until ? `${run.until}'e kadar` : "zincir bitene kadar"} yok ve hiçbir soruya yanıt veremez.`,
     `Önce night-shift skill'ini çağır ve "Inside a night session" bölümüne uy.`,
     `Devam dosyası: ${path.join(run.state, "next-prompt.md")}. Gece raporu: ${run.report}.`,
+    ...(plan.family === "fable" ? [FABLE_NOTE] : []),
+    ...(plan.downgrade ? ["İstem MODEL: fable istedi, ama Fable'ın haftalık payı bu gece ona yetmiyor; bu parça Opus max'te çalışıyor."] : []),
     ...(effort === "max" ? [MAX_NOTE] : []),
     "",
     "---",
@@ -400,7 +488,7 @@ function runSession(run, session, prompt, nn, resume) {
     "--permission-mode", "auto", "--permission-prompts", "none",
     "--settings", path.join(run.state, "night-settings.json"),
     "--disallowedTools", "AskUserQuestion,EnterPlanMode,ExitPlanMode"];
-  args.push("--model", run.model || MAIN_MODEL);
+  args.push("--model", plan.model);
   if (effort === "max") args.push("--effort", "max");
   // Without --fork-session the conversation keeps its id, so the report still finds its transcript.
   if (resumeId) args.push("--resume", resumeId);
@@ -416,6 +504,10 @@ function runSession(run, session, prompt, nn, resume) {
       // Every Node process of the session hides the windows of what it starts (hide-windows.cjs).
       env: { ...withoutEffortEnv(process.env), PATH: run.path, NIGHT_SHIFT: "1", NIGHT_SHIFT_STATE: run.state, NIGHT_SHIFT_REPO: run.repo,
         NIGHT_SHIFT_SESSION: String(session), NIGHT_SHIFT_UNTIL: run.until || "", CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0",
+        // A Fable session whose allowance runs out would go on, on another model, on its own; this
+        // ends it instead (model_substitution_disabled), so the runner hands the piece to Opus at max.
+        // Only for Fable: it also turns off the overload fallback and compaction's model choice.
+        ...(plan.family === "fable" ? { CLAUDE_CODE_NO_MODEL_FALLBACK: "1" } : {}),
         // Forward slashes: NODE_OPTIONS reads a backslash inside quotes as an escape.
         NODE_OPTIONS: [`--require "${HIDE.replace(/\\/g, "/")}"`, ...String(process.env.NODE_OPTIONS || "").split(/\s+(?=--)/).filter((o) => o && !o.includes("hide-windows.cjs"))].join(" ") },
       // A resumed session appends to its stream, so the report counts both parts.

@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { sessionOutcome } from "./session-outcome.mjs";
+import { sessionOutcome, windowSpan } from "./session-outcome.mjs";
 
 const fixture = (name) => fs.readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
 const result = (fields) => JSON.stringify({ type: "result", subtype: "success", num_turns: 3, total_cost_usd: 1, session_id: "s-1", ...fields });
@@ -47,4 +47,63 @@ test("an error that is not a limit is not treated as one", () => {
   const o = sessionOutcome(result({ is_error: true, subtype: "error_max_turns", result: "Reached max turns" }));
   assert.equal(o.limited, false);
   assert.equal(o.summary, "error_max_turns (error), 3 turns, $1.00");
+});
+
+// Fable's allowance (claude 2.1.325's code, 2026-11-15; no real sample yet, so these are built from
+// its shapes): the refusal and the window it names, the CLI's own switch, and the windows' span.
+const limitEvent = (w, extra = {}) => JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "allowed", unifiedWindows: w, ...extra } });
+const turn = (model, parent = null) => JSON.stringify({ type: "assistant", parent_tool_use_id: parent, message: { model, content: [] } });
+
+test("a Fable session refused for usage credits is Fable-out, with the window's reset", () => {
+  const w = { five_hour: { utilization: 0.4, resetsAt: 1795000000 }, seven_day: { utilization: 0.3 }, seven_day_overage_included: { utilization: 0.98, resetsAt: 1795300000 } };
+  const o = sessionOutcome([
+    JSON.stringify({ type: "system", subtype: "init", model: "claude-fable-5-2", session_id: "s-1" }),
+    limitEvent(w), turn("claude-fable-5-2"),
+    result({ is_error: true, api_error: "model_requires_usage_credits", result: "Fable requires usage credits" }),
+  ].join("\n"));
+  assert.equal(o.fableOut, true);
+  assert.equal(o.fableResetAt, 1795300000 * 1000 + 60_000);
+  assert.equal(o.apiError, "model_requires_usage_credits");
+  assert.equal(o.model, "claude-fable-5-2");
+  assert.deepEqual(o.mainModels, ["claude-fable-5-2"]);
+  assert.equal(windowSpan(o.windows), "5h 40%→40% · 7d 30%→30% · fable 98%→98%");
+});
+
+test("a limit named as Fable's is Fable-out too, and model_substitution_disabled with no event", () => {
+  const named = sessionOutcome(result({ is_error: true, api_error: "rate_limit_error", api_error_status: 429,
+    api_error_params: { rate_limit_info: { rateLimitType: "seven_day_overage_included", resetsAt: 1795300000 } }, result: "limit" }));
+  assert.equal(named.fableOut, true);
+  assert.equal(named.limitType, "seven_day_overage_included");
+  assert.equal(named.fableResetAt, 1795300000 * 1000 + 60_000);
+  const bare = sessionOutcome(result({ is_error: true, api_error: "model_substitution_disabled", result: "x" }));
+  assert.equal(bare.fableOut, true);
+  assert.equal(bare.fableResetAt, null);
+  assert.equal(windowSpan(bare.windows), "no limit event");
+});
+
+test("the five-hour limit of a Fable session is no Fable-out; a finished session never is", () => {
+  const five = sessionOutcome(result({ is_error: true, api_error: "usage_limit_reached",
+    api_error_params: { rate_limit_info: { rateLimitType: "five_hour", resetsAt: 1795000000 } }, result: "limit" }));
+  assert.equal(five.limited, true);
+  assert.equal(five.fableOut, false);
+  assert.equal(five.limitType, "five_hour");
+  assert.equal(sessionOutcome(result({ is_error: false, api_error: "model_requires_usage_credits" })).fableOut, false);
+});
+
+test("the CLI's own switch away from Fable and the models of the main turns are kept", () => {
+  const o = sessionOutcome([
+    JSON.stringify({ type: "system", subtype: "init", model: "claude-fable-5-2" }),
+    JSON.stringify({ type: "system", subtype: "informational", content: "Switched to Opus for this session · Fable requires usage credits" }),
+    turn("claude-opus-5-5"), turn("claude-sonnet-5-5", "toolu_1"), turn("<synthetic>"),
+    result({ is_error: false, result: "done" }),
+  ].join("\n"));
+  assert.equal(o.switchedTo, "Opus");
+  assert.deepEqual(o.mainModels, ["claude-opus-5-5"]);
+  assert.equal(o.fableOut, false);
+});
+
+test("windowSpan spans the first and the last event, each window that either has", () => {
+  const a = { five_hour: { utilization: 0.39 }, seven_day: { utilization: 0.32 } };
+  const b = { five_hour: { utilization: 0.41 }, seven_day: { utilization: 0.33 }, seven_day_overage_included: { utilization: 0.17 } };
+  assert.equal(windowSpan({ first: a, last: b }), "5h 39%→41% · 7d 32%→33% · fable ?→17%");
 });
