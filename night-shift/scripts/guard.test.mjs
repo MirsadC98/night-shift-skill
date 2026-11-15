@@ -486,3 +486,14 @@ test("what git submodule foreach, bisect run, difftool, grep -O and for-each-rep
     `git for-each-repo --config=maintenance.repo fetch`, `git submodule foreach --recursive 'echo $name'`])
     assert.equal(git(c), null, c);
 });
+
+test("delete targets written through globs, braces, pipes and .NET are refused; a mktemp folder is not", () => {
+  for (const c of [`rm -rf .*`, `rm -rf ./.*`, `rm -rf src/.*`, `rm -rf {/c/Users/u/Documents,x}`, `rm -rf C:/work/repo/*`, `rm -rf /c/temp/*`,
+    `find /c/Users/u/Documents -name "*.tmp" -execdir rm {} +`, "rm -rf `cat list.txt`", `rm -rf $(cat list.txt)`,
+    `D=/c/work/repo; D+=/../../Users/u; rm -rf "$D"`, `gci C:\\Users\\u\\Documents | ri -Recurse -Force`,
+    `[IO.Directory]::Delete("C:\\Users\\u\\Documents", $true)`, `[System.IO.File]::Delete("C:\\Users\\u\\a.txt")`])
+    assert.ok(bash(c), c);
+  for (const c of [`D=$(mktemp -d) && rm -rf "$D"`, `T="$(mktemp -d -t build.XXXX)"; cp -r dist "$T"; rm -rf "$T"`, `rm -rf dist/*`, `rm -rf build/.cache`,
+    `find . -name "*.tmp" -delete`, `find . -name '*.tmp' -exec rm {} \\;`])
+    assert.equal(bash(c), null, c);
+});

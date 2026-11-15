@@ -91,6 +91,7 @@ const GENERIC = [
   [/\b(shutdown(\.exe)?\s|Restart-Computer|Stop-Computer|diskpart|bcdedit|vssadmin|cipher\s+\/w|format(\.com)?\s+[a-z]:)/i, "system-level commands are not allowed"],
   [/\breg(\.exe)?\s+(add|delete|import|restore|load)\b|\b(Set|New|Remove|Rename)-ItemProperty\b|\bRemove-Item\b[^\n]*\bHK(CU|LM):/i, "registry writes change the live system"],
   [/\b(taskkill|Stop-Process|pkill|killall)\b[^\n]*\b(node|claude|powershell|pwsh|explorer|code|bash)(\.exe)?\b/i, "that process may be the run itself or the user's"],
+  [/\[(System\.)?IO\.(Directory|File)\]::Delete\b/i, "deletes through .NET cannot be checked"],
   [/\bSystemParametersInfo\b/i, "changing system parameters touches the live desktop"],
 ];
 
@@ -121,7 +122,7 @@ function dropHeredocs(cmd) {
     const bare = line.replace(/(?<!<<-?\s*)(?:"(?:[^"\\]|\\.)*"|'[^']*')/g, (s) => "_".repeat(s.length));
     for (const m of bare.matchAll(/(?<!<)<<(-?)\s*(["']?)([A-Za-z_][\w.-]*)\2/g)) {
       const words = bare.slice(0, m.index).split(/[;&|()]/).pop().trim().split(/\s+/);
-      const word = words.find((w) => !/^[A-Za-z_]\w*=/.test(w)) || "";
+      const word = words.find((w) => !/^[A-Za-z_]\w*\+?=/.test(w)) || "";
       const keep = new RegExp(`^${SHELL}$`, "i").test(word) || new RegExp(String.raw`\|\s*${SHELL}(\s|$)`, "i").test(bare.slice(m.index));
       pending.push({ delim: m[3], dash: m[1] === "-", keep });
     }
@@ -135,6 +136,7 @@ function dropHeredocs(cmd) {
 //          is a command substitution; unmark() puts them back.
 //   bare   per word, whether it began outside quotes: `> x` is a redirect, `">x"` is text
 //   sep    the separators before it as written, without ( ) ` and line breaks: "" for the first, "|" for a pipe
+//   pre    the separators before it exactly as written, ( ) and ` included
 //   lvl    how many ( are open, so that a cd inside ( ) can end at the )
 // An unquoted < or > starts a word of its own (`echo x>f` writes f); `2>f` and `>|f` stay one word.
 const unmark = (s) => s.replace(/\0/g, "$").replace(/\x01/g, "`");
@@ -144,7 +146,7 @@ export function simpleCommands(text) {
   const endWord = () => { if (word !== null) { words.push(word); bare.push(wb); } word = null; };
   const endCmd = () => {
     endWord();
-    if (words.length) { cmds.push({ words, bare, sep: run.replace(/[()`\n]/g, "") || run, lvl }); run = ""; }
+    if (words.length) { cmds.push({ words, bare, sep: run.replace(/[()`\n]/g, "") || run, pre: run, lvl }); run = ""; }
     words = []; bare = [];
   };
   for (let i = 0; i < text.length; i++) {
@@ -174,7 +176,7 @@ export function simpleCommands(text) {
 
 // Expands $NAME and ${NAME} from the command's own earlier assignments, then the
 // session's environment. Returns null when anything stays unresolved: an unknown
-// name, $(...), $1, $env:, %NAME%.
+// name, $(...), a backtick substitution inside double quotes, $1, $env:, %NAME%.
 function expand(word, vars, env) {
   if (/\$env:|%[A-Za-z_]\w*%/i.test(word)) return null;
   let unresolved = false;
@@ -184,20 +186,45 @@ function expand(word, vars, env) {
     if (value == null) { unresolved = true; return m; }
     return value;
   });
-  if (unresolved || out.includes("$")) return null;
+  if (unresolved || out.includes("$") || out.includes("`")) return null;
   return unmark(out);
+}
+
+const ASSIGN = /^[A-Za-z_]\w*\+?=/;
+// What `$(mktemp -d)` makes lives under the temp root, unless an option or a template word could put
+// it elsewhere (-p DIR, --tmpdir, a template without -t is made in the current folder).
+const MKTEMP_FLAG = /^-[dqtu]+$|^--(directory|quiet|dry-run)$/;
+function mktempFolder(args) {
+  const flags = args.filter((a) => /^-/.test(a)), names = args.filter((a) => !/^-/.test(a));
+  if (!flags.every((a) => MKTEMP_FLAG.test(a)) || !names.every((a) => /^[\w.]+$/.test(a))) return null;
+  return names.length && !flags.some((a) => /^-\w*t/.test(a)) ? null : `${norm(tmpdir())}/mktemp.XXXX`;
+}
+const mktempValue = (v) => {
+  const m = /^(?:\$\(|`)\s*mktemp((?:\s+[^\s()`]+)*)\s*(?:\)|`)$/.exec(v);
+  return m && mktempFolder(m[1].split(/\s+/).filter(Boolean));
+};
+// The splitter cuts an unquoted `D=$(mktemp -d)` into `D=$` and `mktemp -d`. It is that substitution when
+// the next command is a mktemp opened right there and the one after it (if any) starts with the closing
+// mark and a separator: `)/x` or `)$(cat y)` would add to the folder, `) rm` would not even set D.
+function mktempAfter(cmds, i) {
+  const [a, n, z] = [cmds[i], cmds[i + 1], cmds[i + 2]];
+  if (!n || n.words[0] !== "mktemp" || !/=\$?$/.test(a.words.at(-1))) return false;
+  const close = n.pre === "(" ? "\\)" : n.pre === "`" ? "`" : null;
+  return close !== null && (!z || new RegExp(`^${close}[;&|\\n)]`).test(z.pre)) && mktempFolder(n.words.slice(1)) !== null;
 }
 
 // A command made only of assignments (`D=C:/temp/x`, `export D=...`) sets them for the
 // commands after it. A prefix assignment (`D=x rm -rf $D`) does not: bash expands the
-// arguments first.
-function recordAssignments(words, vars, env) {
+// arguments first. `D+=x` appends to what D held (unknown when D is not known).
+function recordAssignments(words, vars, env, tmp) {
   const rest = /^(export|declare|local|readonly|typeset)$/.test(words[0]) ? words.slice(1) : words;
-  if (!rest.length || !rest.every((w) => /^[A-Za-z_]\w*=/.test(w))) return;
-  for (const w of rest) {
-    const at = w.indexOf("=");
-    vars.set(w.slice(0, at), expand(w.slice(at + 1), vars, env));
-  }
+  if (!rest.length || !rest.every((w) => ASSIGN.test(w))) return;
+  rest.forEach((w, k) => {
+    const [, name, plus, text] = /^([A-Za-z_]\w*)(\+?)=(.*)$/s.exec(w);
+    let v = mktempValue(text) ?? (tmp && k === rest.length - 1 && /^\$?$/.test(text) ? mktempFolder([]) : expand(text, vars, env));
+    if (plus) { const old = vars.has(name) ? vars.get(name) : env[name]; v = old == null || v == null ? null : old + v; }
+    vars.set(name, v);
+  });
 }
 
 const isAbsolute = (t) => /^[a-z]:[\\/]/i.test(t) || /^[\\/]/.test(t);
@@ -238,7 +265,7 @@ const LAUNCHERS = {
 };
 function nameIndex(words) {
   for (let i = 0; i < words.length; i++) {
-    if (/^[A-Za-z_]\w*=/.test(words[i])) continue;
+    if (ASSIGN.test(words[i])) continue;
     // hasOwn: a command named `constructor` or `__proto__` is no launcher (and no throw).
     const launcher = Object.hasOwn(LAUNCHERS, base(words[i])) ? LAUNCHERS[base(words[i])] : null;
     if (launcher) {
@@ -494,6 +521,12 @@ function writeDenial(t, env, where, vars, r) {
   return prot ? `writing ${prot} is not allowed during a night run` : null;
 }
 
+// {a,b} lists, which the shell expands before the command runs (${x} is a variable, not a list).
+const BRACE = /(?<!\$)\{([^{}]*,[^{}]*)\}/;
+const braces = (w, depth = 0) => {
+  const m = BRACE.exec(w);
+  return m && depth < 6 ? m[1].split(",").flatMap((a) => braces(w.slice(0, m.index) + a + w.slice(m.index + m[0].length), depth + 1)) : [w];
+};
 const PATH_PARAM = (n) => { n = n.toLowerCase(); return "path".startsWith(n) || "literalpath".startsWith(n) || n === "pspath" || n === "lp"; };
 const XARGS_VALUE = /^(-[aEdILnPs]|--(arg-file|delimiter|max-lines|max-args|max-procs|max-chars|process-slot-var))$/;
 
@@ -506,14 +539,18 @@ function checkDelete(words, ni, env, where, vars, r) {
   if (!RECURSIVE_DELETE.test(text) && !ANY_DELETE.test(text)) return null;
   const name = words[ni];
   const recursive = RECURSIVE_DELETE.test(text);
-  const plain = !recursive && DELETE_WORD.test(name) && (!/find(\.exe)?$/i.test(name) || words.includes("-delete") || (words.includes("-exec") && words.some((w) => /^(rm|unlink)$/.test(w))));
+  const plain = !recursive && DELETE_WORD.test(name) && (!/find(\.exe)?$/i.test(name) || words.includes("-delete") || (words.some((w) => /^-(exec|execdir|ok|okdir)$/.test(w)) && words.some((w) => /^(rm|unlink)$/.test(w))));
   if (!recursive && !plain) return null;
   const kind = recursive ? "recursive deletes" : "deletes";
   // find's own tests (-name "*.tmp") follow its first -option: patterns, not targets.
   const isFind = /find(\.exe)?$/i.test(name);
-  let expr = false, dNext = false;
-  // Its targets come after the delete's own word.
-  for (let raw of words.slice(words.findIndex((w) => DELETE_WORD.test(w)) + 1)) {
+  let expr = false, dNext = false, seen = 0, filter = false;
+  // Its targets come after the delete's own word. A plain delete's {a,b} is expanded here, one target
+  // for each alternative; a recursive one with a list is refused below.
+  const list = words.slice(words.findIndex((w) => DELETE_WORD.test(w)) + 1);
+  for (let raw of recursive ? list : list.flatMap((w) => braces(w))) {
+    // What a find -exec runs is read as a command of its own; its words are not find's targets.
+    if (isFind && /^-(exec|execdir|ok|okdir)$/.test(raw)) break;
     // PowerShell's -Path:x and -LiteralPath=x name their target in the same word.
     const pv = /^-(\w+)[:=](.+)$/s.exec(raw);
     if (pv && PATH_PARAM(pv[1])) raw = pv[2];
@@ -529,41 +566,50 @@ function checkDelete(words, ni, env, where, vars, r) {
       if (t === "-D") dNext = true;
       else if (!/^-([HLP]|O\d*|D\S+)$/.test(t) && /^[-(!]/.test(t)) expr = true;
     }
-    if (/^-/.test(t) || /^\/[sqfa]$/i.test(t) || /^(\/dev\/null|nul)$/i.test(t)) continue;
+    if (/^-/.test(t) || /^\/[sqfa]$/i.test(t) || /^(\/dev\/null|nul)$/i.test(t)) { filter = /^-(inc|exc|fil)[a-z]*$/i.test(t); continue; }
+    // The value of -Include/-Exclude/-Filter picks among the items; it names no folder to delete.
+    if (!filter) seen++;
+    filter = false;
     if (/^~([\\/]|$)/.test(t)) return `refusing a ${recursive ? "recursive delete" : "delete"} in the home folder ("${t}")`;
-    if (recursive && (/^(\.|\.\/|\*|\.\/\*|\/|\.git|\.git\/.*)$/.test(t) || /(^|[\\/])\.\.([\\/]|$)/.test(t))) return `refusing a recursive delete of "${t}"`;
+    // A .* can match .. and the dot folders (.git), a {a,b} list is any paths the shell makes of it.
+    if (recursive && (/^(\.|\.\/|\*|\.\/\*|\/|\.git|\.git\/.*)$/.test(t) || /(^|[\\/])\.\.([\\/]|$)/.test(t) || /(^|[\\/])\.\*$/.test(t))) return `refusing a recursive delete of "${t}"`;
+    if (BRACE.test(t)) return `refusing a ${recursive ? "recursive delete" : "delete"} of "${t}"`;
     const abs = isAbsolute(t);
     if (!abs && where.lost) return `refusing a delete after a cd the guard cannot follow: it cannot tell which folder "${t}" is in`;
     if (!abs && !where.at) { const odd = oddReason(norm(t), t); if (odd) return odd; continue; }
     const p = norm(abs ? t : `${where.at}/${t}`);
     const odd = oddReason(p, t);
     if (odd) return odd;
-    if (r.repo && under(p, `${r.repo}/.git`)) return `refusing a delete inside .git (${t})`;
-    if (recursive && r.repo && p === r.repo) return `refusing a recursive delete of the repository (${t})`;
-    const prot = protectedPath(p, r);
+    // dir/* empties dir: the folders and roots are compared as dir (the wildcard check below keeps p).
+    const q = p.replace(/\/\*$/, "");
+    if (r.repo && under(q, `${r.repo}/.git`)) return `refusing a delete inside .git (${t})`;
+    if (recursive && r.repo && q === r.repo) return `refusing a recursive delete of the repository (${t})`;
+    const prot = protectedPath(q, r);
     if (prot) return `refusing a delete of ${prot} (${t})`;
     // The state folder itself, or a folder above it, takes the runner's files and the handover with it.
-    if (r.state && under(r.state, p)) return `refusing a delete of the run's state folder (${t})`;
+    if (r.state && under(r.state, q)) return `refusing a delete of the run's state folder (${t})`;
     if (!(isFind && expr) && GLOB.test(p)) {
       const hit = protectedTargets(r).find(([c]) => overlaps(p, c));
       if (hit) return `refusing a delete of ${hit[1]} through a wildcard (${t})`;
     }
-    if (!r.writable.some((root) => under(p, root) && !(recursive && p === root))) return `${kind} are limited to the repository and temp folders (got ${t})`;
+    if (!r.writable.some((root) => under(q, root) && !(recursive && q === root))) return `${kind} are limited to the repository and temp folders (got ${t})`;
   }
+  // `gci x | ri -Recurse` and a backtick substitution take their targets from where the command does not show them.
+  if (recursive && !isFind && !seen) return "refusing a recursive delete whose target the guard cannot see";
   return null;
 }
 
 // Every Bash/PowerShell rule for one simple command. A wrapper (bash -c, powershell -c, cmd /c,
 // eval, find -exec) hands its inner command to checkCommand again, so the rules read what is run
 // and not the wrapper's words.
-function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r) {
+function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r, tmp) {
   const { vars } = opts;
   // The splitter cannot see "$(...)" inside quotes; each one is a command of its own.
   for (const w of c.words) for (const body of substitutions(w)) {
     const why = checkCommand(body, env, { ...where }, opts, depth + 1);
     if (why) return why;
   }
-  recordAssignments(c.words, vars, env);
+  recordAssignments(c.words, vars, env, tmp);
   // PowerShell's `$env:NAME = x` and cmd's `set NAME=x` change the environment of the git after them;
   // kept apart from the shell variables (a key no $NAME can match) and read by the git check below.
   const pe = /^\$env:(\w+)/i.exec(c.words[0]) ?? (/^set$/i.test(c.words[0]) ? /^(\w+)=/.exec(c.words[1] ?? "") : null);
@@ -665,12 +711,12 @@ function walk(cmds, env, where, opts, depth) {
   if (depth > 4) return NESTED;
   const r = roots(env), saved = [];
   let lvl = 0, sawPipe = false, prev = null;
-  for (const c of cmds) {
+  for (const [i, c] of cmds.entries()) {
     // A cd inside ( ) lasts until the ), so the folder it left is put back there.
     while (lvl < c.lvl) { saved.push({ ...where }); lvl++; }
     while (lvl > c.lvl) { Object.assign(where, saved.pop()); lvl--; }
     const pipe = isPipe(c.sep);
-    const why = readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r);
+    const why = readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r, mktempAfter(cmds, i));
     if (why) return why;
     sawPipe ||= pipe; prev = c;
   }
@@ -757,6 +803,8 @@ function selfTest() {
     // The command a wrapper runs, a shell fed by a pipe, a write by redirect.
     [bash("bash -c 'git push --force origin main'"), true], [bash("powershell -c \"Remove-Item -Recurse C:\\Users\\u\\Documents\""), true],
     [bash("echo x | bash"), true], [bash("echo x | xargs rm -rf"), true], [bash("echo hi > C:/temp/x-night/run.json"), true],
+    [bash("rm -rf src/.*"), true], [bash("rm -rf {/c/Users/u/Documents,x}"), true], [bash("rm -rf /c/temp/*"), true], [bash("rm -rf `cat list.txt`"), true],
+    [bash(`D=$(mktemp -d) && rm -rf "$D"`), false], [bash(String.raw`find . -name '*.tmp' -exec rm {} \;`), false],
     [bash("bash -c 'npm run build'"), false], [bash("echo hi > notes.md"), false], [bash("grep -n taskkill probe.ps1"), false],
   ];
   let failed = 0;
