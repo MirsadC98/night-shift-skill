@@ -1,0 +1,94 @@
+---
+name: night-shift
+description: Use when the user wants work to go on unattended for hours (overnight, while asleep or away, "gece çalışsın", "ben gelene kadar devam et"), when starting, checking, changing or stopping such a run or being told when it ends ("bitince haber ver"), or when a prompt opens with "Gece vardiyası (night-shift)".
+---
+
+# Night shift
+
+A chain of fresh headless sessions (`claude -p`), each the same as the user typing `/clear` and pasting a continuation prompt. State passes through the repository (plan, logs, ledger, memory) and one file, `<state>/next-prompt.md`. The runner is `scripts/night-chain.mjs`, the guard hook `scripts/guard.mjs`; a project adds its own deny rules in `.claude/night-shift.json`.
+
+- **In a night session** (the prompt opens with "Gece vardiyası (night-shift)"): follow "Inside a night session" below.
+- **In an interactive chat** (starting, checking, stopping or changing a run, or telling the user when it ends): read `references/interactive.md` in this skill's folder and follow it.
+
+## Inside a night session
+
+You are the user's delegate until they are back. By starting the run, the user approved all work in the approved roadmap, and that approval covers the steps that would normally wait for them. There is no one to ask: AskUserQuestion is off.
+
+**The user's inbox first.** If `$NIGHT_SHIFT_STATE/inbox.md` exists, the user wrote it while the chain ran. It has the prompt's weight and wins where the two differ, and its work counts as approved. Do what it asks of this session; put what belongs to a later session into your continuation prompt. At step 3 below, once nothing of it is left only in the inbox, move it to `$NIGHT_SHIFT_STATE/prompts/<nn>-inbox.md` (your session number). A session that ends early leaves it in place for the retry.
+
+**Decide, build and record; ask the user only what needs them.** The user's rule (2026-11-07): "en iyi düşündüğünü yap, bana sadece önemli ve gerçekten görüşümün gerektiği kısımlarda sor." Every choice that would normally wait for the user is yours: a round plan that needs approval, a brainstorming pick, "answer before building", a plan line saying "the user decides".
+
+- Choose what you would recommend. Check the user's recorded preferences first: CLAUDE.md, memory, the plan's decisions, design docs and earlier critiques.
+- A plan that needs approval: write it as usual; have one fresh reviewer subagent check it against those preferences and fix what it finds; mark it `Onay: gece vekâleti (night-shift, <date>)`, commit it, and build it in this session or the next.
+- Record each choice as `decision · why` where the project keeps that work's decisions: the plan's decision list or the round's log. It is the trail for later questions; nobody goes through it in the morning.
+- A follow-up of approved work (a finding a review deferred, a small fix the round turned up) is approved work: do it, or hand it to a later session in the continuation prompt.
+
+**What reaches the user.** The night report's `**Waits for you**` holds only the hard stops (below) and the decisions that pass one of these five tests:
+
+1. **It takes something from users:** a feature, a way to open, recover or move their files, or a format that saved files or older builds depend on.
+2. **It departs from the user's own word:** CLAUDE.md, memory, a recorded decision, the prompt or the inbox. Reading their words so that what they asked for changes counts too.
+3. **A revert does not undo it:** a migration of user data, a format bump, a deletion.
+4. **It sets direction beyond the round:** a new page or flow, a name, a store or brand choice, a new product rule, a change to the project's working rules or to the user's skills.
+5. **Their preferences give no answer, and the options lead to different products**, not to variants of one.
+
+Write such a decision as `question · your pick and why · what changes if they pick otherwise`. Build your pick when a revert undoes it; leave a test-3 decision undone. A decision that passes none of the five tests is decided and recorded, never listed: layout, spacing, wording inside the text rules, accessibility details, which checks ran, reviews done inline, scope moved to a later round.
+
+**Hard stops: never done on the user's behalf.** Skip the item, put it under Waits for you, and take the next unblocked work:
+
+- history rewrites, deleting branches, merges, force pushes;
+- deleting anything outside the repo and temp folders;
+- publishing, releases, store uploads, messages to people, new remotes;
+- tests or changes on the user's live desktop (the project's CLAUDE.md names them);
+- physical acceptance tests;
+- credentials and secrets;
+- new work outside the approved roadmap.
+
+**One session, one piece.** Do one finished piece (a round's tasks, a closure review, a fix wave, a package, a measurement, a plan) with the project's usual skills, reviews and gates, then end. A round's tasks, its closure review, the closure's fix wave with its re-review, and its package are four pieces, each its own session; a round of more than four tasks spreads its tasks over two sessions. A measurement on the desktop is its own piece too: a task session does not build the measurement copy and measure; it hands both to the next session. A piece that ends early still ends the session: the next piece starts fresh, on a small context. Push only when the project's rules allow it and its gates pass. A failure you cannot fix in this session: commit nothing broken, record it, and give the next session either the fix or other work. If the same failure blocks two sessions in a row, STOP.
+
+**Effort: `max` for one hard piece only.** Sessions run Opus at `xhigh`. The user's rule (2026-11-11): "max gerçekten zorlu ve xhigh'ın tam şekilde halledemeyeceği düşünülen görevlerde sadece o görev için kullanılsın." A piece earns `max` only when this session itself has to work out something `xhigh` is not expected to finish:
+
+- a bug that already resisted an `xhigh` session;
+- a root cause or a design across subsystems that `xhigh` did not settle or will not;
+- the answer to a race or a data-loss risk, not yet worked out.
+
+Never `max`, whatever code the piece touches: a round's tasks (the work runs in subagents at their own levels), a closure review, a fix wave, a package, a measurement, a plan that writes down a design already decided. A `max` session does its piece and nothing else. Finished early or blocked (no desktop, a missing input), it takes no other work at `max`: it records where the piece stands, writes the next prompt (other work with no `EFFORT` line, or the same piece with `EFFORT: max` once it can go on) and ends.
+
+**Waiting.** Start a long command (gates, a build, a package, a sandbox run) or a subagent in the background (`run_in_background: true`); its notification wakes you. Meanwhile do "Parallel work"; when none is left, end your turn. When what you wait for is not something you started (a file an app or a probe writes, a server's ready line, a process another tool runs), use `node ~/.claude/skills/night-shift/scripts/wait-for.mjs` (`--help`): it returns as soon as the file, the log line or the exit is there, and refuses to wait for what nothing will produce. Never a disguised sleep: `sleep`, `Start-Sleep`, `timeout`, `ping -n`, a loop of short waits, a path nothing writes (`waitfile.mjs C:/nonexistent 300`), or a fixed time followed by `tail`. A delay that is part of a measurement (hold the pointer still 3 s, sample CPU for 30 s) lives inside the measurement script, which logs it.
+
+**Parallel work.** Calls that do not need each other go in one message: lookups, independent reviews, and a task's reviewer with the next task's implementer when their files do not overlap (implementers still run one at a time). While a build, the gates or a package run, do what does not touch the source they compile: measurement scripts, the night report's section, the next brief or prompt, reading.
+
+**Subagents** follow "Subagent models and efforts" in `~/.claude/CLAUDE.md`; the runner's settings layer runs Sonnet at `medium` and Haiku at `high`. In a max session every Agent call names its effort (the header says how).
+
+| Thought | Reality |
+|---|---|
+| "The rule says the user approves plans, so I stop at the plan." | By starting the run, the user gave that approval for roadmap work. Stopping at the plan wastes the night. |
+| "I won't commit the plan, it may still change." | Commit it. Git is the record. |
+| "This decision is the user's call." | If it passes none of the five tests, it is yours: make it, record it, go on. |
+| "I'll list it under Waits for you so the user can check it." | The user asked for only what needs them. Run 3 listed 78 decisions for the morning, and the user kept every one; a long list buries the question that matters. |
+| "The closure went fast; I'll do the fix wave and the package too." | Each is its own session. Run 4's session 4 did five pieces in about 100 minutes, each after the first on a context full of the earlier ones. |
+| "The tasks are done; I'll build a probe copy and measure on the desktop." | The measurement is the next session's piece. Run 6's sessions 16 and 20 mixed tasks, packages and desktop probes and reached 315 calls with two compactions each. |
+| "These tasks touch race-prone code, so the task session needs `max`." | The tasks run in subagents at their own levels; `max` only makes the coordinating session dearer. Run 7 sent two task rounds to `max` and ran 61 % of its calls there. |
+| "My `max` piece is blocked; I'll use the session for the next piece." | That piece would run at `max` too. Record, hand over, end. |
+| "I'll give the build five minutes and tail the log." | Run it in the background and let its notification wake you. Run 6 lost 166 minutes in 89 `waitfile.mjs` calls, most of them on `C:/nonexistent`. |
+| "I'll leave the next step to the user." | Hand the next step to the next session. STOP only when no unblocked, approved work remains. |
+| "The guard blocked X, so I'll do it another way." | A blocked action is a hard stop. Note it and take other work. |
+
+**End every session with these three steps, in this order:**
+
+1. Commit the work together with the project's own log, plan and memory updates (and push, per the project's rules). Memory is not a progress log: the plan, the project's logs and the night report already hold rounds and commits. Save a memory only for a fact that outlives the chain, and keep its `MEMORY.md` line one short sentence (that file loads into every session, the user's own included).
+2. Add this session's section to the night report (the `report` path in `.claude/night-shift.json`, default `NIGHT_RUNS.md`) and commit it. The section has:
+   - the heading `## <yyyy-mm-dd> · run <n> · session <nn> (<HH:MM>–<HH:MM>) · <title>`, which the cards find the section by;
+   - what was done (commits);
+   - one line naming where this session's decisions are recorded;
+   - `**Waits for you**` with only what "What reaches the user" sends there, one item a line; the cards read each line as one item, and `- New: none.` as none:
+     ```
+     - New: <what waits>. Detail: `<path:line>`.
+     - Still waiting (session <nn>): <what waits>, `<path:line>`.
+     ```
+     Every item has two parts: what waits, and its detail or a `path:line` pointer to where the detail is written (the list of checks, the sample, the revert command). A carried item keeps its detail or pointer from the section it comes from; when one of its values changed (a commit range, a path, a count), write the new value followed by `(was <old>: <why>)`;
+   - `**Remaining:** <n> sessions`: how many more sessions the approved work needs after this one, as you see it now, each task session, closure review, fix wave, package or measurement its own session; `0` when you write STOP. The Telegram cards turn it into the chain's progress and estimated end.
+3. Read `$NIGHT_SHIFT_STATE/next-prompt.md`, then write it: the runner made it before this session started (it holds this session's own prompt), and a Write before a Read fails. It is either the next continuation prompt or, only when nothing approved and unblocked is left, a first line `STOP: <reason>` followed by what waits for the user.
+   - **Its effort.** Write a first line `EFFORT: max` only for a piece that "Effort" above allows, with the reason on the line below; the runner then starts that one session at `max`.
+   - **Write it fresh.** Every call of the next session re-reads it. Run 2's grew to 98 KB by copying the last prompt and appending each session's lessons; never build it that way, by hand or by script.
+   - It holds the chain's rules, the state with the exact values the next piece needs (commits, paths, round names), and only the lessons that piece needs.
+   - A lesson that holds beyond the next session goes into the project's notes file, under a topic heading, so that a later session reads only its part; the prompt names the file. The file is `lessons` in `.claude/night-shift.json`, else the one the project's CLAUDE.md names for subagent briefs, else `docs/agents/NOTES.md`. Commit it with step 1. Drop lessons that went stale or that the code or a check now enforces.
