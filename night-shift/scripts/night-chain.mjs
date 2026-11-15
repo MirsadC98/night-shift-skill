@@ -123,6 +123,18 @@ export function cutOffSession(state) {
   return sessionId ? { nn, sessionId } : null;
 }
 
+// A PowerShell single-quoted string. PowerShell ends one at ' and at the typographic quotes
+// ‘ ’ ‚ ‛ alike, so each is doubled: a state folder or a repository named with one must stay text.
+export const psQuote = (s) => `'${String(s).replace(/['‘’‚‛]/g, "$&$&")}'`;
+
+// The command line of a process: "" when it is gone, null when it could not be asked.
+const commandLine = (pid) => {
+  try {
+    return execFileSync("powershell", ["-NoProfile", "-NonInteractive", "-Command",
+      `(Get-CimInstance Win32_Process -Filter "ProcessId=${Number(pid)}").CommandLine`], { encoding: "utf8", windowsHide: true });
+  } catch { return null; }
+};
+
 // Starts `run` for this state through the project's scheduled task and returns the task's name.
 // No trigger, so only start (or a runner handing over) runs it and a finished chain never comes
 // back on its own; no time limit (schtasks' default stops a task after 72 h) and no battery stop,
@@ -136,14 +148,15 @@ function scheduleRun(run, extra = []) {
     return "direct";
   }
   const launcher = path.join(run.state, "launch.cmd");
-  fs.writeFileSync(launcher, `@echo off\r\ntitle night-shift ${path.basename(run.repo)}\r\n"${NODE}" "${SELF}" %*\r\n`);
+  // The folder's name goes into a cmd line: only what cmd reads as plain text.
+  fs.writeFileSync(launcher, `@echo off\r\ntitle night-shift ${path.basename(run.repo).replace(/[^\w .-]/g, "_")}\r\n"${NODE}" "${SELF}" %*\r\n`);
   const argLine = args.map((a) => `"${a}"`).join(" ");
   // A visible console runs launch.cmd; a hidden one is conhost --headless, which no default
   // terminal (Windows Terminal) takes over, so every child shares that hidden console too.
   const [exe, argv] = run.window ? [launcher, argLine]
     : [path.join(process.env.SystemRoot || "C:\\Windows", "System32", "conhost.exe"), `--headless "${NODE}" "${SELF}" ${argLine}`];
   const task = `night-shift-${slug(run.repo)}`;
-  const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
+  const q = psQuote;
   execFileSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference = 'Stop'; " +
     `$a = New-ScheduledTaskAction -Execute ${q(exe)} -Argument ${q(argv)}; ` +
     "$s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances Parallel; " +
@@ -251,21 +264,26 @@ async function runChain(opt) {
 
   // What was added to an earlier run's settings by hand (an env, another hook) stays;
   // the guard, the limit wait, the subagent model and the efforts are written over.
+  // Before every session, not once: the file sits in a folder the sessions can write, and one
+  // that dropped the guard's hook from it would run every later session without the guard.
   const settings = path.join(state, "night-settings.json");
-  const prev = JSON.parse(read(settings) || "{}");
-  fs.writeFileSync(settings, JSON.stringify({
-    ...prev,
-    hooks: { ...prev.hooks, PreToolUse: [{ matcher: "Bash|PowerShell|Write|Edit|MultiEdit|NotebookEdit",
-      hooks: [{ type: "command", command: NODE, args: [GUARD], timeout: 15, onFailure: "block" }] }] },
-    autoContinueAtUsageLimit: true,
-    // No one reads a headless session's prose: the user's Explanatory style only added insight blocks.
-    outputStyle: prev.outputStyle ?? "default",
-    // In this layer, above the user's and the project's files: VS Code's and Desktop's pickers
-    // save their pick as the user's default (run 2's #08–#20 ran at high, 2026-10-30), and the
-    // user may work on Fable while the chain runs. --effort is kept for max (effort.mjs).
-    env: { ...prev.env, CLAUDE_CODE_SUBAGENT_MODEL: SUB_MODEL },
-    modelSettings: nightModelSettings(prev.modelSettings, lowerSettings(repo), run.effort || "xhigh"),
-  }, null, 2));
+  const writeSettings = () => {
+    const prev = parseOr(read(settings), {});
+    fs.writeFileSync(settings, JSON.stringify({
+      ...prev,
+      hooks: { ...prev.hooks, PreToolUse: [{ matcher: "Bash|PowerShell|Write|Edit|MultiEdit|NotebookEdit",
+        hooks: [{ type: "command", command: NODE, args: [GUARD], timeout: 15, onFailure: "block" }] }] },
+      autoContinueAtUsageLimit: true,
+      // No one reads a headless session's prose: the user's Explanatory style only added insight blocks.
+      outputStyle: prev.outputStyle ?? "default",
+      // In this layer, above the user's and the project's files: VS Code's and Desktop's pickers
+      // save their pick as the user's default (run 2's #08–#20 ran at high, 2026-10-30), and the
+      // user may work on Fable while the chain runs. --effort is kept for max (effort.mjs).
+      env: { ...prev.env, CLAUDE_CODE_SUBAGENT_MODEL: SUB_MODEL },
+      modelSettings: nightModelSettings(prev.modelSettings, lowerSettings(repo), run.effort || "xhigh"),
+    }, null, 2));
+  };
+  writeSettings();
 
   const finish = (reason) => {
     clearInterval(heal);
@@ -327,6 +345,7 @@ async function runChain(opt) {
     log(resume ? `session ${nn} resumes ${resume.sessionId} ${resume.why === "stopped" ? "where the last runner stopped" : "after the usage limit"}`
       : `session ${nn} starts: ${promptEffort(prompt).body.split("\n")[0].slice(0, 120)}`);
     if (promptEffort(prompt, run.effort || "xhigh").effort === "max") log(`session ${nn} runs Opus at max (its prompt asks for it)`);
+    writeSettings();
     const result = await runSession(run, session, prompt, nn, resume);
     log(`session ${nn} ends: ${result.summary}`);
 
@@ -525,6 +544,15 @@ function stop(opt) {
   if (!ptr || ptr.finished) return console.log("no active run");
   fs.writeFileSync(path.join(ptr.state, "STOP-REQUEST"), now());
   if (opt.now && ptr.pid && alive(ptr.pid)) {
+    // A runner that died without an end line leaves its pid in the pointer, and Windows gives
+    // the number to another program: only a process that still is a runner is killed.
+    const line = commandLine(ptr.pid);
+    // Not knowing is no reason to kill, nor to call a live chain finished: STOP-REQUEST still ends it.
+    if (line === null) return console.log(`could not check what pid ${ptr.pid} is, so nothing was killed; the chain stops after the session in progress`);
+    if (!/night-chain\.mjs/i.test(line)) {
+      writePointer(repo, { ...ptr, finished: true, finishedAt: now(), reason: "its runner was already gone" });
+      return console.log(`the runner was already gone (pid ${ptr.pid} now belongs to another program, left alone); marked finished`);
+    }
     try { execFileSync("taskkill", ["/T", "/F", "/PID", String(ptr.pid)], { stdio: "ignore", windowsHide: true }); } catch {}
     writePointer(repo, { ...ptr, finished: true, finishedAt: now(), reason: "stopped now by the user" });
     console.log("stopped now; the session in progress was killed (check git status)");

@@ -7,7 +7,7 @@
 //   node night-report.mjs notify --state <dir> [--headline <text>] [--dry]
 //   node night-report.mjs card   --state <dir> [--nn <n> | --chain [reason]] [--send]   (default: the /durum card)
 //   node night-report.mjs watch  --state <dir> --pid <runner pid> [--announce] [--dry]
-//   node night-report.mjs telegram-setup        (after pressing Start in the bot's chat)
+//   node night-report.mjs telegram-setup [--chat <id>]   (after pressing Start in the bot's chat)
 //
 // watch follows chain.log and sends a short card (telegram-cards.mjs) when a
 // session ends, a line when the chain waits for a usage limit, resumes or
@@ -531,13 +531,27 @@ export async function telegram(method, cfg, body, { graceMs = 10_000 } = {}) {
 // The watcher's own trail (its output goes nowhere): commands, their delay, Telegram errors.
 const watchLog = (state, line) => { try { fs.appendFileSync(path.join(state, "watch.log"), `[${new Date().toLocaleString("sv-SE")}] ${line}\n`); } catch {} };
 
-async function chatId(cfg) {
-  if (cfg.chatId) return cfg.chatId;
-  const j = await telegram("getUpdates", cfg);
-  const chat = (j.result || []).map((u) => (u.message || u.my_chat_member)?.chat).find((c) => c?.type === "private");
-  if (!chat) return null;
-  fs.writeFileSync(TELEGRAM, JSON.stringify({ ...cfg, chatId: chat.id }, null, 2));
-  return chat.id;
+// The private chats that wrote to the bot, newest first, each once, with the name Telegram shows.
+export function privateChats(updates) {
+  const chats = new Map();
+  for (const u of [...(updates || [])].reverse()) {
+    const c = (u.message || u.my_chat_member)?.chat;
+    if (c?.type !== "private" || chats.has(c.id)) continue;
+    chats.set(c.id, { id: c.id, name: [[c.first_name, c.last_name].filter(Boolean).join(" "), c.username && `@${c.username}`].filter(Boolean).join(" ") || "?" });
+  }
+  return [...chats.values()];
+}
+
+// telegram-setup: which chat the reports go to. A bot's name is public, so anyone may have pressed
+// Start in it: the chat is named before it is saved, never taken unseen, and two chats are a choice
+// (--chat <id>), not a guess. Returns the lines to print; chatId is written only for the one chat.
+export function chooseChat(cfg, updates, wanted = null) {
+  const chats = privateChats(updates);
+  const pick = wanted != null ? chats.find((c) => String(c.id) === String(wanted)) : chats.length === 1 ? chats[0] : null;
+  if (pick) return { chatId: pick.id, lines: [`chat: ${pick.id} (${pick.name}); the reports go there`] };
+  if (wanted != null) return { chatId: null, lines: [`no private chat ${wanted} wrote to the bot${chats.length ? `; these did:\n${chats.map((c) => `  ${c.id}  ${c.name}`).join("\n")}` : ""}`] };
+  if (!chats.length) return { chatId: null, lines: [cfg.chatId ? `no new chat; the reports still go to ${cfg.chatId}` : "none yet: press Start in the bot's chat, then run this again"] };
+  return { chatId: null, lines: ["more than one chat wrote to this bot; name yours with --chat <id>:", ...chats.map((c) => `  ${c.id}  ${c.name}`)] };
 }
 
 async function send(messages) {
@@ -545,8 +559,8 @@ async function send(messages) {
   try { cfg = JSON.parse(read(TELEGRAM)); } catch { return "no telegram.json"; }
   if (!cfg?.token) return "no token";
   try {
-    const chat = await chatId(cfg);
-    if (!chat) return "no chat yet: press Start in the bot's chat";
+    const chat = cfg.chatId;
+    if (!chat) return "no chat yet: press Start in the bot's chat, then run night-report.mjs telegram-setup";
     for (const m of messages) {
       const { text, silent = false } = typeof m === "string" ? { text: m } : m;
       const j = await telegram("sendMessage", cfg, { chat_id: chat, text, parse_mode: "HTML", disable_web_page_preview: true, disable_notification: silent });
@@ -690,6 +704,15 @@ if (path.resolve(process.argv[1] || "") === SELF) {
   } else if (opt.cmd === "watch") await watch(opt);
   else if (opt.cmd === "telegram-setup") {
     const cfg = JSON.parse(read(TELEGRAM) || "{}");
-    console.log(cfg.token ? `chat: ${await chatId({ ...cfg, chatId: null }) ?? "none yet: press Start in the bot's chat, then run this again"}` : `no token in ${TELEGRAM}`);
+    if (!cfg.token) console.log(`no token in ${TELEGRAM}`);
+    else {
+      const j = await telegram("getUpdates", cfg);
+      if (!j.ok) console.log(`telegram: ${j.description}`);
+      else {
+        const { chatId, lines } = chooseChat(cfg, j.result, typeof opt.chat === "string" ? opt.chat : null);
+        if (chatId != null) fs.writeFileSync(TELEGRAM, JSON.stringify({ ...cfg, chatId }, null, 2));
+        console.log(lines.join("\n"));
+      }
+    }
   } else console.log(read(SELF).split("\n").slice(1, 14).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
 }

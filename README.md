@@ -64,7 +64,7 @@ Put a `.claude/night-shift.json` in the target repository. Every key is optional
 }
 ```
 
-- `stateDir`: the folder for the chain's log, prompts and inbox. The default is `<temp>/night-shift-<repo>-{date}`.
+- `stateDir`: the folder for the chain's log, prompts and inbox. The default is `<temp>/night-shift-<repo>-{date}`, inside your own profile. A folder under `C:/temp` is shorter to type, but on a PC with other accounts those users can write there too, and the next session reads `inbox.md` and `next-prompt.md` from this folder as instructions. On a shared PC keep the default.
 - `report`: the night report. The default is `NIGHT_RUNS.md`.
 - `lessons`: the notes file where sessions keep lessons that outlast one session.
 - `deny`: your own guard rules. `pattern` is a regular expression and `flags` defaults to `i`.
@@ -73,14 +73,27 @@ Put a `.claude/night-shift.json` in the target repository. Every key is optional
 
 `scripts/guard.mjs` runs as a hook in every night session. It blocks:
 
-- history rewrites, force pushes, merges, branch deletes, `git reset --hard` and `git clean -f`;
+- history rewrites, force pushes, merges, branch and ref deletes, `git reset --hard`, `git clean -f`, and discarding the whole working tree (`git checkout .`, `git restore .`);
 - changes to remotes and to global git config;
 - publishing: `npm publish`, `gh release`, GitHub API writes and store uploads;
-- deletes outside the repository and temp folders;
+- deletes outside the repository and temp folders, recursive or not, with the target read from the folder the command stands in (`cd elsewhere && rm -rf x` is refused);
+- file writes (Write, Edit) outside the repository and temp folders, and writes to the skill itself, Claude settings, your global `CLAUDE.md`, the project's `.claude/night-shift.json`, `.git`, and the runner's own files in the state folder (`night-settings.json`, `run.json`, `launch.cmd`, the logs);
 - registry writes, system-level commands, and killing `node`, `claude`, the editor or the shell;
 - anything your project's `deny` rules match.
 
 A blocked action becomes an item under "Waits for you" in the night report.
+
+Paths are compared the way Windows resolves them (`..`, a trailing dot or space, a `\\?\` prefix, UNC), and a quoted flag (`git push "--force"`) or flags written together (`-uf`) are still read as flags. The runner writes the hook into `night-settings.json` again before every session, and registers it with `onFailure: "block"`, so a guard that crashes refuses the action; a CLI too old to know that option would let it through.
+
+### What the guard does not stop
+
+It reads the text of a command; it does not confine the process. These still pass, among others:
+
+- a shell redirect, or a program that writes or deletes on its own (`echo x > C:\somewhere\file`, `node -e "fs.rmSync(...)"`, a build script);
+- network calls such as `curl -X POST`;
+- `git push` to a branch and `gh pr create`: sessions are meant to push their work.
+
+So the rule from the top of this page stands: run it only on a repository you have committed and can restore, on a machine and with credentials you would hand to an unattended script.
 
 ## Telegram (optional)
 
@@ -88,7 +101,7 @@ The runner can send a short card to Telegram when each session ends, plus one li
 
 1. Create a bot with BotFather.
 2. Save `{ "token": "<bot token>" }` to `~/.claude/night-shift/telegram.json`. This file stays outside the skill folder; never commit it.
-3. Press Start in the bot's chat, then run `node ~/.claude/skills/night-shift/scripts/night-report.mjs telegram-setup`.
+3. Press Start in the bot's chat, then run `node ~/.claude/skills/night-shift/scripts/night-report.mjs telegram-setup`. It prints the chat it saved, by name; check that it is yours. Reports go only to that chat, and only that chat's commands are answered. If someone else has written to the bot as well, setup saves nothing and lists the chats: run it again with `--chat <id>`.
 
 In the bot's chat, `/durum` shows what is running and `/rapor` lists this run's jobs.
 

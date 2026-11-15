@@ -476,3 +476,65 @@ test("a Telegram request that never answers gives up after its own timeout", { t
     server.close();
   }
 });
+
+// ---------------------------------------------------------------- the 2026-11-15 security review
+test("a session that rewrites night-settings.json does not take the guard from the next one", async () => {
+  const { state, env, root } = setup();
+  const fake = path.join(root, "fake-settings.mjs");
+  fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path";
+const st = process.env.NIGHT_SHIFT_STATE, n = Number(process.env.NIGHT_SHIFT_SESSION), f = path.join(st, "night-settings.json");
+if (n === 1) { fs.writeFileSync(f, JSON.stringify({ env: { KEPT: "1" }, hooks: {} })); fs.writeFileSync(path.join(st, "next-prompt.md"), "second"); }
+else if (n === 2) { fs.copyFileSync(f, path.join(st, "seen-2.json")); fs.writeFileSync(f, "not json"); fs.writeFileSync(path.join(st, "next-prompt.md"), "third"); }
+else { fs.copyFileSync(f, path.join(st, "seen-3.json")); fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done"); }
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-" + n, result: "ok" }));
+`);
+  const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+  fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake }));
+  const { code } = await runOnce(["--state", state, "--headless"], env, root);
+  assert.equal(code, 0, fs.readFileSync(path.join(state, "chain.log"), "utf8"));
+  const seen = (n) => JSON.parse(fs.readFileSync(path.join(state, `seen-${n}.json`), "utf8"));
+  assert.match(seen(2).hooks.PreToolUse[0].hooks[0].args[0], /guard\.mjs$/);
+  assert.equal(seen(2).hooks.PreToolUse[0].hooks[0].onFailure, "block");
+  assert.equal(seen(2).env.KEPT, "1", "what was added by hand stays");
+  assert.equal(seen(2).env.CLAUDE_CODE_SUBAGENT_MODEL, "sonnet");
+  assert.match(seen(3).hooks.PreToolUse[0].hooks[0].args[0], /guard\.mjs$/, "a settings file broken by a session is written anew");
+});
+
+test("psQuote doubles every character PowerShell reads as a single quote", async () => {
+  const { psQuote } = await import("./night-chain.mjs");
+  assert.equal(psQuote("C:\temp\it's"), "'C:\temp\it''s'");
+  assert.equal(psQuote("x\u2019; calc; \u2018y"), "'x\u2019\u2019; calc; \u2018\u2018y'");
+  assert.equal(psQuote("a\u201Ab\u201Bc"), "'a\u201A\u201Ab\u201B\u201Bc'");
+});
+
+test("stop --now leaves a process alone that only has the dead runner's pid", { timeout: 60_000 }, async () => {
+  const { home, repo, state, env, root } = setup();
+  const crypto = await import("node:crypto");
+  const other = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+  try {
+    const dir = path.join(home, ".claude", "night-shift", "runs");
+    fs.mkdirSync(dir, { recursive: true });
+    const slug = `${path.basename(repo)}-${crypto.createHash("sha1").update(repo.toLowerCase()).digest("hex").slice(0, 8)}`;
+    fs.writeFileSync(path.join(dir, `${slug}.json`), JSON.stringify({ pid: other.pid, state, finished: false, startedAt: "test" }));
+    const out = execFileSync(process.execPath, [CHAIN, "stop", "--repo", repo, "--now"], { env, cwd: root, encoding: "utf8" });
+    assert.match(out, /already gone/);
+    assert.ok(alive(other.pid), "the other program must still run");
+    assert.equal(pointerOf(home).finished, true);
+  } finally { other.kill(); }
+});
+
+test("telegram-setup names the chat it saves and never picks between two", async () => {
+  const { privateChats, chooseChat } = await import("./night-report.mjs");
+  const chat = (id, first_name, username) => ({ message: { chat: { id, type: "private", first_name, username } } });
+  const mine = chat(11, "Ada", "ada"), stranger = chat(22, "Mallory");
+  assert.deepEqual(privateChats([stranger, mine, mine, { message: { chat: { id: -5, type: "group" } } }]),
+    [{ id: 11, name: "Ada @ada" }, { id: 22, name: "Mallory" }]);
+  assert.deepEqual(chooseChat({}, [mine]), { chatId: 11, lines: ["chat: 11 (Ada @ada); the reports go there"] });
+  const two = chooseChat({}, [stranger, mine]);
+  assert.equal(two.chatId, null);
+  assert.match(two.lines.join("\n"), /more than one chat[\s\S]*11 {2}Ada @ada[\s\S]*22 {2}Mallory/);
+  assert.equal(chooseChat({}, [stranger, mine], "11").chatId, 11);
+  assert.equal(chooseChat({}, [stranger, mine], "33").chatId, null);
+  assert.equal(chooseChat({}, []).chatId, null);
+  assert.match(chooseChat({ chatId: 11 }, []).lines[0], /still go to 11/);
+});

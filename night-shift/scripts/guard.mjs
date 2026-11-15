@@ -14,18 +14,39 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// A path the way Windows resolves it, so that two spellings of one file compare equal: one kind
+// of slash, lower case, an MSYS drive (/c/…) and \\?\C:\… as a drive path, Git Bash's /tmp as the
+// temp folder, . and .. resolved, and a segment's trailing dots and spaces dropped (Windows opens
+// "settings.json." as settings.json). The 2026-11-15 review wrote the guard itself through
+// C:/temp/../Users/….
 const norm = (p) => {
   let s = String(p || "").trim().replace(/^["']|["']$/g, "").replace(/\\/g, "/").toLowerCase();
+  s = s.replace(/^\/\/[?.]\/(?=[a-z]:)/, "");
   const msys = /^\/([a-z])\//.exec(s);
   if (msys) s = `${msys[1]}:/${s.slice(3)}`;
-  return s.replace(/\/+$/, "");
+  else if (process.platform === "win32" && /^\/tmp(\/|$)/.test(s)) s = `${tmpdir().replace(/\\/g, "/").toLowerCase()}${s.slice(4)}`;
+  const lead = /^\/{0,2}/.exec(s)[0].slice(0, 2);
+  const out = [];
+  for (const raw of s.slice(lead.length).split("/")) {
+    const seg = /^\.\.?$/.test(raw) ? raw : raw.replace(/[. ]+$/, "");
+    if (!seg || seg === ".") continue;
+    if (seg !== "..") out.push(seg);
+    else if (out.length && out.at(-1) !== "..") { if (!/^[a-z]:$/.test(out.at(-1))) out.pop(); }
+    else if (!lead) out.push(seg);
+  }
+  return lead + out.join("/");
 };
 const under = (p, root) => root && (p === root || p.startsWith(root + "/"));
+
+// What the runner keeps in the state folder: the settings file that loads this guard, the file
+// that names the program each session starts, and its own logs and marks.
+const RUNNER_FILES = /^(night-settings\.json|run\.json|launch\.cmd|resume\.json|chain\.log|reload-request|watch\.pid|notified\.json|session-\d+\.(jsonl|err))$/;
 
 function roots(env) {
   const home = norm(env.USERPROFILE || env.HOME || homedir());
   return {
     repo: norm(env.NIGHT_SHIFT_REPO || ""),
+    state: norm(env.NIGHT_SHIFT_STATE || ""),
     writable: [
       norm(env.NIGHT_SHIFT_REPO || ""),
       "c:/temp",
@@ -44,6 +65,7 @@ function protectedPath(p, r) {
   if (p === `${r.home}/.claude/claude.md`) return "the user's global CLAUDE.md";
   if (r.repo && p === `${r.repo}/.claude/night-shift.json`) return "the project's night-shift rules";
   if (r.repo && under(p, `${r.repo}/.git`)) return "the .git directory";
+  if (r.state && under(p, r.state) && RUNNER_FILES.test(p.slice(r.state.length + 1))) return "the runner's own files in the state folder";
   return null;
 }
 
@@ -60,11 +82,17 @@ function checkWrite(file, env) {
 }
 
 const GENERIC = [
-  [/\bgit\b[^\n;&|]*\bpush\b[^\n;&|]*(\s--force\b|\s-f\b|\s--force-with-lease\b|\s--delete\b|\s-d\b|\s--mirror\b|\s\+\S|\s:\S)/i, "force or deleting pushes rewrite shared history"],
+  // Short flags may be written together (-uf), so a cluster that holds the letter counts.
+  [/\bgit\b[^\n;&|]*\bpush\b[^\n;&|]*(\s--force\b|\s-[a-z]*[fd][a-z]*\b|\s--force-with-lease\b|\s--delete\b|\s--mirror\b|\s--prune\b|\s\+\S|\s:\S)/i, "force or deleting pushes rewrite shared history"],
   [/\bgit\b[^\n;&|]*\breset\b[^\n;&|]*--hard\b/i, "git reset --hard discards work"],
+  [/\bgit\b[^\n;&|]*\bcheckout\b[^\n;&|]*(\s(-f|--force)\b|\s(\.|:\/)(?=\s|$))/, "checking out over the whole tree discards work"],
+  // -S is --staged (index only, nothing lost), -s is --source: these two stay case-sensitive.
+  [/\bgit\b[^\n;&|]*\brestore\b(?![^\n;&|]*\s(--staged|-S)\b)[^\n;&|]*\s(\.|:\/)(?=\s|$)/, "restoring the whole tree discards work"],
+  [/\bgit\b[^\n;&|]*\brestore\b(?=[^\n;&|]*\s(--worktree|-W)\b)[^\n;&|]*\s(\.|:\/)(?=\s|$)/, "restoring the whole tree discards work"],
   [/\bgit\b[^\n;&|]*\b(rebase|filter-branch|filter-repo)\b/i, "history rewrites need the user"],
   [/\bgit\b[^\n;&|]*\bcommit\b[^\n;&|]*--amend\b/i, "amending rewrites history"],
-  [/\bgit\b[^\n;&|]*\bbranch\b[^\n;&|]*(\s-d\b|\s-D\b|\s--delete\b)/, "deleting branches needs the user"],
+  [/\bgit\b[^\n;&|]*\bbranch\b[^\n;&|]*(\s-[a-zA-Z]*[dD][a-zA-Z]*\b|\s--delete\b)/, "deleting branches needs the user"],
+  [/\bgit\b[^\n;&|]*\bupdate-ref\b[^\n;&|]*\s(-d|--delete)\b/, "deleting refs needs the user"],
   [/\bgit\b[^\n;&|]*\bclean\b[^\n;&|]*\s-[a-z]*f/i, "git clean deletes untracked work"],
   [/\bgit\b[^\n;&|]*\bmerge(?![-\w])/i, "merges need the user"],
   [/\bgit\b[^\n;&|]*\bpull\b(?![^\n;&|]*--ff-only)/i, "only git pull --ff-only is allowed"],
@@ -72,7 +100,10 @@ const GENERIC = [
   [/\bgit\b[^\n;&|]*\bremote\s+(add|remove|rm|set-url|rename)\b/i, "changing remotes needs the user"],
   [/\bgit\b[^\n;&|]*\bconfig\b[^\n;&|]*--(global|system)\b/i, "global git config is the user's"],
   [/\bgh\s+(pr\s+merge|release\s+(create|delete|upload|edit)|repo\s+(delete|edit|rename|archive|create)|secret\b|variable\b)/i, "publishing or changing the GitHub repository needs the user"],
-  [/\bgh\s+api\b[^\n]*(-X|--method)\s*(DELETE|PUT|PATCH|POST)\b/i, "writing through the GitHub API needs the user"],
+  [/\bgh\s+api\b[^\n]*(-X|--method)[\s=]*(DELETE|PUT|PATCH|POST)\b/i, "writing through the GitHub API needs the user"],
+  // A field or an input file makes gh api send a POST unless the method is GET; a GraphQL query is one too, and only reads.
+  [/\bgh\s+api\b(?!\s+graphql\b)(?![^\n]*(-X|--method)[\s=]*GET\b)[^\n]*\s(-f|--field|--raw-field|--input)[\s=]/i, "gh api with fields or an input file sends a POST: writing through the GitHub API needs the user"],
+  [/\bgh\s+api\s+graphql\b[^\n]*\bmutation\b/i, "writing through the GitHub API needs the user"],
   [/\b(npm|pnpm|yarn|bun)\s+publish\b|\bcargo\s+publish\b|\bsteamcmd\b|\bbutler\s+push\b|\bvsce\s+publish\b/i, "publishing needs the user"],
   [/\b(shutdown(\.exe)?\s|Restart-Computer|Stop-Computer|diskpart|bcdedit|vssadmin|cipher\s+\/w|format(\.com)?\s+[a-z]:)/i, "system-level commands are not allowed"],
   [/\breg(\.exe)?\s+(add|delete|import|restore|load)\b|\b(Set|New|Remove|Rename)-ItemProperty\b|\bRemove-Item\b[^\n]*\bHK(CU|LM):/i, "registry writes change the live system"],
@@ -80,7 +111,12 @@ const GENERIC = [
   [/\bSystemParametersInfo\b/i, "changing system parameters touches the live desktop"],
 ];
 
-const RECURSIVE_DELETE = /\brm\s+(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b|\bRemove-Item\b[^\n]*-Recurse\b|\b(rmdir|rd)\s+\/s\b|\bdel\s+\/s\b|\brimraf\b/i;
+// PowerShell takes any prefix of -Recurse (-r, -rec) and has aliases for Remove-Item.
+const RECURSIVE_DELETE = /\brm\s+(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b|\b(Remove-Item|ri|rm|del|erase|rd|rmdir)\b[^\n]*\s-r(e(c(u(r(se?)?)?)?)?)?\b|\b(rmdir|rd)\s+\/s\b|\bdel\s+\/s\b|\brimraf\b/i;
+const DELETE_WORD = /^(?:.*[\\/])?(rm|del|erase|remove-item|ri|rd|rmdir|unlink|rimraf|find)(\.exe)?$/i;
+const ANY_DELETE = /\b(rm|del|erase|Remove-Item|ri|rd|rmdir|unlink|rimraf)\b|\s-delete\b/i;
+const CD_WORD = /^(cd|chdir|pushd|set-location|sl|push-location)$/i;
+const POP_WORD = /^(popd|pop-location)$/i;
 
 const SHELL = String.raw`(?:\S*[\\/])?(?:bash|sh|zsh|dash|pwsh|powershell|cmd)(?:\.exe)?`;
 
@@ -163,26 +199,53 @@ function recordAssignments(words, vars, env) {
   }
 }
 
-function checkRecursiveDelete(cmd, env) {
+const isAbsolute = (t) => /^[a-z]:[\\/]/i.test(t) || /^[\\/]/.test(t);
+
+// Deletes: a recursive one anywhere in a simple command, and a plain one (rm, del, Remove-Item,
+// unlink, find -delete) where it is the command. cwd is the folder the hook says the command
+// starts in; a cd inside the command moves it, so a relative target is read from where the
+// delete stands (`cd /c/Users/u && rm -rf Documents` passed until 2026-11-15).
+function checkDeletes(cmd, env, cwd) {
   const text = dropHeredocs(cmd);
-  if (!RECURSIVE_DELETE.test(text)) return null;
+  if (!RECURSIVE_DELETE.test(text) && !ANY_DELETE.test(text)) return null;
   const r = roots(env);
   const vars = new Map();
+  let at = norm(cwd || "") || r.repo, lost = false;
   // Each delete is read on its own: the words of other commands are not its targets.
   for (const words of simpleCommands(text)) {
     recordAssignments(words, vars, env);
-    if (!RECURSIVE_DELETE.test(words.join(" "))) continue;
-    for (const raw of words) {
+    const name = words.find((w) => !/^[A-Za-z_]\w*=/.test(w) && !/^(sudo|command|exec|time|env)$/.test(w)) || "";
+    if (POP_WORD.test(name)) { lost = true; continue; }
+    if (CD_WORD.test(name)) {
+      const arg = words.slice(words.indexOf(name) + 1).find((w) => !/^-/.test(w) && !/^\/d$/i.test(w));
+      const to = arg == null ? null : expand(arg, vars, env);
+      if (!to || /^[~-]/.test(to)) lost = true;
+      else if (isAbsolute(to)) { at = norm(to); lost = false; }
+      else if (at) at = norm(`${at}/${to}`);
+      continue;
+    }
+    const recursive = RECURSIVE_DELETE.test(words.join(" "));
+    const plain = !recursive && DELETE_WORD.test(name) && (!/find(\.exe)?$/i.test(name) || words.includes("-delete") || (words.includes("-exec") && words.some((w) => /^(rm|unlink)$/.test(w))));
+    if (!recursive && !plain) continue;
+    const kind = recursive ? "recursive deletes" : "deletes";
+    // Its targets come after the delete's own word.
+    for (const raw of words.slice(words.findIndex((w) => DELETE_WORD.test(w)) + 1)) {
       const t = expand(raw, vars, env);
-      if (t === null) return `refusing a recursive delete through a variable path that cannot be resolved (${raw.replace(/\0/g, "$")})`;
-      if (/^-/.test(t) || /^\/(s|q)$/i.test(t)) continue;
-      if (/^(\.|\.\/|\*|\.\/\*|\/|~|~\/.*|\.git|\.git\/.*)$/.test(t) || /(^|[\\/])\.\.([\\/]|$)/.test(t)) return `refusing a recursive delete of "${t}"`;
-      const isAbs = /^[a-z]:[\\/]/i.test(t) || /^\/[a-z]\//i.test(t) || /^\//.test(t);
-      if (isAbs) {
-        const p = norm(t);
-        if (r.repo && (p === r.repo || under(p, `${r.repo}/.git`))) return `refusing a recursive delete of the repository (${t})`;
-        if (!r.writable.some((root) => under(p, root) && p !== root)) return `recursive deletes are limited to the repository and temp folders (got ${t})`;
+      if (t === null) {
+        // `for f in *.tmp; do rm "$f"; done` is everyday work; a tree deleted through an unknown path is not.
+        if (!recursive) continue;
+        return `refusing a recursive delete through a variable path that cannot be resolved (${raw.replace(/\0/g, "$")})`;
       }
+      if (/^-/.test(t) || /^\/[sqfa]$/i.test(t) || /^(\/dev\/null|nul)$/i.test(t)) continue;
+      if (/^~([\\/]|$)/.test(t)) return `refusing a ${recursive ? "recursive delete" : "delete"} in the home folder ("${t}")`;
+      if (recursive && (/^(\.|\.\/|\*|\.\/\*|\/|\.git|\.git\/.*)$/.test(t) || /(^|[\\/])\.\.([\\/]|$)/.test(t))) return `refusing a recursive delete of "${t}"`;
+      const abs = isAbsolute(t);
+      if (!abs && lost) return `refusing a delete after a cd the guard cannot follow: it cannot tell which folder "${t}" is in`;
+      if (!abs && !at) continue;
+      const p = norm(abs ? t : `${at}/${t}`);
+      if (r.repo && under(p, `${r.repo}/.git`)) return `refusing a delete inside .git (${t})`;
+      if (recursive && r.repo && p === r.repo) return `refusing a recursive delete of the repository (${t})`;
+      if (!r.writable.some((root) => under(p, root) && !(recursive && p === root))) return `${kind} are limited to the repository and temp folders (got ${t})`;
     }
   }
   return null;
@@ -204,13 +267,15 @@ export function decide(input, env = process.env) {
     return checkWrite(ti.file_path || ti.notebook_path, env);
   }
   if (tool === "Bash" || tool === "PowerShell") {
-    const cmd = String(ti.command || "");
+    // A command continued on the next line (a trailing backslash, or PowerShell's backtick) is one line.
+    const cmd = String(ti.command || "").replace(/[\\`]\r?\n/g, " ");
     // Git rules read the command without its quoted text, so a commit message
-    // that mentions "merge" or "pull" is not a merge or a pull.
-    const unquoted = cmd.replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, '""');
+    // that mentions "merge" or "pull" is not a merge or a pull. A quoted flag or
+    // refspec ("--force", '+main', ":old") is still what git gets.
+    const unquoted = cmd.replace(/"((?:[^"\\]|\\.)*)"|'([^']*)'/g, (m, d, s) => (/^[-+:]\S*$/.test(d ?? s) ? d ?? s : '""'));
     for (const [re, reason] of GENERIC) if (re.test(re.source.startsWith("\\bgit\\b") ? unquoted : cmd)) return reason;
     for (const [re, reason] of projectRules(env)) if (re.test(cmd)) return reason;
-    return checkRecursiveDelete(cmd, env);
+    return checkDeletes(String(ti.command || ""), env, input.cwd);
   }
   return null;
 }
@@ -240,6 +305,15 @@ function selfTest() {
     [write("C:/Users/u/.claude/skills/night-shift/SKILL.md"), true], [write("C:/work/repo/.claude/settings.json"), true],
     [write("C:/work/repo/.claude/night-shift.json"), true], [write("C:/Users/u/Desktop/a.txt"), true],
     [write("C:/work/repo/.git/config"), true],
+    // The 2026-11-15 review: the runner's own files, a path through .., a delete after a cd, quoted and joined flags.
+    [write("C:/temp/x-night/night-settings.json"), true], [write("C:/temp/x-night/run.json"), true],
+    [write("C:/temp/../Users/u/.claude/skills/night-shift/scripts/guard.mjs"), true], [write("C:/work/repo/.claude/settings.json."), true],
+    [bash("cd /c/Users/u && rm -rf Documents"), true], [bash("cd app && rm -rf dist"), false],
+    [bash("Remove-Item -r -fo C:\\Users\\u\\Documents"), true], [bash("Remove-Item -Recurse ~\\Documents"), true],
+    [bash("rm -f /c/Users/u/Documents/a.docx"), true], [bash("rm -f src/old.ts"), false],
+    [bash(`git push "--force" origin main`), true], [bash("git push -uf origin main"), true], [bash("git push -u origin night"), false],
+    [bash("git checkout -- ."), true], [bash("git checkout -- src/a.ts"), false], [bash("git restore ."), true],
+    [bash("gh api --method=DELETE repos/o/r"), true], [bash("gh api repos/o/r/issues -f title=x"), true], [bash("gh api repos/o/r/pulls"), false],
   ];
   let failed = 0;
   cases.forEach(([got, deny], i) => {
