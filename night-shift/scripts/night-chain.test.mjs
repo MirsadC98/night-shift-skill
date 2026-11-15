@@ -774,3 +774,10 @@ fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done"); ok(n);
   assert.equal((log.match(/usage limit: waiting/g) || []).length, 1);
   assert.match(log, /chain ends: STOP: done/);
 });
+
+test("a session that wrote STOP and was then cut off by a limit ends the chain at once, without waiting for the reset", async () => {
+  const { log } = await limitRun(`fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done"); limit(Math.floor(Date.now() / 1000) + 2 * 3600);`,
+    { until: "09:00", deadline: Date.now() + 6 * 3_600_000 });
+  assert.match(log, /chain ends: STOP: done/);
+  assert.doesNotMatch(log, /usage limit: waiting/);
+});

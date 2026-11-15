@@ -375,6 +375,7 @@ async function runChain(opt) {
 
   // In this process, so `wait` (which waits for it to exit) goes on through a limit. A STOP request ends it early.
   // NIGHT_SHIFT_LIMIT_TICK_MS: a shorter look at the clock for night-chain.test.mjs.
+  const isStop = (body) => /^STOP\b/i.test(body);
   const waitUntil = async (until) => {
     const tick = Number(process.env.NIGHT_SHIFT_LIMIT_TICK_MS) || 60_000;
     while (Date.now() < until && !fs.existsSync(stopFile)) await new Promise((r) => setTimeout(r, tick));
@@ -390,7 +391,7 @@ async function runChain(opt) {
     // MODEL and EFFORT lines are the runner's: STOP is looked for in what follows them, and the
     // session gets only that.
     const asked = sessionPlan(prompt, run);
-    if (/^STOP\b/i.test(asked.body)) finish(asked.body.split("\n")[0]);
+    if (isStop(asked.body)) finish(asked.body.split("\n")[0]);
     if (!asked.body.trim()) finish("next-prompt.md holds only MODEL/EFFORT lines");
 
     const nn = String(session).padStart(2, "0");
@@ -443,8 +444,11 @@ async function runChain(opt) {
     if (result.limited) {
       if (result.limitInfo) log(`session ${nn}: ${result.limitType || "a usage limit"} cut it off; limit record ${JSON.stringify(result.limitInfo)}`);
       // After a handover there is nothing to resume: next-prompt.md carries the chain.
-      if (wrote) fs.rmSync(resumeFile, { force: true });
-      else if (result.sessionId) fs.writeFileSync(resumeFile, JSON.stringify({ nn, sessionId: result.sessionId, why: "limit", model: plan.model, effort: plan.effort }));
+      if (wrote) {
+        fs.rmSync(resumeFile, { force: true });
+        // A STOP handover ends the chain at the loop's top: no reset to wait for, nor one too far away.
+        if (isStop(sessionPlan(read(next).trim(), run).body)) { session++; continue; }
+      } else if (result.sessionId) fs.writeFileSync(resumeFile, JSON.stringify({ nn, sessionId: result.sessionId, why: "limit", model: plan.model, effort: plan.effort }));
       // A reset the chain cannot use ends it, with resume.json (or the handover) kept for the next start.
       if (result.resetAt && run.deadline && result.resetAt > run.deadline) finish(`the usage limit resets ${stamp(result.resetAt)}, after ${run.until}`);
       const maxWait = run.maxWaitHours ?? 6;
