@@ -552,7 +552,9 @@ test("report and job card: the progress counts only this run's jobs, from the re
     "## 2026-11-10 · run 5 · session 5 (12:42–13:12) · D3 plan", "**Remaining:** 3 sessions (D3a, D3b, closure)", "",
     "## 2026-11-10 · run 5 · session 6 (13:13–14:13) · D3a", "**Remaining:** 2 sessions", "**Next:** D3b.",
   ].join("\n"));
-  assert.match(buildReport(state, { pid: process.pid }).plain, /Çalışıyor · iş 07\/4 · 2\/4 iş bitti · tahmini bitiş ~\d\d:\d\d · /);
+  // Live, from the real clock: one job left at the mean of 45 min, which late in the evening
+  // falls on the next day ("yarın ~00:15"; telegram-cards.test.mjs pins the label with a fixed clock).
+  assert.match(buildReport(state, { pid: process.pid }).plain, /Çalışıyor · iş 07\/4 · 2\/4 iş bitti · tahmini bitiş (?:yarın )?~\d\d:\d\d · /);
   // As at the job's end: two left at the mean of 45 min from 14:13.
   assert.match(sessionMessage(state, "06", process.pid).text, /\n📊 2\/4 iş bitti · tahmini bitiş ~15:45\n/);
 });
