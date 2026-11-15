@@ -380,3 +380,54 @@ test("a cd inside a wrapper or parentheses does not move the commands after it",
   assert.equal(at("(cd /c/temp/x && rm -rf old)"), null);
   assert.equal(at("eval 'cd /c/temp/x'; rm -rf old"), null);
 });
+
+const aliases = { fp: "push --force", wipe: "!rm -rf /c/Users/u/Documents", st: "status -sb", loop: "loop", pass: "!git", gp: "-C app push --force" };
+const git = (c) => decide({ tool_name: "Bash", tool_input: { command: c } }, env, { gitAlias: (n) => aliases[n] ?? null });
+
+test("git options are read as git reads them: abbreviated, clustered, after global options", () => {
+  for (const c of [`git push --dele origin side`, `git push --forc`, `git push --force-if-includes --force-with-lea`, `git push origin HEAD:main ""-f`,
+    `git reset --har HEAD~3`, `git commit --amen -m x`, `git clean -d --force`, `git clean --fo`, `git clean --f`, `git branch --del x`, `git branch -f main HEAD~3`,
+    `git branch -M old main`, `git checkout -qf`, `git checkout -B main origin/main`, `git switch -f main`, `git switch --discard-changes main`,
+    `git switch -C main origin/main`, `git update-ref refs/heads/x 0000000000000000000000000000000000000000`, `git reflog expire --expire=now --all`,
+    `git reflog delete HEAD@{1}`, `git -C /c/work/repo push --force`, `git --no-pager -c core.pager=cat reset --hard`, `git.exe push -f`,
+    `"C:/Program Files/Git/bin/git.exe" push --force`, `git --namespace x push -f`, `git --exec-path=/x --git-dir=.git reset --hard`, `git-push --force`,
+    `git remote -v add x http://h/r`, `git restore -SW .`, `git restore --staged --worktree .`, `git checkout ./`, `env -u A git push -f`,
+    `git rebase -i HEAD~3`, `git merge --abort`, `git pull`, `git pull --rebase`, `git stash drop`, `git stash clear`, `git config --glob user.name x`, `git push origin +main`, `git push origin :old`])
+    assert.ok(git(c), c);
+  for (const c of [`git push -u origin night`, `git push origin main`, `git checkout -b night`, `git switch -c night`, `git branch -m old new`,
+    `git branch --show-current`, `git reset --soft HEAD~1`, `git reflog`, `git clean -n`, `git commit -m "docs: --amend and --force notes"`,
+    `git -C app status`, `git restore --staged .`, `git stash push -u -m wip`, `git log --oneline | grep -i merge`, `git merge-base HEAD origin/main`,
+    `git push --no-force origin night`, `git push -- --force`, `git branch --format='%(refname)'`, `git pull --ff-only`, `git remote -v`,
+    `git commit -m x --no-amend`, `git status -sb`, `git -c core.pager=cat log`, `git rm src/a.ts`, `git checkout main -- src/a.ts`])
+    assert.equal(git(c), null, c);
+});
+test("an alias is read as what it stands for, and defining one is refused", () => {
+  assert.ok(git("git fp origin HEAD:main"));
+  assert.ok(git("git wipe"));
+  assert.ok(git("git gp"));
+  assert.ok(git("git pass push --force"));
+  assert.ok(git("git loop"), "an alias that never ends is a refusal, not a hang");
+  assert.equal(git("git st"), null);
+  assert.equal(git("git unknown-thing"), null);
+  assert.ok(git(`git config alias.fp 'push --force'`));
+  assert.ok(git(`git -c alias.x='push --force' x origin main`));
+  assert.ok(git(`git -c "alias.x=!rm -rf /c/Users/u/Documents" x`));
+  assert.ok(git(`git --config-env=alias.x=A x`));
+  assert.ok(git(`git --config-env alias.x=A x`));
+  assert.ok(git(`git -c include.path=/c/temp/a.cfg x`));
+  assert.ok(git(`GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x GIT_CONFIG_VALUE_0='push -f' git x`));
+  assert.ok(git("git config --global user.name x"));
+  assert.equal(git("git config user.name"), null);
+  assert.equal(git("git config --get alias.fp"), null);
+  assert.equal(git("git -c user.name=x commit -m y"), null);
+});
+test("git's global options are read the same way for git rm", () => {
+  for (const c of [`git --namespace x rm -rf /c/Users/u/Documents`, `git --super-prefix=a/ rm -rf /c/Users/u/Documents`, `git --config-env=core.x=A rm -rf /c/Users/u/Documents`,
+    `git -c core.x=y rm -rf /c/Users/u/Documents`])
+    assert.ok(bash(c), c);
+  assert.equal(bash("git --namespace x rm -r src/old"), null);
+});
+test("a command named like an object property is just a command", () => {
+  for (const c of ["constructor a b", "__proto__ x", "toString", "hasOwnProperty -x"]) assert.equal(bash(c), null, c);
+  assert.ok(bash("constructor; rm -rf /c/Users/u/Documents"));
+});

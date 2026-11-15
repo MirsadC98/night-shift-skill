@@ -9,6 +9,7 @@
 // Input: the hook JSON on stdin. Output: a deny decision, or nothing.
 // Self-test: node guard.mjs --self-test; tests: node --test guard.test.mjs
 
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -81,23 +82,6 @@ function checkWrite(file, env) {
 }
 
 const GENERIC = [
-  // Short flags may be written together (-uf), so a cluster that holds the letter counts.
-  [/\bgit\b[^\n;&|]*\bpush\b[^\n;&|]*(\s--force\b|\s-[a-z]*[fd][a-z]*\b|\s--force-with-lease\b|\s--delete\b|\s--mirror\b|\s--prune\b|\s\+\S|\s:\S)/i, "force or deleting pushes rewrite shared history"],
-  [/\bgit\b[^\n;&|]*\breset\b[^\n;&|]*--hard\b/i, "git reset --hard discards work"],
-  [/\bgit\b[^\n;&|]*\bcheckout\b[^\n;&|]*(\s(-f|--force)\b|\s(\.|:\/)(?=\s|$))/, "checking out over the whole tree discards work"],
-  // -S is --staged (index only, nothing lost), -s is --source: these two stay case-sensitive.
-  [/\bgit\b[^\n;&|]*\brestore\b(?![^\n;&|]*\s(--staged|-S)\b)[^\n;&|]*\s(\.|:\/)(?=\s|$)/, "restoring the whole tree discards work"],
-  [/\bgit\b[^\n;&|]*\brestore\b(?=[^\n;&|]*\s(--worktree|-W)\b)[^\n;&|]*\s(\.|:\/)(?=\s|$)/, "restoring the whole tree discards work"],
-  [/\bgit\b[^\n;&|]*\b(rebase|filter-branch|filter-repo)\b/i, "history rewrites need the user"],
-  [/\bgit\b[^\n;&|]*\bcommit\b[^\n;&|]*--amend\b/i, "amending rewrites history"],
-  [/\bgit\b[^\n;&|]*\bbranch\b[^\n;&|]*(\s-[a-zA-Z]*[dD][a-zA-Z]*\b|\s--delete\b)/, "deleting branches needs the user"],
-  [/\bgit\b[^\n;&|]*\bupdate-ref\b[^\n;&|]*\s(-d|--delete)\b/, "deleting refs needs the user"],
-  [/\bgit\b[^\n;&|]*\bclean\b[^\n;&|]*\s-[a-z]*f/i, "git clean deletes untracked work"],
-  [/\bgit\b[^\n;&|]*\bmerge(?![-\w])/i, "merges need the user"],
-  [/\bgit\b[^\n;&|]*\bpull\b(?![^\n;&|]*--ff-only)/i, "only git pull --ff-only is allowed"],
-  [/\bgit\b[^\n;&|]*\bstash\s+(drop|clear)\b/i, "dropping stashes discards work"],
-  [/\bgit\b[^\n;&|]*\bremote\s+(add|remove|rm|set-url|rename)\b/i, "changing remotes needs the user"],
-  [/\bgit\b[^\n;&|]*\bconfig\b[^\n;&|]*--(global|system)\b/i, "global git config is the user's"],
   [/\bgh\s+(pr\s+merge|release\s+(create|delete|upload|edit)|repo\s+(delete|edit|rename|archive|create)|secret\b|variable\b)/i, "publishing or changing the GitHub repository needs the user"],
   [/\bgh\s+api\b[^\n]*(-X|--method)[\s=]*(DELETE|PUT|PATCH|POST)\b/i, "writing through the GitHub API needs the user"],
   // A field or an input file makes gh api send a POST unless the method is GET; a GraphQL query is one too, and only reads.
@@ -255,7 +239,8 @@ const LAUNCHERS = {
 function nameIndex(words) {
   for (let i = 0; i < words.length; i++) {
     if (/^[A-Za-z_]\w*=/.test(words[i])) continue;
-    const launcher = LAUNCHERS[base(words[i])];
+    // hasOwn: a command named `constructor` or `__proto__` is no launcher (and no throw).
+    const launcher = Object.hasOwn(LAUNCHERS, base(words[i])) ? LAUNCHERS[base(words[i])] : null;
     if (launcher) {
       const [value, positional, option = /^-/] = launcher;
       while (option.test(words[i + 1] ?? "")) { i++; if (value.test(words[i])) i++; }
@@ -272,8 +257,6 @@ function nameIndex(words) {
 }
 
 const NESTED = "commands nested this deep cannot be read";
-const isGitRule = ([re]) => re.source.startsWith("\\bgit\\b");
-const GIT_RULES = GENERIC.filter(isGitRule), OTHER_RULES = GENERIC.filter((r) => !isGitRule(r));
 // Commands that print or search text: the words they are given are data, not commands.
 const PRINTS = /^(grep|egrep|fgrep|rg|findstr|select-string|sls|echo|printf|write-output|write-host|cat|type|head|tail|jq|wc)$/;
 const SHELL_NAME = /^(bash|sh|zsh|dash|pwsh|powershell|cmd)$/;
@@ -284,15 +267,87 @@ const isPipe = (sep) => /\|&?$/.test(sep) && !/\|\|$/.test(sep);
 // they are known, the single-quoted $ left for the inner shell to read.
 const scriptText = (s, vars, env) => expand(s, vars, env) ?? txt(s);
 
-// Git rules read the command without its quoted text, so a commit message that mentions "merge"
-// or "pull" is not a merge or a pull. A quoted flag or refspec ("--force", '+main', ":old") is
-// still what git gets.
-function gitDenial(text) {
-  const unquoted = text.replace(/"((?:[^"\\]|\\.)*)"|'([^']*)'/g, (m, d, s) => (/^[-+:]\S*$/.test(d ?? s) ? d ?? s : '""'));
-  for (const [re, reason] of GIT_RULES) if (re.test(unquoted)) return reason;
-  return null;
+// Git's words, read as git reads them. Global options come before the subcommand: -C and -c take the
+// next word, a few long ones take it too (or `=value`), the rest are flags. `-c alias.x=…` (and
+// include.path, which can pull aliases in from a file) would define a command the guard cannot read.
+// The delete check shares this reader, so both see the same subcommand.
+function gitGlobals(args) {
+  let i = 0, aliasing = false;
+  for (; i < args.length && args[i].startsWith("-"); i++) {
+    const a = args[i];
+    let value = null;
+    if (a === "-C") i++;
+    else if (a === "-c") value = args[++i];
+    else if (/^--(git-dir|work-tree|namespace|super-prefix)$/.test(a)) i++;
+    else if (a === "--config-env") value = args[++i];
+    else if (a.startsWith("--config-env=")) value = a.slice(13);
+    if (/^(alias|include|includeif)\./i.test(value ?? "")) aliasing = true;
+  }
+  return { sub: i, aliasing };
 }
-const quoteJoin = (ws) => ws.map((w) => (/\s/.test(w) ? `"${w}"` : w)).join(" ").replace(/\0/g, "$").replace(/\x01/g, "`");
+// Options stop at a bare `--`. A long option may be cut short as long as it stays unambiguous
+// (`--forc`, even `--f` for clean), so any prefix of the name counts; short ones may be clustered (-uf).
+const upToDashes = (a) => { const k = a.indexOf("--"); return k < 0 ? a : a.slice(0, k); };
+const long = (a, name) => upToDashes(a).some((w) => { const m = /^--([a-z][a-z-]*)(=|$)/.exec(w); return m && name.startsWith(m[1]); });
+const short = (a, letter) => upToDashes(a).some((w) => /^-[A-Za-z]+$/.test(w) && w.includes(letter));
+const anyLong = (a, ...names) => names.some((n) => long(a, n));
+const anyShort = (a, letters) => [...letters].some((l) => short(a, l));
+// The whole tree as a pathspec: `.`, `./`, `:/`.
+const wholeTree = (a) => a.some((w) => /^(\.\/?|:\/\.?)$/.test(w));
+const firstArg = (a) => a.find((w) => !w.startsWith("-"));
+const GIT_RULES = {
+  push: (a) => (anyLong(a, "force", "force-with-lease", "force-if-includes", "delete", "mirror", "prune") || anyShort(a, "fd") || a.some((w) => /^[+:]/.test(w))) && "force or deleting pushes rewrite shared history",
+  reset: (a) => long(a, "hard") && "git reset --hard discards work",
+  checkout: (a) => (long(a, "force") || anyShort(a, "fB") || wholeTree(a)) && "checking out over the whole tree discards work",
+  switch: (a) => (anyLong(a, "force", "discard-changes", "force-create") || anyShort(a, "fC")) && "switching by force discards work",
+  // --staged alone (-S) touches the index only, nothing is lost; -s is --source, so these two stay case-sensitive.
+  restore: (a) => wholeTree(a) && !((long(a, "staged") || short(a, "S")) && !long(a, "worktree") && !short(a, "W")) && "restoring the whole tree discards work",
+  rebase: () => "history rewrites need the user",
+  "filter-branch": () => "history rewrites need the user",
+  "filter-repo": () => "history rewrites need the user",
+  merge: () => "merges need the user",
+  "update-ref": () => "changing refs by hand needs the user",
+  commit: (a) => long(a, "amend") && "amending rewrites history",
+  branch: (a) => (anyLong(a, "delete", "force") || anyShort(a, "dDfMC")) && "deleting or force-moving branches needs the user",
+  reflog: (a) => /^(expire|delete)$/.test(a[0]) && "expiring the reflog discards the way back",
+  clean: (a) => (long(a, "force") || short(a, "f")) && "git clean deletes untracked work",
+  pull: (a) => !a.includes("--ff-only") && "only git pull --ff-only is allowed",
+  stash: (a) => /^(drop|clear)$/.test(a[0]) && "dropping stashes discards work",
+  // `git remote -v add x url` works: the options come first.
+  remote: (a) => /^(add|remove|rm|set-url|rename)$/.test(firstArg(a)) && "changing remotes needs the user",
+  config: (a) => (anyLong(a, "global", "system") && "global git config is the user's") || (a.some((w, i) => /^alias\./i.test(w) && i + 1 < a.length) && "git aliases are not read during a night run"),
+};
+// Git's own commands the guard has no rule for: an alias cannot replace them, so nothing is looked up.
+const GIT_PLAIN = new Set(`status add log diff show fetch rev-parse ls-files describe blame grep tag mv rm init worktree cherry-pick revert apply
+  bisect shortlog cat-file ls-tree rev-list for-each-ref show-ref symbolic-ref check-ignore merge-base name-rev submodule notes format-patch am archive gc help version`.split(/\s+/));
+const GIT_CONFIG_VAR = /^GIT_CONFIG_(COUNT|PARAMETERS|KEY_\d+|VALUE_\d+|GLOBAL|SYSTEM)(=|$)/;
+const quoteArg = (w) => `"${w.replace(/(["\\$`])/g, "\\$1")}"`;
+const configuredAlias = (name, env) => {
+  try {
+    const r = spawnSync("git", ["config", "--get", `alias.${name}`], { cwd: env.NIGHT_SHIFT_REPO || undefined, timeout: 3000, encoding: "utf8", windowsHide: true });
+    return r.status === 0 && r.stdout.trim() ? r.stdout.trim() : null;
+  } catch { return null; }
+};
+
+// The reason a git command (the words after `git`) is refused, or null. An alias is read as what it
+// stands for: `!cmd` runs as a shell command with the arguments appended, any other value is git's own
+// words again. Git never lets an alias replace one of its commands, so those are not looked up.
+export function gitRule(args, ctx) {
+  const { env, where, opts, depth } = ctx;
+  if (depth > 4) return NESTED;
+  args = args.map(unmark);
+  const { sub, aliasing } = gitGlobals(args);
+  if (aliasing) return "git aliases are not read during a night run";
+  if (sub >= args.length) return null;
+  const name = args[sub], a = args.slice(sub + 1), cmd = name.toLowerCase();
+  if (Object.hasOwn(GIT_RULES, cmd)) return GIT_RULES[cmd](a) || null;
+  if (GIT_PLAIN.has(cmd)) return null;
+  const value = (opts.gitAlias ?? ((n) => configuredAlias(n, env)))(name);
+  if (!value) return null;
+  const inner = { ...opts, vars: new Map() };
+  if (value.startsWith("!")) return checkCommand([value.slice(1), ...a.map(quoteArg)].join(" "), env, { ...where }, inner, depth + 1);
+  return gitRule([...simpleCommands(value).flatMap((c) => c.words), ...a], { env, where, opts: inner, depth: depth + 1 });
+}
 
 // The commands inside "$(...)" and "`...`": the splitter cannot see them in a quoted word.
 function substitutions(word) {
@@ -516,8 +571,7 @@ function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r) {
       let e = k + 1;
       while (e < rest.length && !/^(\\?;|\\|\+)$/.test(rest[e])) e++;
       const inner = rest.slice(k + 1, e);
-      const why = gitDenial(quoteJoin(inner))
-        || walk([{ words: inner, bare: inner.map(() => false), sep: "", lvl: 0 }], env, { ...where }, { ...opts, vars: new Map() }, depth + 1);
+      const why = walk([{ words: inner, bare: inner.map(() => false), sep: "", lvl: 0 }], env, { ...where }, { ...opts, vars: new Map() }, depth + 1);
       if (why) return why;
       k = e;
     }
@@ -530,17 +584,22 @@ function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r) {
     const cmd = k < 0 ? "" : rest[j + k];
     if (cmd && (DELETE_WORD.test(cmd) || /^(git|xargs)$/.test(base(cmd)) || SHELL_NAME.test(base(cmd)))) return "xargs builds a command the guard cannot read";
   }
+  // Git reads GIT_CONFIG_* the way it reads -c: a variable can define an alias too. `git-push` and the
+  // like are the same commands under their dashed names.
+  if (nm === "git" || nm.startsWith("git-")) {
+    if (args.slice(0, ni).some((w) => GIT_CONFIG_VAR.test(w)) || [...vars.keys()].some((k) => GIT_CONFIG_VAR.test(k))) return "git aliases are not read during a night run";
+    const why = gitRule(nm === "git" ? rest : [nm.slice(4), ...rest], { env, where, opts, depth });
+    if (why) return why;
+  }
   if (nm !== "git" && !PRINTS.test(nm)) {
     const joined = args.map(txt).join(" ");
-    for (const [re, reason] of OTHER_RULES) if (re.test(joined)) return reason;
+    for (const [re, reason] of GENERIC) if (re.test(joined)) return reason;
   }
   for (const t of writeTargets(nm, rest)) { const why = writeDenial(t, env, where, vars, r); if (why) return why; }
   if (PRINTS.test(nm)) return null;
   // Of git only `git rm` deletes; a commit message that mentions `rm -rf` is text.
   if (nm === "git") {
-    let k = 0;
-    while (k < rest.length && /^-/.test(rest[k])) k += /^-[Cc]$|^--(git-dir|work-tree)$/.test(rest[k]) ? 2 : 1;
-    if (rest[k] !== "rm") return null;
+    if (rest[gitGlobals(rest).sub] !== "rm") return null;
   }
   return checkDelete(args, ni, env, where, vars, r);
 }
@@ -568,7 +627,7 @@ export function checkCommand(cmd, env, where, opts = {}, depth = 0) {
   // A line continued on the next (a trailing backslash, or PowerShell's backtick) is one line. This runs
   // after the here-documents are cut, so a body line ending in a backslash cannot swallow its delimiter.
   const text = dropHeredocs(String(cmd)).replace(/[\\`]\r?\n/g, " ");
-  return gitDenial(text) || walk(simpleCommands(text), env, where, { ...opts, vars: opts.vars ?? new Map() }, depth);
+  return walk(simpleCommands(text), env, where, { ...opts, vars: opts.vars ?? new Map() }, depth);
 }
 
 // The project's deny rules. A file that does not validate yields an error instead: a rule that
