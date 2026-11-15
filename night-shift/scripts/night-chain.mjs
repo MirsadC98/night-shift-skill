@@ -357,10 +357,13 @@ async function runChain(opt) {
   // A session cut off by a usage limit is resumed in the same conversation once
   // the limit resets; resume.json keeps it across a restarted chain too.
   const resumeFile = path.join(state, "resume.json");
-  const pendingResume = () => JSON.parse(read(resumeFile) || "null");
+  const pendingResume = () => parseOr(read(resumeFile), null);
   let session = Number(pendingResume()?.nn) ||
     fs.readdirSync(path.join(state, "prompts")).filter((f) => /^\d+\.md$/.test(f)).length + 1;
   let failures = 0;
+  // A run of API or network errors: when it began, how many tries it took, and how many resumes in
+  // a row ended without a turn (a conversation that cannot be resumed).
+  let streak = 0, streakStart = 0, deadResumes = 0;
 
   // Fable for the sessions that ask for it (MODEL: fable): <state>/fable.json keeps the chain's Fable
   // sessions, the allowance's last known share and, once it ran out, until when (effort.mjs, fableGate).
@@ -406,7 +409,7 @@ async function runChain(opt) {
       const g = fableGate(readFable(), { ceiling: fableCeiling, maxSessions: fableSessions });
       if (!g.ok && (!resume || g.why === "out")) plan = { ...plan, model: opusModel, family: "opus", effort: "max", downgrade: g };
     }
-    log(resume ? `session ${nn} resumes ${resume.sessionId} ${resume.why === "stopped" ? "where the last runner stopped" : "after the usage limit"}`
+    log(resume ? `session ${nn} resumes ${resume.sessionId} ${resume.why === "stopped" ? "where the last runner stopped" : resume.why === "error" ? "after the error" : "after the usage limit"}`
       : `session ${nn} starts: ${asked.body.split("\n")[0].slice(0, 120)}`);
     if (asked.note && !resume) log(`session ${nn}: ${asked.note}`);
     if (plan.downgrade) log(`session ${nn} asked for Fable, but ${whyText(plan.downgrade)}; it runs on Opus at max`);
@@ -461,6 +464,33 @@ async function runChain(opt) {
       fs.rmSync(path.join(state, "prompts", `${nn}.md`), { force: true });
       continue;
     }
+    // The session cannot run (a refused login, a bad request): the next one would fail the same way.
+    if (result.fatal) finish(`session ${nn} cannot run: ${result.errorText}`);
+    let retryHandover = false;
+    if (result.transient && !wrote) {
+      streak++;
+      streakStart ||= Date.now();
+      const maxWait = run.maxWaitHours ?? 6;
+      if (Date.now() - streakStart > maxWait * 3_600_000) finish(`session ${nn} kept failing for ${maxWait} h (${result.errorText})`);
+      if (result.mainModels.length > 0 && result.sessionId) {
+        // It worked before the error: the same conversation goes on, so nothing is done twice.
+        fs.writeFileSync(resumeFile, JSON.stringify({ nn, sessionId: result.sessionId, why: "error", model: plan.model, effort: plan.effort }));
+        deadResumes = 0;
+      } else if (resume) {
+        // A resume that dies without a turn gets one more try; then the conversation is given up
+        // and the piece goes on from the recovery note below.
+        if (++deadResumes >= 2) { fs.rmSync(resumeFile, { force: true }); retryHandover = true; }
+      } else if (plan.family === "fable" && result.mainModels.length === 0) writeFable({ sessions: Math.max(0, (readFable().sessions || 0) - 1) }); // it never had a turn: the retry is not a second Fable session
+      if (!retryHandover) {
+        const ms = Number(process.env.NIGHT_SHIFT_BACKOFF_MS) || [1, 2, 5, 10, 20, 30][Math.min(streak, 6) - 1] * 60_000;
+        const until = Math.min(Date.now() + ms, run.deadline || Infinity);
+        log(`session ${nn}: transient error (${result.errorText}); try ${streak}, waiting until ${stamp(until)}`);
+        await waitUntil(until);
+        fs.rmSync(path.join(state, "prompts", `${nn}.md`), { force: true });
+        continue;
+      }
+    }
+    streak = streakStart = deadResumes = 0;
     fs.rmSync(resumeFile, { force: true });
     const after = read(next).trim();
     if (fs.statSync(next).mtimeMs <= before || after === prompt) {
@@ -489,7 +519,7 @@ function runSession(run, session, plan, nn, resume) {
     ...(resume.why === "stopped" ? [
       `Oturum yarıda kesildi: runner durdu (bilgisayar kapanmış ya da yeniden başlamış olabilir); gece vardiyası, ${now()}.`,
       `Çalışan alt ajanlar ve araçlar öldü; yarım kalan dosyaları git status ve git diff ile incele, gerekirse o adımı baştan al.`,
-    ] : [`Kullanım limiti sıfırlandı (gece vardiyası, ${now()}).`]),
+    ] : [resume.why === "error" ? `Bağlantı ya da API hatası geçti (gece vardiyası, ${now()}).` : `Kullanım limiti sıfırlandı (gece vardiyası, ${now()}).`]),
     `Kaldığın yerden devam et: yarım kalan adımı git status ile kontrol et, bitmiş işi yeniden yapma. Oturumu night-shift skill'inin üç adımıyla bitir`,
     `(commit, gece raporu, ${path.join(run.state, "next-prompt.md")}).`,
   ].join("\n") : [
@@ -518,7 +548,10 @@ function runSession(run, session, plan, nn, resume) {
   const err = path.join(run.state, `session-${nn}.err`);
   // A .mjs "claude" is the stand-in night-chain.test.mjs runs.
   const [cmd, pre] = /\.m?js$/i.test(run.claude) ? [NODE, [run.claude]] : [run.claude, []];
-  return new Promise((resolve) => {
+  return new Promise((resolve0) => {
+    // A claude that cannot start emits "error" (and no "exit"); a failure may emit both.
+    let settled = false;
+    const resolve = (r) => { if (!settled) { settled = true; resolve0(r); } };
     const child = spawn(cmd, [...pre, ...args], {
       cwd: run.repo,
       // -p stops background agents 10 min after the main turn ends (run 2's #18 lost its work so);
@@ -536,10 +569,16 @@ function runSession(run, session, plan, nn, resume) {
       stdio: ["pipe", fs.openSync(out, resumeId ? "a" : "w"), fs.openSync(err, "w")],
       windowsHide: true,
     });
+    child.stdin.on("error", () => {});
     child.stdin.end(resumeId ? header + "\n" : header + body + "\n");
     const timer = setTimeout(() => {
       try { execFileSync("taskkill", ["/T", "/F", "/PID", String(child.pid)], { stdio: "ignore", windowsHide: true }); } catch {}
     }, run.sessionHours * 3_600_000);
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      resolve({ ...sessionOutcome("", "", null), transient: true, errorText: `claude could not start: ${e.code || e.message}`.slice(0, 160),
+        summary: `claude could not start (${e.code || e.message})` });
+    });
     child.on("exit", (code) => {
       clearTimeout(timer);
       const outcome = sessionOutcome(fs.readFileSync(out).subarray(from).toString("utf8"), read(err), code);

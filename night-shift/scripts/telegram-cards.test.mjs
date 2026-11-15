@@ -60,6 +60,11 @@ test("small events are one line; the ones that need nothing from the user are si
   assert.deepEqual(eventLine("effort", { nn: "21", got: "high", want: "xhigh" }), { text: "⚠️ #21 high düzeyde çalışıyor (xhigh olmalı)", silent: false });
 });
 
+test("a transient error is one silent line with the retry time", () => {
+  assert.deepEqual(eventLine("error", { nn: "07", until: "03:12" }),
+    { text: "🔌 #07 bağlantı ya da API hatası · 03:12'de yeniden denenecek", silent: true });
+});
+
 test("the chain's end card counts the jobs and what waits, with each job one line in the details", () => {
   const { text } = chainCard({
     reason: "STOP: plan bitti", project: "demo-app", jobs: [

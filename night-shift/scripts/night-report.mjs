@@ -277,6 +277,7 @@ function collect(state, pid = null) {
   const since = when(String(run.startedAt || ""));
   for (const e of events.filter((x) => Number.isNaN(since.getTime()) || when(x.at) >= since)) {
     if (e.text.startsWith("usage limit: ")) issues.push(`⏳ ${hm(when(e.at))} limit doldu, ${esc(e.text.replace(/^usage limit: waiting until \S+ /, ""))}'e kadar bekledi`);
+    if (/^session \d+: transient error .*; try 1,/.test(e.text)) issues.push(`🔌 ${hm(when(e.at))} ${esc(e.text.replace(/^session (\d+).*$/, "#$1 bağlantı ya da API hatası, yeniden denendi"))}`);
     if (/left no continuation prompt/.test(e.text)) issues.push(`🔁 ${hm(when(e.at))} ${esc(e.text.replace(/^session (\d+).*$/, "#$1 devam promptu yazmadı, yeniden denendi"))}`);
   }
   if (!ended && !running) issues.push("🛑 Runner çalışmıyor ve zincir bitti demedi (pencere kapanmış ya da yeniden başlatılmış olabilir)");
@@ -662,6 +663,7 @@ async function watch(opt) {
       if ((m = /^session (\d+) ends: /.exec(t))) await say(sessionMessage(state, m[1], pid));
       else if ((m = /^usage limit: waiting until \S+ (\d\d:\d\d)/.exec(t))) await say(eventLine("limit", { until: m[1], progress: progressOf(collect(state, pid)) }));
       else if ((m = /^session (\d+) resumes /.exec(t))) await say(eventLine("resume", { nn: m[1] }));
+      else if ((m = /^session (\d+): transient error .*; try 1, waiting until \S+ (\d\d:\d\d)/.exec(t))) await say(eventLine("error", { nn: m[1], until: m[2] })); // later tries stay quiet
       else if ((m = /^session (\d+) left no continuation prompt/.exec(t))) await say(eventLine("retry", { nn: m[1] }));
       else if ((m = /^chain ends: (.*)$/.exec(t))) {
         save();

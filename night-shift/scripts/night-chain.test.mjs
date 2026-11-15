@@ -781,3 +781,88 @@ test("a session that wrote STOP and was then cut off by a limit ends the chain a
   assert.match(log, /chain ends: STOP: done/);
   assert.doesNotMatch(log, /usage limit: waiting/);
 });
+
+// The error path: each stand-in call appends "<session> <--resume value or ->" to calls.log. `call` is
+// the 1-based number of this call, whatever its session.
+const ERROR_LINES = `const calls = path.join(st, "calls.log"), rid = process.argv.includes("--resume") ? process.argv[process.argv.indexOf("--resume") + 1] : "-";
+fs.appendFileSync(calls, n + " " + rid + "\\n");
+const call = fs.readFileSync(calls, "utf8").trim().split("\\n").length;
+const apiError = () => {
+  console.log(JSON.stringify({ type: "result", subtype: "success", is_error: true, num_turns: 0, total_cost_usd: 0, result: "API Error: 500 Internal server error" }));
+  process.exit(1);
+};
+const stop = () => { fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done"); ok(n); };
+`;
+async function errorRun(body, runPatch = {}) {
+  const s = setup();
+  fs.writeFileSync(path.join(s.root, "fake-claude.mjs"), `import fs from "node:fs"; import path from "node:path";
+const st = process.env.NIGHT_SHIFT_STATE, n = Number(process.env.NIGHT_SHIFT_SESSION);
+${LIMIT_LINES}${ERROR_LINES}${body}`);
+  const run = JSON.parse(fs.readFileSync(path.join(s.state, "run.json"), "utf8"));
+  fs.writeFileSync(path.join(s.state, "run.json"), JSON.stringify({ ...run, maxSessions: null, ...runPatch }));
+  const env = { ...s.env, NIGHT_SHIFT_LIMIT_TICK_MS: "20", NIGHT_SHIFT_BACKOFF_MS: "50" };
+  await runOnce(["--state", s.state, "--headless"], env, s.root);
+  const log = await waitForLog(s.state, /chain ends: /);
+  const calls = fs.readFileSync(path.join(s.state, "calls.log"), "utf8").trim().split("\n");
+  return { ...s, log, calls };
+}
+
+test("two API errors in a row are waited out and the same piece runs again", async () => {
+  const { log, calls } = await errorRun(`if (call <= 2) apiError(); stop();`);
+  assert.match(log, /session 01: transient error \(API Error: 500 Internal server error\); try 1, waiting until \d{4}-\d\d-\d\d \d\d:\d\d/);
+  assert.match(log, /try 2, waiting until/);
+  assert.match(log, /chain ends: STOP: done/);
+  assert.doesNotMatch(log, /left no continuation prompt|two sessions in a row/);
+  assert.deepEqual(calls, ["1 -", "1 -", "1 -"]);
+});
+
+test("a session that worked before the error goes on in the same conversation", async () => {
+  const { state, log, calls } = await errorRun(`
+if (call === 1) {
+  console.log(JSON.stringify({ type: "assistant", session_id: "fake-1", parent_tool_use_id: null, message: { model: "claude-opus-5-5", content: [] } }));
+  console.log(JSON.stringify({ type: "result", subtype: "success", is_error: true, api_error: "overloaded_error", api_error_status: 529, num_turns: 4, total_cost_usd: 0, session_id: "fake-1", result: "Overloaded" }));
+  process.exit(1);
+}
+let input = ""; process.stdin.setEncoding("utf8"); for await (const c of process.stdin) input += c;
+fs.writeFileSync(path.join(st, "stdin-2.txt"), input);
+stop();
+`);
+  assert.match(log, /session 01: transient error \(Overloaded\); try 1/);
+  assert.match(log, /session 01 resumes fake-1 after the error/);
+  assert.match(fs.readFileSync(path.join(state, "stdin-2.txt"), "utf8"), /^Bağlantı ya da API hatası geçti \(gece vardiyası, /);
+  assert.deepEqual(calls, ["1 -", "1 fake-1"]);
+  assert.match(log, /chain ends: STOP: done/);
+});
+
+test("a network failure with no result line is transient too", async () => {
+  const { log } = await errorRun(`
+if (call === 1) { console.error("Error: getaddrinfo ENOTFOUND api.anthropic.com"); process.exit(1); }
+stop();
+`);
+  assert.match(log, /transient error \(Error: getaddrinfo ENOTFOUND api\.anthropic\.com\); try 1/);
+  assert.match(log, /chain ends: STOP: done/);
+});
+
+test("a refused login ends the chain at once, by name", async () => {
+  const { log, calls } = await errorRun(`
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: true, api_error_status: 401, num_turns: 0, total_cost_usd: 0, result: "Invalid API key · Please run /login" }));
+process.exit(1);
+`);
+  assert.match(log, /chain ends: session 01 cannot run: Invalid API key · Please run \/login/);
+  assert.equal(calls.length, 1);
+});
+
+test("errors that outlast --max-wait-hours end the chain", async () => {
+  const { log } = await errorRun(`apiError();`, { maxWaitHours: 0.0001 });
+  assert.match(log, /chain ends: session 01 kept failing for [\d.]+ h \(API Error: 500 Internal server error\)/);
+});
+
+test("a claude that cannot be started is retried, not a silent death", async () => {
+  const s = setup();
+  const run = JSON.parse(fs.readFileSync(path.join(s.state, "run.json"), "utf8"));
+  fs.writeFileSync(path.join(s.state, "run.json"), JSON.stringify({ ...run, maxSessions: null, maxWaitHours: 0.0001, claude: path.join(s.root, "gone", "claude.exe") }));
+  await runOnce(["--state", s.state, "--headless"], { ...s.env, NIGHT_SHIFT_LIMIT_TICK_MS: "20", NIGHT_SHIFT_BACKOFF_MS: "50" }, s.root);
+  const log = await waitForLog(s.state, /chain ends: /);
+  assert.match(log, /session 01: transient error \(claude could not start: ENOENT\); try 1/);
+  assert.match(log, /chain ends: session 01 kept failing/);
+});

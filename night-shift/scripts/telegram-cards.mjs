@@ -79,6 +79,7 @@ export function eventLine(kind, d = {}) {
     start: [`🌙 Gece vardiyası başladı · ${esc(d.project)}`, true],
     limit: [`⏳ Limit doldu · ${esc(d.until)}'de sürer${d.progress ? ` · ${esc(d.progress)}` : ""}`, true],
     resume: [`▶️ #${d.nn} kaldığı yerden sürüyor`, true],
+    error: [`🔌 #${d.nn} bağlantı ya da API hatası · ${esc(d.until)}'de yeniden denenecek`, true],
     retry: [`🔁 #${d.nn} devam istemi bırakmadı, yeniden deneniyor`, false],
     quiet: [`⚠️ #${d.nn} ${d.minutes} dakikadır sessiz · son adım: ${esc(d.step || "?")}`, false],
     died: ["🛑 Zincir beklenmedik şekilde durdu (runner kapandı)", false],
