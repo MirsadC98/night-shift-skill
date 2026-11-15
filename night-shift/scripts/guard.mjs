@@ -9,33 +9,12 @@
 // Input: the hook JSON on stdin. Output: a deny decision, or nothing.
 // Self-test: node guard.mjs --self-test; tests: node --test guard.test.mjs
 
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { norm, readProjectConfig, stateDirProblem } from "./config.mjs";
 
-// A path the way Windows resolves it, so that two spellings of one file compare equal: one kind
-// of slash, lower case, an MSYS drive (/c/…) and \\?\C:\… as a drive path, Git Bash's /tmp as the
-// temp folder, . and .. resolved, and a segment's trailing dots and spaces dropped (Windows opens
-// "settings.json." as settings.json). The 2026-11-15 review wrote the guard itself through
-// C:/temp/../Users/….
-const norm = (p) => {
-  let s = String(p || "").trim().replace(/^["']|["']$/g, "").replace(/\\/g, "/").toLowerCase();
-  s = s.replace(/^\/\/[?.]\/(?=[a-z]:)/, "");
-  const msys = /^\/([a-z])\//.exec(s);
-  if (msys) s = `${msys[1]}:/${s.slice(3)}`;
-  else if (process.platform === "win32" && /^\/tmp(\/|$)/.test(s)) s = `${tmpdir().replace(/\\/g, "/").toLowerCase()}${s.slice(4)}`;
-  const lead = /^\/{0,2}/.exec(s)[0].slice(0, 2);
-  const out = [];
-  for (const raw of s.slice(lead.length).split("/")) {
-    const seg = /^\.\.?$/.test(raw) ? raw : raw.replace(/[. ]+$/, "");
-    if (!seg || seg === ".") continue;
-    if (seg !== "..") out.push(seg);
-    else if (out.length && out.at(-1) !== "..") { if (!/^[a-z]:$/.test(out.at(-1))) out.pop(); }
-    else if (!lead) out.push(seg);
-  }
-  return lead + out.join("/");
-};
 const under = (p, root) => root && (p === root || p.startsWith(root + "/"));
 
 // What the runner keeps in the state folder: the settings file that loads this guard, the file
@@ -44,13 +23,17 @@ const RUNNER_FILES = /^(night-settings\.json|run\.json|launch\.cmd|resume\.json|
 
 function roots(env) {
   const home = norm(env.USERPROFILE || env.HOME || homedir());
+  const repo = norm(env.NIGHT_SHIFT_REPO || "");
+  // A state folder that is a drive, the home folder or the like (a typo in stateDir) would make
+  // all of it writable: it adds nothing, and the runner refuses to start with one.
+  const state = env.NIGHT_SHIFT_STATE && !stateDirProblem(env.NIGHT_SHIFT_STATE, { home, repo, temp: tmpdir() }) ? norm(env.NIGHT_SHIFT_STATE) : "";
   return {
-    repo: norm(env.NIGHT_SHIFT_REPO || ""),
-    state: norm(env.NIGHT_SHIFT_STATE || ""),
+    repo,
+    state,
     writable: [
-      norm(env.NIGHT_SHIFT_REPO || ""),
+      repo,
       "c:/temp",
-      norm(env.NIGHT_SHIFT_STATE || ""),
+      state,
       norm(tmpdir()),
       `${home}/appdata/local/temp`,
     ].filter(Boolean),
@@ -251,13 +234,13 @@ function checkDeletes(cmd, env, cwd) {
   return null;
 }
 
+// The project's deny rules. A file that does not validate yields an error instead: a rule that
+// cannot be read must not silently stop refusing, so decide refuses every shell command.
 function projectRules(env) {
-  const repo = env.NIGHT_SHIFT_REPO;
-  if (!repo) return [];
-  const file = join(repo, ".claude", "night-shift.json");
-  if (!existsSync(file)) return [];
-  const cfg = JSON.parse(readFileSync(file, "utf8"));
-  return (cfg.deny || []).map((d) => [new RegExp(d.pattern, d.flags ?? "i"), d.reason]);
+  if (!env.NIGHT_SHIFT_REPO) return { rules: [] };
+  const { config, errors } = readProjectConfig(env.NIGHT_SHIFT_REPO);
+  if (errors.length) return { error: errors[0] };
+  return { rules: (config.deny || []).map((d) => [new RegExp(d.pattern, d.flags ?? "i"), d.reason ?? `refused by a project rule (${d.pattern})`]) };
 }
 
 export function decide(input, env = process.env) {
@@ -274,7 +257,9 @@ export function decide(input, env = process.env) {
     // refspec ("--force", '+main', ":old") is still what git gets.
     const unquoted = cmd.replace(/"((?:[^"\\]|\\.)*)"|'([^']*)'/g, (m, d, s) => (/^[-+:]\S*$/.test(d ?? s) ? d ?? s : '""'));
     for (const [re, reason] of GENERIC) if (re.test(re.source.startsWith("\\bgit\\b") ? unquoted : cmd)) return reason;
-    for (const [re, reason] of projectRules(env)) if (re.test(cmd)) return reason;
+    const { rules, error } = projectRules(env);
+    if (error) return `.claude/night-shift.json is invalid (${error}); the user must fix it`;
+    for (const [re, reason] of rules) if (re.test(cmd)) return reason;
     return checkDeletes(String(ti.command || ""), env, input.cwd);
   }
   return null;

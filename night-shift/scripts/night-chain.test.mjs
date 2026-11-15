@@ -895,7 +895,7 @@ function pointerCase(ptrOf) {
   const write = (p) => fs.writeFileSync(file, JSON.stringify({ state, task: "x", finished: false, ...p }));
   const run = (cmd, extra = []) => spawnSync(process.execPath, [CHAIN, cmd, "--repo", repo, ...extra],
     { env: { ...env, NIGHT_SHIFT_LAUNCH: "fail", NIGHT_SHIFT_CLAUDE: process.execPath, TEMP: root, TMP: root }, encoding: "utf8", cwd: root });
-  return { write, run, state, read: () => JSON.parse(fs.readFileSync(file, "utf8")) };
+  return { write, run, state, repo, read: () => JSON.parse(fs.readFileSync(file, "utf8")) };
 }
 const stamped = (ms) => new Date(ms).toLocaleString("sv-SE");
 
@@ -927,4 +927,33 @@ test("a pid that now belongs to another program does not block start", () => {
     c.write({ pid: other.pid, scheduledAt: stamped(Date.now()) });
     assert.match(c.run("start", ["--prompt", "x"]).stderr, /launch refused \(test\)/);
   } finally { other.kill(); }
+});
+
+// start reads .claude/night-shift.json through config.mjs: a mistake is named, not thrown.
+function startWithConfig(cfg, extra = ["--prompt", "x"]) {
+  const c = pointerCase();
+  fs.mkdirSync(path.join(c.repo, ".claude"), { recursive: true });
+  fs.writeFileSync(path.join(c.repo, ".claude", "night-shift.json"), typeof cfg === "string" ? cfg : JSON.stringify(cfg));
+  return { ...c, result: c.run("start", extra) };
+}
+
+test("start names what is wrong in .claude/night-shift.json instead of a stack trace", () => {
+  const broken = startWithConfig('{ "report": "docs/N.md", }').result.stderr;
+  assert.match(broken, /\.claude[\\/]night-shift\.json: .*not valid JSON/);
+  assert.doesNotMatch(broken, /at JSON\.parse/);
+  assert.match(startWithConfig({ modle: "fable" }).result.stderr, /unknown key "modle"/);
+  assert.match(startWithConfig({ stateDir: "C:/" }).result.stderr, /stateDir/);
+});
+
+test("start refuses a state folder that already holds something else", () => {
+  const c = pointerCase();
+  const other = path.join(path.dirname(c.state), "other");
+  fs.mkdirSync(other);
+  fs.writeFileSync(path.join(other, "notes.txt"), "mine");
+  fs.mkdirSync(path.join(c.repo, ".claude"));
+  fs.writeFileSync(path.join(c.repo, ".claude", "night-shift.json"), JSON.stringify({ stateDir: other }));
+  c.result = c.run("start", ["--prompt", "x"]);
+  assert.match(c.result.stderr, /is not empty and holds no earlier run/);
+  assert.ok(fs.existsSync(path.join(other, "notes.txt")));
+  assert.ok(!fs.existsSync(path.join(other, "prompts")));
 });

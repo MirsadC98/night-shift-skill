@@ -49,6 +49,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { buildReport, userWaits } from "./night-report.mjs";
+import { readProjectConfig, stateDirProblem } from "./config.mjs";
 import { sessionOutcome, windowSpan } from "./session-outcome.mjs";
 import { MAIN_MODEL, SUB_MODEL, MAIN_EFFORT, subEffortText, MAX_NOTE, FABLE_NOTE, nightModelSettings, sessionPlan,
   promptDirectives, directiveLines, fableGate, familyOf } from "./effort.mjs";
@@ -99,8 +100,9 @@ function repoRoot(dir) {
   } catch { fail(`not a git repository: ${dir}`); }
 }
 const projectConfig = (repo) => {
-  const f = path.join(repo, ".claude", "night-shift.json");
-  return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : {};
+  const { config, errors } = readProjectConfig(repo);
+  if (errors.length) fail(`${path.join(repo, ".claude", "night-shift.json")}: ${errors.join("; ")}`);
+  return config;
 };
 const slug = (repo) => `${path.basename(repo)}-${crypto.createHash("sha1").update(repo.toLowerCase()).digest("hex").slice(0, 8)}`;
 const pointerFile = (repo) => path.join(os.homedir(), ".claude", "night-shift", "runs", `${slug(repo)}.json`);
@@ -205,7 +207,13 @@ function start(opt) {
   const cfg = projectConfig(repo);
   const state = path.resolve(typeof opt.state === "string" ? opt.state
     : (cfg.stateDir || path.join(os.tmpdir(), `night-shift-${path.basename(repo)}-{date}`)).replace("{date}", today()));
+  // The runner writes here and a session reads its instructions from here: not a folder of the user's own.
+  const wide = stateDirProblem(state, { home: os.homedir(), repo, temp: os.tmpdir() });
+  if (wide) fail(`${typeof opt.state === "string" ? "--state" : "stateDir"} ${state} ${wide}`);
   if (typeof opt.state === "string" && !fs.existsSync(path.join(state, "run.json"))) fail(`--state ${state} holds no earlier run`);
+  // A start that failed before run.json (no prompt, a dirty tree) leaves only what start itself made; that is no one else's folder.
+  const foreign = !fs.existsSync(path.join(state, "run.json")) && fs.existsSync(state) && fs.readdirSync(state).some((f) => !["prompts", "next-prompt.md"].includes(f));
+  if (foreign) fail(`${state} is not empty and holds no earlier run; pick another state folder`);
   fs.mkdirSync(path.join(state, "prompts"), { recursive: true });
   const next = path.join(state, "next-prompt.md");
   // A new prompt starts fresh; without one, a session a usage limit cut off (resume.json) goes on.

@@ -2,7 +2,9 @@
 // text is data, and a variable target must resolve. node --test guard.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { decide } from "./guard.mjs";
 
 const env = { NIGHT_SHIFT_REPO: "C:/work/repo", NIGHT_SHIFT_STATE: "C:/temp/x-night", USERPROFILE: "C:\\Users\\u" };
@@ -172,4 +174,28 @@ test("gh api writes are read in every spelling; reads pass", () => {
   assert.equal(bash("gh api repos/o/r/pulls"), null);
   assert.equal(bash("gh api -X GET search/issues -f q=x"), null);
   assert.equal(bash("gh api graphql -f query='{ viewer { login } }'"), null);
+});
+
+// A repo in a throwaway folder whose .claude/night-shift.json holds `text`.
+const repoWithConfig = (text) => {
+  const repo = mkdtempSync(join(tmpdir(), "guard-config-test-"));
+  mkdirSync(join(repo, ".claude"));
+  writeFileSync(join(repo, ".claude", "night-shift.json"), typeof text === "string" ? text : JSON.stringify(text));
+  return { ...env, NIGHT_SHIFT_REPO: repo };
+};
+
+test("a broken project config refuses shell commands with its reason, and does not crash", () => {
+  assert.match(bash("ls", repoWithConfig("{ not json")), /\.claude\/night-shift\.json is invalid/);
+  assert.match(bash("ls", repoWithConfig({ deny: [{ pattern: "(" }] })), /\.claude\/night-shift\.json is invalid/);
+  assert.match(bash("ls", repoWithConfig({ modle: "fable" })), /unknown key "modle"/);
+  const ok = repoWithConfig({ deny: [{ pattern: "deploy\\.ps1" }] });
+  assert.match(bash("./deploy.ps1", ok), /refused by a project rule \(deploy\\\.ps1\)/);
+  assert.equal(bash("ls", ok), null);
+});
+
+test("a state folder that is too wide adds nothing to what may be written", () => {
+  const wide = { ...env, NIGHT_SHIFT_STATE: "C:/Users/u" };
+  assert.ok(bash("rm -rf C:/Users/u/Documents", wide));
+  assert.ok(write("C:/Users/u/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/x.cmd", wide));
+  assert.equal(write("C:/temp/x-night/next-prompt.md"), null);
 });
