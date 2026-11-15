@@ -7,6 +7,7 @@
 //   node night-chain.mjs start  --repo <dir> (--prompt-file <f> | --prompt <text>) [--until HH:MM]
 //                               [--max-sessions <n>] [--session-hours 4] [--model <m>] [--allow-dirty]
 //                               [--effort xhigh] [--fable-ceiling 0.6] [--fable-sessions 2]
+//                               [--max-wait-hours 6]
 //                               [--state <dir>] [--window]
 //   (without --until and --max-sessions the chain goes on until a session writes STOP,
 //    two handovers fail in a row, or stop is called; a usage limit pauses it, and the
@@ -229,6 +230,8 @@ function start(opt) {
     // many Fable sessions while the share is unknown (effort.mjs, fableGate).
     fableCeiling: ratioArg(opt["fable-ceiling"] ?? cfg.fableCeiling, 0.6),
     fableSessions: countArg(opt["fable-sessions"] ?? cfg.fableSessions, 2),
+    // The longest a usage limit's reset may be away for the chain to wait for it; farther ends the chain.
+    maxWaitHours: (() => { const n = Number(opt["max-wait-hours"] ?? cfg.maxWaitHours); return Number.isFinite(n) && n > 0 ? n : 6; })(),
     claude: findClaude(),
     report: cfg.report || "NIGHT_RUNS.md",
     path: sessionPath,
@@ -370,6 +373,13 @@ async function runChain(opt) {
     : g.why === "ceiling" ? `its allowance is at ${pct(g.ratio)}, at or over the ${pct(g.ceiling)} ceiling`
       : `${g.sessions} Fable sessions already ran in this chain while its allowance's share is unknown`);
 
+  // In this process, so `wait` (which waits for it to exit) goes on through a limit. A STOP request ends it early.
+  // NIGHT_SHIFT_LIMIT_TICK_MS: a shorter look at the clock for night-chain.test.mjs.
+  const waitUntil = async (until) => {
+    const tick = Number(process.env.NIGHT_SHIFT_LIMIT_TICK_MS) || 60_000;
+    while (Date.now() < until && !fs.existsSync(stopFile)) await new Promise((r) => setTimeout(r, tick));
+  };
+
   log(`chain starts in ${repo}${reloaded ? " (runner reloaded)" : ""}, until ${run.until || "the work is done"}, from session ${session}${run.maxSessions ? ` to ${run.maxSessions}` : ""}, ${run.model || MAIN_MODEL} at ${run.effort || "xhigh"}, subagents ${SUB_MODEL} (${subEffortText()}), Fable on request under ${pct(fableCeiling)} of its allowance (${fableSessions} sessions while unknown)`);
   while (!run.maxSessions || session <= run.maxSessions) {
     if (fs.existsSync(stopFile)) finish("stop requested");
@@ -405,6 +415,8 @@ async function runChain(opt) {
     writeSettings({ [plan.family]: plan.effort });
     const result = await runSession(run, session, plan, nn, resume);
     log(`session ${nn} ends: ${result.summary}`);
+    // A session that wrote its handover has done its piece, even when a limit cut off what came after.
+    const wrote = fs.statSync(next).mtimeMs > before && read(next).trim() !== prompt;
     const ran = result.mainModels.join(", ") || result.model || "no model reply";
     log(`session ${nn} limits: ${windowSpan(result.windows)}; it ran on ${ran}`);
     const fw = result.windows.last?.seven_day_overage_included;
@@ -420,7 +432,6 @@ async function runChain(opt) {
       writeFable({ outUntil: until });
       log(`session ${nn}: Fable's allowance is used up (${result.apiError || result.limitType || "refused"}) until ${stamp(until)}${result.fableResetAt ? "" : " (a guess: the CLI gave no reset time)"}; limit record ${JSON.stringify(result.limitInfo)}`);
       fs.rmSync(resumeFile, { force: true });
-      const wrote = fs.statSync(next).mtimeMs > before && read(next).trim() !== prompt;
       if (!wrote) {
         fs.writeFileSync(next, `EFFORT: max\nÖnceki Fable oturumu (${nn}) Fable payı bittiği için kesildi; bu parça Opus max'te sürüyor. ` +
           `Önce git status ve git diff'e bak: yarım kalan iş orada olabilir; bitmiş işi yeniden yapma.\n\n${plan.body}`);
@@ -431,13 +442,18 @@ async function runChain(opt) {
     }
     if (result.limited) {
       if (result.limitInfo) log(`session ${nn}: ${result.limitType || "a usage limit"} cut it off; limit record ${JSON.stringify(result.limitInfo)}`);
-      if (result.sessionId) fs.writeFileSync(resumeFile, JSON.stringify({ nn, sessionId: result.sessionId, why: "limit", model: plan.model, effort: plan.effort }));
+      // After a handover there is nothing to resume: next-prompt.md carries the chain.
+      if (wrote) fs.rmSync(resumeFile, { force: true });
+      else if (result.sessionId) fs.writeFileSync(resumeFile, JSON.stringify({ nn, sessionId: result.sessionId, why: "limit", model: plan.model, effort: plan.effort }));
+      // A reset the chain cannot use ends it, with resume.json (or the handover) kept for the next start.
+      if (result.resetAt && run.deadline && result.resetAt > run.deadline) finish(`the usage limit resets ${stamp(result.resetAt)}, after ${run.until}`);
+      const maxWait = run.maxWaitHours ?? 6;
+      if (result.resetAt && result.resetAt - Date.now() > maxWait * 3_600_000) finish(`the usage limit resets ${stamp(result.resetAt)}, more than ${maxWait} h away (--max-wait-hours)`);
       const until = Math.min(result.resetAt || Date.now() + 30 * 60_000, run.deadline || Infinity);
+      if (wrote) log(`session ${nn}: the limit cut it off after its handover; session ${String(session + 1).padStart(2, "0")} starts when it resets`);
       log(`usage limit: waiting until ${new Date(until).toLocaleString("sv-SE")}`);
-      // In this process, so `wait` (which waits for it to exit) goes on through the limit.
-      // NIGHT_SHIFT_LIMIT_TICK_MS: a shorter look at the clock for night-chain.test.mjs.
-      const tick = Number(process.env.NIGHT_SHIFT_LIMIT_TICK_MS) || 60_000;
-      while (Date.now() < until && !fs.existsSync(stopFile)) await new Promise((r) => setTimeout(r, tick));
+      await waitUntil(until);
+      if (wrote) { failures = 0; session++; continue; }
       fs.rmSync(path.join(state, "prompts", `${nn}.md`), { force: true });
       continue;
     }
@@ -493,6 +509,8 @@ function runSession(run, session, plan, nn, resume) {
   // Without --fork-session the conversation keeps its id, so the report still finds its transcript.
   if (resumeId) args.push("--resume", resumeId);
   const out = path.join(run.state, `session-${nn}.jsonl`);
+  // A resumed session appends to its stream; only its own part says how it ended (the limit before it is still there).
+  const from = resumeId && fs.existsSync(out) ? fs.statSync(out).size : 0;
   const err = path.join(run.state, `session-${nn}.err`);
   // A .mjs "claude" is the stand-in night-chain.test.mjs runs.
   const [cmd, pre] = /\.m?js$/i.test(run.claude) ? [NODE, [run.claude]] : [run.claude, []];
@@ -520,7 +538,8 @@ function runSession(run, session, plan, nn, resume) {
     }, run.sessionHours * 3_600_000);
     child.on("exit", (code) => {
       clearTimeout(timer);
-      resolve(sessionOutcome(read(out), read(err), code));
+      const outcome = sessionOutcome(fs.readFileSync(out).subarray(from).toString("utf8"), read(err), code);
+      resolve({ ...outcome, sessionId: outcome.sessionId || resumeId || null });
     });
   });
 }

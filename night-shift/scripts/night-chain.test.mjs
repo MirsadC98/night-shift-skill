@@ -713,3 +713,64 @@ test("telegram-setup names the chat it saves and never picks between two", async
   assert.equal(chooseChat({}, []).chatId, null);
   assert.match(chooseChat({ chatId: 11 }, []).lines[0], /still go to 11/);
 });
+
+// The limit path: a stand-in that prints a limit (the rejected rate-limit event and the result line
+// an empty-handed or handed-over session ends on) and exits 1. `reset` is epoch seconds.
+const LIMIT_LINES = `const limit = (reset) => {
+  console.log(JSON.stringify({ type: "rate_limit_event", session_id: "fake-1", rate_limit_info: { status: "rejected", rateLimitType: "five_hour", resetsAt: reset } }));
+  console.log(JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, api_error: "usage_limit_reached", num_turns: 9, total_cost_usd: 1, session_id: "fake-1", result: "limit" }));
+  process.exit(1);
+};
+const ok = (n) => console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-" + n, result: "ok" }));
+`;
+// Writes the stand-in over setup()'s fake-claude.mjs and runs the chain with short ticks.
+async function limitRun(body, runPatch = {}) {
+  const s = setup();
+  fs.writeFileSync(path.join(s.root, "fake-claude.mjs"), `import fs from "node:fs"; import path from "node:path";
+const st = process.env.NIGHT_SHIFT_STATE, n = Number(process.env.NIGHT_SHIFT_SESSION), resumed = process.argv.includes("--resume");
+${LIMIT_LINES}${body}`);
+  const run = JSON.parse(fs.readFileSync(path.join(s.state, "run.json"), "utf8"));
+  fs.writeFileSync(path.join(s.state, "run.json"), JSON.stringify({ ...run, maxSessions: null, ...runPatch }));
+  const env = { ...s.env, NIGHT_SHIFT_LIMIT_TICK_MS: "50", NIGHT_SHIFT_BACKOFF_MS: "50" };
+  await runOnce(["--state", s.state, "--headless"], env, s.root);
+  return { ...s, log: await waitForLog(s.state, /chain ends: /) };
+}
+
+test("a limit after the handover starts the next session at the reset, with no recovery note", async () => {
+  const { state, log } = await limitRun(`
+if (n === 1) { fs.writeFileSync(path.join(st, "next-prompt.md"), "second piece"); limit(Math.floor(Date.now() / 1000) - 300); }
+else { fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done"); ok(n); }
+`);
+  assert.match(log, /chain ends: STOP: done/);
+  assert.match(log, /session 01: the limit cut it off after its handover; session 02 starts when it resets/);
+  assert.match(log, /session 02 starts: second piece/);
+  assert.doesNotMatch(log, /resumes|left no continuation prompt/);
+  assert.equal(fs.existsSync(path.join(state, "resume.json")), false);
+  assert.equal(fs.readFileSync(path.join(state, "prompts", "02.md"), "utf8"), "second piece");
+});
+
+test("a reset farther away than --max-wait-hours ends the chain and keeps the session to resume", async () => {
+  const { state, home, log } = await limitRun(`limit(Math.floor(Date.now() / 1000) + 3 * 86400);`);
+  assert.match(log, /chain ends: the usage limit resets \d{4}-\d\d-\d\d \d\d:\d\d, more than 6 h away \(--max-wait-hours\)/);
+  assert.doesNotMatch(log, /usage limit: waiting/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(state, "resume.json"), "utf8")).sessionId, "fake-1");
+  assert.equal(pointerOf(home).finished, true);
+});
+
+test("a reset after --until ends the chain instead of waiting for nothing", async () => {
+  const { log } = await limitRun(`limit(Math.floor(Date.now() / 1000) + 2 * 3600);`, { until: "09:00", deadline: Date.now() + 3_600_000 });
+  assert.match(log, /chain ends: the usage limit resets \d{4}-\d\d-\d\d \d\d:\d\d, after 09:00/);
+  assert.doesNotMatch(log, /usage limit: waiting/);
+});
+
+test("a resumed session is judged by what it wrote, not by the limit before it", async () => {
+  // The first fresh call hits the limit; the resumed call exits 1 with no output; a later fresh call finishes.
+  const { log } = await limitRun(`
+const hit = path.join(st, "hit");
+if (resumed) process.exit(1);
+if (!fs.existsSync(hit)) { fs.writeFileSync(hit, "1"); limit(Math.floor(Date.now() / 1000) - 300); }
+fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done"); ok(n);
+`);
+  assert.equal((log.match(/usage limit: waiting/g) || []).length, 1);
+  assert.match(log, /chain ends: STOP: done/);
+});
