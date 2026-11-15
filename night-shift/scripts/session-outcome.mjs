@@ -26,7 +26,8 @@ const FABLE_WINDOW = "seven_day_overage_included";
 const LIMIT_TEXT = /^\s*(?:Claude AI usage limit reached|You(?:'|’)ve hit your [\w -]{1,30}limit)/i;
 const LOOSE = /usage limit|limit reached|rate.?limit|hit your [\w-]+ limit/i;
 
-export function sessionOutcome(stream, errText = "", code = null) {
+// timedOut/hours: the runner's --session-hours timer killed the session (a kill is no API error, so no retry).
+export function sessionOutcome(stream, errText = "", code = null, { timedOut = false, hours = null } = {}) {
   // A resumed session appends to the same stream: a rejected event belongs to
   // the result that follows it, not to a later part of the conversation.
   let res = null, cost = 0, pending = null, rejected = null, lastRejected = null, sessionId = null, model = null, switchedTo = null;
@@ -61,7 +62,7 @@ export function sessionOutcome(stream, errText = "", code = null) {
   const fableOut = cut && (FABLE_REFUSALS.has(res?.api_error) || info?.rateLimitType === FABLE_WINDOW);
   const fableEpoch = (info?.rateLimitType === FABLE_WINDOW && info.resetsAt) || last?.[FABLE_WINDOW]?.resetsAt || null;
   const fatal = cut && !limited && !fableOut && ([400, 401, 403, 404].includes(res?.api_error_status) || /^\s*API Error: (?:400|401|403|404)\b|Please run \/login/.test(resText));
-  const transient = cut && !limited && !fableOut && !fatal && (!res || res.api_error != null || res.api_error_status != null || /^\s*API Error\b/.test(resText));
+  const transient = !timedOut && cut && !limited && !fableOut && !fatal && (!res || res.api_error != null || res.api_error_status != null || /^\s*API Error\b/.test(resText));
   const lastErrLine = errTail.split("\n").map((l) => l.trim()).filter(Boolean).pop();
   const errorText = !cut ? "" : (res ? resText.trim().split("\n")[0] : lastErrLine || `exit ${code}, no output`).slice(0, 160);
   return {
@@ -86,9 +87,10 @@ export function sessionOutcome(stream, errText = "", code = null) {
     switchedTo,
     // The limit windows of the session's first and last rate_limit_event (the whole account's).
     windows: { first, last },
-    summary: res
+    timedOut,
+    summary: (res
       ? `${res.subtype}${res.is_error ? " (error)" : ""}, ${res.num_turns} turns, $${cost.toFixed(2)}`
-      : `exit ${code}, no result line`,
+      : timedOut ? "" : `exit ${code}, no result line`) + (timedOut ? `${res ? "; " : ""}killed after ${hours} h (--session-hours)` : ""),
   };
 }
 

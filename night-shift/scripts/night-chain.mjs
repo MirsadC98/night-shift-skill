@@ -293,6 +293,20 @@ async function runChain(opt) {
     { detached: true, stdio: "ignore", windowsHide: true }).unref();
   startWatcher(!reloaded);
 
+  // A crash would end the process with nothing in chain.log and the pointer still "running".
+  // A throw inside runChain is a rejection of its promise, so the body below is wrapped as well.
+  const die = (e) => {
+    const reason = `the runner crashed: ${String((e && e.message) || e).split("\n")[0].slice(0, 200)}`;
+    try { clearInterval(heal); } catch {}
+    try { log(`chain ends: ${reason}`); } catch {}
+    try { writePointer(repo, { ...pointer, finished: true, finishedAt: now(), reason }); } catch {}
+    try { awake.kill(); } catch {}
+    process.exit(1);
+  };
+  process.on("uncaughtException", die);
+  process.on("unhandledRejection", die);
+  try {
+
   // What was added to an earlier run's settings by hand (an env, another hook) stays;
   // the guard, the limit wait, the subagent model and the efforts are written over.
   // Before every session, not once: the file sits in a folder the sessions can write, and one
@@ -509,6 +523,7 @@ async function runChain(opt) {
     session++;
   }
   finish(`reached ${run.maxSessions} sessions`);
+  } catch (e) { die(e); }
 }
 
 // plan: sessionPlan's { model, family, effort, body }, with downgrade when Fable was refused.
@@ -571,7 +586,9 @@ function runSession(run, session, plan, nn, resume) {
     });
     child.stdin.on("error", () => {});
     child.stdin.end(resumeId ? header + "\n" : header + body + "\n");
+    let timedOut = false;
     const timer = setTimeout(() => {
+      timedOut = true;
       try { execFileSync("taskkill", ["/T", "/F", "/PID", String(child.pid)], { stdio: "ignore", windowsHide: true }); } catch {}
     }, run.sessionHours * 3_600_000);
     child.on("error", (e) => {
@@ -581,7 +598,7 @@ function runSession(run, session, plan, nn, resume) {
     });
     child.on("exit", (code) => {
       clearTimeout(timer);
-      const outcome = sessionOutcome(fs.readFileSync(out).subarray(from).toString("utf8"), read(err), code);
+      const outcome = sessionOutcome(fs.readFileSync(out).subarray(from).toString("utf8"), read(err), code, { timedOut, hours: run.sessionHours });
       resolve({ ...outcome, sessionId: outcome.sessionId || resumeId || null });
     });
   });

@@ -145,3 +145,10 @@ test("an API or network failure is transient; a refused login is fatal", () => {
   assert.deepEqual([login.transient, login.fatal], [false, true]);
   assert.equal(sessionOutcome(result({})).transient, false);
 });
+
+test("a session the timer killed says so and is not retried as a transient error", () => {
+  const o = sessionOutcome("", "", 1, { timedOut: true, hours: 4 });
+  assert.deepEqual([o.timedOut, o.transient, o.summary], [true, false, "killed after 4 h (--session-hours)"]);
+  const late = sessionOutcome(result({ num_turns: 30 }), "", 1, { timedOut: true, hours: 4 });
+  assert.equal(late.summary, "success, 30 turns, $1.00; killed after 4 h (--session-hours)");
+});

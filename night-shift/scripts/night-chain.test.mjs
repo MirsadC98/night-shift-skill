@@ -866,3 +866,18 @@ test("a claude that cannot be started is retried, not a silent death", async () 
   assert.match(log, /session 01: transient error \(claude could not start: ENOENT\); try 1/);
   assert.match(log, /chain ends: session 01 kept failing/);
 });
+
+test("a session that hangs past --session-hours is logged as a timeout", async () => {
+  const { log } = await limitRun(`await new Promise((r) => setTimeout(r, 60_000));`, { sessionHours: 0.0005, maxSessions: 1 });
+  assert.match(log, /session 01 ends: killed after 0\.0005 h \(--session-hours\)/);
+});
+
+test("a runner that crashes writes why into chain.log and marks the run finished", async () => {
+  const { state, env, home, root } = setup();
+  // runChain reads this folder unguarded.
+  fs.rmSync(path.join(state, "prompts"), { recursive: true });
+  await runOnce(["--state", state, "--headless"], env, root);
+  const log = await waitForLog(state, /chain ends: /);
+  assert.match(log, /chain ends: the runner crashed: ENOENT/);
+  assert.equal(pointerOf(home).finished, true);
+});
