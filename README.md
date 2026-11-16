@@ -19,7 +19,7 @@ It runs a chain of fresh headless sessions (`claude -p`). Each session is like o
 
 ## Install
 
-Copy the `night-shift` folder to `~/.claude/skills/night-shift/`. `SKILL.md` refers to its scripts by that path.
+Copy the `night-shift` folder to `~/.claude/skills/night-shift/`. The guard protects the skill's files at that path from night sessions, so a copy anywhere else is not protected; the commands below use it too.
 
 ```bash
 git clone https://github.com/<you>/<this-repo>.git
@@ -73,7 +73,7 @@ Put a `.claude/night-shift.json` in the target repository. Every key is optional
 - `mode`: `"opus"` (the default) or `"fable"` (see "Modes").
 - `lang`: `"en"` (the default) or `"tr"` (see "Language").
 - `model`, `effort`: what a session runs on when its prompt names neither. What `model` means depends on the mode (see "Modes").
-- `fableCeiling`, `fableSessions`: the share of Fable's weekly allowance above which a `MODEL: fable` prompt runs on Opus at `max` instead, and how many Fable sessions a chain may run while that share is unknown.
+- `fableCeiling`, `fableSessions`: in mode `opus`, the share of Fable's weekly allowance above which a `MODEL: fable` prompt runs on Opus at `max` instead, and how many Fable sessions a chain may run while that share is unknown. In mode `fable`, `fableCeiling` is the share at or over which sessions run on Opus at `xhigh` until the reset, and `fableSessions` does not apply.
 - `maxWaitHours`: the longest the chain waits for a usage limit to reset or for an outage to pass (see "When a session fails"). The default is 6.
 - `mcp`: `"none"` (the default), `"inherit"` or a list of server names. A night run loads no MCP server and the guard refuses every `mcp__` tool, unless the project lists the server (`"mcp": ["my-server"]`) or sets `"inherit"`.
 - `deny`: your own guard rules. `pattern` is a regular expression and `flags` defaults to `i`.
@@ -83,7 +83,7 @@ Put a `.claude/night-shift.json` in the target repository. Every key is optional
 `mode` in the project file, or `--mode` on `start`, picks how the chain uses models.
 
 - **`opus`** (the default): every session runs on Opus at `xhigh`. A session whose prompt opens with `MODEL: fable` runs on Fable at `high`, for one hard piece, while the Fable gate allows it (see above).
-- **`fable`**: every session runs on Fable at `high`. While Fable's weekly share is at or over `fableCeiling` (default 0.6), or used up, sessions run on Opus at `xhigh` until the reset. The runner never picks `max` in this mode.
+- **`fable`**: every session runs on Fable at `high`. While Fable's weekly share is at or over `fableCeiling` (default 0.6), or used up, sessions run on Opus at `xhigh` until the reset. The runner never picks `max` in this mode. `effort` is Fable's level there: the sample config's `"effort": "xhigh"`, or a global `effort`, runs every Fable session at `xhigh` instead of `high`, and a `max` you set runs them all at `max`. The Opus fallback stays at `xhigh`.
 
 What `model` means: in mode `opus` it is the main model, and any model that is not Fable passes. In mode `fable` a Fable id is the main model and an Opus id is the fallback. `--model fable` alone means mode `fable`; `--mode opus --model fable` is refused.
 
@@ -100,10 +100,10 @@ Each file is at most 8 KB (UTF-8 bytes) and is read again at every session start
 
 | A rule can change | A rule cannot change |
 |---|---|
-| The five tests a piece must pass | What the guard refuses: merges, branch deletes, history rewrites, force pushes |
+| The five tests a piece must pass (`night-shift/SKILL.md`, "One session, one piece") | What the guard refuses: merges, branch deletes, history rewrites, force pushes |
 | How work is split into pieces | Deletes outside the repository and temp folders |
 | The stops the guard does not enforce: live desktop, physical tests, messages, work outside the roadmap | Publishing |
-| When a session asks for another model | |
+| When a session asks for another model | Writes to the skill, Claude settings, the config files and the rule files |
 
 ### Language
 
@@ -121,7 +121,7 @@ Each file is at most 8 KB (UTF-8 bytes) and is read again at every session start
 - changes to remotes, to global git config and to git settings that run a command, and a git command started with another home folder;
 - publishing: `npm publish`, `gh release`, GitHub API writes and store uploads;
 - deletes and moves outside the repository and temp folders, recursive or not, with the target read from the folder the command stands in (`cd elsewhere && rm -rf x` is refused);
-- file writes (Write, Edit) outside the repository and temp folders, and writes to the skill itself, Claude settings, your global `CLAUDE.md`, the project's `.claude/night-shift.json`, `.git`, and the runner's own files in the state folder (`night-settings.json`, `run.json`, `launch.cmd`, the logs); the same files are protected from a shell redirect and from the common commands that write a file in place (`sed -i`, `tee`, `cp`, `Set-Content` and the like);
+- file writes (Write, Edit) outside the repository and temp folders, and writes to the skill itself, Claude settings, your global `CLAUDE.md`, the project's `.claude/night-shift.json`, the rule files, `~/.claude/night-shift/`, `.git`, and the runner's own files in the state folder (`night-settings.json`, `run.json`, `launch.cmd`, the logs); the same files are protected from a shell redirect and from the common commands that write a file in place (`sed -i`, `tee`, `cp`, `Set-Content` and the like);
 - registry writes, system-level commands, and killing `node`, `claude`, the editor or the shell;
 - MCP tools, unless the project lists their server (`mcp` above);
 - anything your project's `deny` rules match.
