@@ -497,3 +497,17 @@ test("delete targets written through globs, braces, pipes and .NET are refused; 
     `find . -name "*.tmp" -delete`, `find . -name '*.tmp' -exec rm {} \\;`])
     assert.equal(bash(c), null, c);
 });
+
+test("a PowerShell parameter's value is no delete target; a find expression goes on after an escaped semicolon", () => {
+  const ps = (command) => decide({ tool_name: "PowerShell", tool_input: { command } }, env);
+  for (const c of [`Get-ChildItem C:\\Users\\u\\Documents | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue`, `gci C:\\Users\\u\\Documents | ri -r -fo -ea SilentlyContinue`,
+    `gci C:\\Users\\u\\Documents | Remove-Item -Recurse -Force -ea 0`, `gci C:\\Users\\u\\Documents | Remove-Item -Recurse -Force -ErrorVariable e`,
+    `gci C:\\Users\\u\\Documents | ri -Recurse -Stream x -Credential y`])
+    assert.ok(ps(c), c);
+  assert.equal(ps(`Remove-Item -Recurse -Force -ErrorAction SilentlyContinue .\\dist`), null);
+  assert.equal(bash(`rm -r -f build`), null);
+  for (const c of [`find /c/Users/u/Documents -exec true {} \\; -delete`, `find /c/Users/u/Documents -exec echo {} \\; -exec rm {} \\;`])
+    assert.ok(bash(c), c);
+  assert.equal(bash(`find . -name '*.tmp' -exec rm {} \\;`), null);
+  assert.equal(bash(`find . -name '*.tmp' -exec rm {} \\; -print`), null);
+});

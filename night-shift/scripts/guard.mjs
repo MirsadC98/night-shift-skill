@@ -140,7 +140,7 @@ function dropHeredocs(cmd) {
 //   lvl    how many ( are open, so that a cd inside ( ) can end at the )
 // An unquoted < or > starts a word of its own (`echo x>f` writes f); `2>f` and `>|f` stay one word.
 const unmark = (s) => s.replace(/\0/g, "$").replace(/\x01/g, "`");
-export function simpleCommands(text) {
+export function simpleCommands(text, ps = false) {
   const cmds = [];
   let words = [], bare = [], word = null, wb = false, q = null, run = "", lvl = 0;
   const endWord = () => { if (word !== null) { words.push(word); bare.push(wb); } word = null; };
@@ -160,6 +160,8 @@ export function simpleCommands(text) {
     }
     if (c === "'" || c === '"') { q = c; if (word === null) { word = ""; wb = false; } continue; }
     if (c === "|" && wb && /^\d*>$/.test(word ?? "")) { word += c; continue; }
+    // bash: `\;` is a literal semicolon (`find -exec ... \; -delete` is one command); PowerShell has no such escape.
+    if (!ps && c === "\\" && text[i + 1] === ";") { if (word === null) wb = true; word = (word ?? "") + "\\;"; i++; continue; }
     if (/[;&|()`\n]/.test(c)) {
       endCmd(); run += c;
       if (c === "(") lvl++; else if (c === ")") lvl = Math.max(0, lvl - 1);
@@ -527,6 +529,11 @@ const braces = (w, depth = 0) => {
   const m = BRACE.exec(w);
   return m && depth < 6 ? m[1].split(",").flatMap((a) => braces(w.slice(0, m.index) + a + w.slice(m.index + m[0].length), depth + 1)) : [w];
 };
+// PowerShell parameters whose value is not a path. Names match case-insensitively by unique prefix, so at
+// least two letters (bash's `rm -r -f x` must keep x as a target).
+const VALUE_PARAMS = ["include", "exclude", "filter", "stream", "credential", "erroraction", "warningaction", "informationaction", "errorvariable", "warningvariable", "informationvariable", "outvariable", "outbuffer", "pipelinevariable"];
+const VALUE_ALIASES = /^(ea|wa|infa|ev|wv|iv|ov|ob|pv)$/;
+const valueParam = (t) => { const n = /^-([a-z]{2,})$/i.exec(t)?.[1].toLowerCase(); return Boolean(n) && (VALUE_ALIASES.test(n) || VALUE_PARAMS.some((p) => p.startsWith(n))); };
 const PATH_PARAM = (n) => { n = n.toLowerCase(); return "path".startsWith(n) || "literalpath".startsWith(n) || n === "pspath" || n === "lp"; };
 const XARGS_VALUE = /^(-[aEdILnPs]|--(arg-file|delimiter|max-lines|max-args|max-procs|max-chars|process-slot-var))$/;
 
@@ -544,7 +551,7 @@ function checkDelete(words, ni, env, where, vars, r) {
   const kind = recursive ? "recursive deletes" : "deletes";
   // find's own tests (-name "*.tmp") follow its first -option: patterns, not targets.
   const isFind = /find(\.exe)?$/i.test(name);
-  let expr = false, dNext = false, seen = 0, filter = false;
+  let expr = false, dNext = false, seen = 0, skip = false;
   // Its targets come after the delete's own word. A plain delete's {a,b} is expanded here, one target
   // for each alternative; a recursive one with a list is refused below.
   const list = words.slice(words.findIndex((w) => DELETE_WORD.test(w)) + 1);
@@ -566,10 +573,10 @@ function checkDelete(words, ni, env, where, vars, r) {
       if (t === "-D") dNext = true;
       else if (!/^-([HLP]|O\d*|D\S+)$/.test(t) && /^[-(!]/.test(t)) expr = true;
     }
-    if (/^-/.test(t) || /^\/[sqfa]$/i.test(t) || /^(\/dev\/null|nul)$/i.test(t)) { filter = /^-(inc|exc|fil)[a-z]*$/i.test(t); continue; }
-    // The value of -Include/-Exclude/-Filter picks among the items; it names no folder to delete.
-    if (!filter) seen++;
-    filter = false;
+    if (/^-/.test(t) || /^\/[sqfa]$/i.test(t) || /^(\/dev\/null|nul)$/i.test(t)) { skip = valueParam(t); continue; }
+    // The value of -Include or -ErrorAction is no folder to delete, so it does not count as a target.
+    if (!skip) seen++;
+    skip = false;
     if (/^~([\\/]|$)/.test(t)) return `refusing a ${recursive ? "recursive delete" : "delete"} in the home folder ("${t}")`;
     // A .* can match .. and the dot folders (.git), a {a,b} list is any paths the shell makes of it.
     if (recursive && (/^(\.|\.\/|\*|\.\/\*|\/|\.git|\.git\/.*)$/.test(t) || /(^|[\\/])\.\.([\\/]|$)/.test(t) || /(^|[\\/])\.\*$/.test(t))) return `refusing a recursive delete of "${t}"`;
@@ -730,7 +737,7 @@ export function checkCommand(cmd, env, where, opts = {}, depth = 0) {
   // A line continued on the next (a trailing backslash, or PowerShell's backtick) is one line. This runs
   // after the here-documents are cut, so a body line ending in a backslash cannot swallow its delimiter.
   const text = dropHeredocs(String(cmd)).replace(/[\\`]\r?\n/g, " ");
-  return walk(simpleCommands(text), env, where, { ...opts, vars: opts.vars ?? new Map() }, depth);
+  return walk(simpleCommands(text, opts.ps), env, where, { ...opts, vars: opts.vars ?? new Map() }, depth);
 }
 
 // The project's deny rules. A file that does not validate yields an error instead: a rule that
