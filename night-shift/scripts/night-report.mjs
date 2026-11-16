@@ -22,7 +22,7 @@ import os from "node:os";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { sessionCard, eventLine, chainCard, statusCard, reportCard, reportSection, chainProgress, progressText, splitHtml } from "./telegram-cards.mjs";
-import { sessionPlan } from "./effort.mjs";
+import { sessionPlan, resolveMode } from "./effort.mjs";
 import { strings, langOf } from "./lang/index.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
@@ -245,7 +245,7 @@ function collect(state, pid = null) {
     // What the runner said about a session's model and handover (night-chain.mjs, 2026-11-15 on).
     else if ((m = /^session (\d+)(?::| )/.exec(e.text))) {
       const s = sessions.findLast((x) => x.nn === m[1]);
-      const note = runnerNote(e.text, T);
+      const note = runnerNote(e.text, T, (run.mode || resolveMode({ model: run.model }).mode) === "fable");
       if (s && note) s.notes = [...(s.notes || []), note];
     }
   }
@@ -297,13 +297,18 @@ function collect(state, pid = null) {
 const FABLE_WHY = [[/used up until (\S+ \S+)/, (m, T) => T.note.fableUntil(m[1])],
   [/is at (\S+), at or over the (\S+) ceiling/, (m, T) => T.note.fableAt(m[1], m[2])],
   [/(\d+) Fable sessions already ran/, (m, T) => T.note.fableCount(m[1])]];
-function runnerNote(text, T) {
+// fableMode: the run's main model is Fable, so a cut-off session's piece goes on at xhigh, not max.
+function runnerNote(text, T, fableMode = false) {
   let m;
+  if ((m = /^session \d+: Fable is the main model, but (.*); it runs on Opus at (\w+)$/.exec(text))) {
+    const why = FABLE_WHY.map(([re, say]) => { const w = re.exec(m[1]); return w && say(w, T); }).find(Boolean) || m[1];
+    return T.note.mainFell(why, m[2]);
+  }
   if ((m = /^session \d+ asked for Fable, but (.*); it runs on Opus at max$/.exec(text))) {
     const why = FABLE_WHY.map(([re, say]) => { const w = re.exec(m[1]); return w && say(w, T); }).find(Boolean) || m[1];
     return T.note.fableAsked(why);
   }
-  if (/^session \d+: Fable's allowance is used up/.test(text)) return T.note.fableCut;
+  if (/^session \d+: Fable's allowance is used up/.test(text)) return fableMode ? T.note.mainCut : T.note.fableCut;
   if ((m = /^session \d+ was to run on Fable, but (.*)$/.exec(text))) return T.note.fableNot(m[1]);
   if ((m = /^session \d+ wrote a next-prompt\.md of (\d+) KB/.exec(text))) return T.note.bigPrompt(m[1]);
   if ((m = /^session \d+: MODEL: (\S+) is not a model/.exec(text))) return T.note.badModel(m[1]);

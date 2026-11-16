@@ -319,13 +319,14 @@ console.log(JSON.stringify(step.refuse
   ? { type: "result", subtype: "success", is_error: true, api_error: step.refuse, num_turns: 1, total_cost_usd: 0, session_id: "fake-" + n, result: "refused" }
   : { type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-" + n, result: "ok" }));
 `;
-async function fableRun(first, script, runPatch = {}) {
+async function fableRun(first, script, runPatch = {}, before = null) {
   const { state, env, root } = setup();
   const fake = path.join(root, "fake-fable.mjs");
   fs.writeFileSync(fake, FABLE_FAKE);
   const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
   fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake, maxSessions: null, ...runPatch }));
   fs.writeFileSync(path.join(state, "next-prompt.md"), first);
+  if (before) before(state);
   const { code } = await runOnce(["--state", state, "--headless"], { ...env, TEST_SCRIPT: JSON.stringify(script) }, root);
   const log = fs.readFileSync(path.join(state, "chain.log"), "utf8");
   assert.equal(code, 0, log);
@@ -456,7 +457,107 @@ test("a retry keeps both MODEL and EFFORT; a resume goes on on the model it ran 
   assert.equal(fs.existsSync(path.join(state, "fable.json")), false, "a resumed Fable session is not a new one");
 });
 
-test("a runner in a visible console moves to a hidden one, and puts back the pointer its old parent marks finished", async () => {
+// Fable mode: Fable is every session's model, Opus at xhigh stands in only while Fable is out or over the ceiling.
+const FM = { mode: "fable", model: "fable", opusModel: "opus", effort: "high", lang: "tr" };
+
+test("fable mode: every session runs on Fable at high, past the count, with no only-this-piece note", async () => {
+  const resets = Math.floor(Date.now() / 1000) + 3 * 86_400;
+  const { log, seen, flag, fable } = await fableRun("first piece", {
+    1: { fable: 0.2, resets, next: "second" }, 2: { next: "third" }, 3: { next: "STOP: done" } }, { ...FM, fableSessions: 1 });
+  for (const n of [1, 2, 3]) {
+    const s = seen(n);
+    assert.equal(flag(s, "--model"), "fable", `session ${n}`);
+    assert.equal(flag(s, "--effort"), null);
+    assert.equal(s.settings.fable.effortLevel, "high");
+    assert.equal(s.noFallback, "1");
+  }
+  assert.match(seen(1).input, /Mode: fable\./);
+  assert.doesNotMatch(seen(1).input, /only for this piece/);
+  assert.match(log, /Fable as the main model under 60% of its allowance, else opus at xhigh\n/);
+  assert.equal(fable().sessions, undefined);
+});
+
+test("fable mode: at the ceiling the next session runs on Opus at xhigh and says why", async () => {
+  const resets = Math.floor(Date.now() / 1000) + 3 * 86_400;
+  const { state, log, seen, flag } = await fableRun("first piece", {
+    1: { fable: 0.65, resets, next: "second" }, 2: { next: "STOP: done" } }, { ...FM, fableCeiling: 0.6 });
+  const two = seen(2);
+  assert.equal(flag(two, "--model"), "opus");
+  assert.equal(flag(two, "--effort"), null);
+  assert.equal(two.settings.opus.effortLevel, "xhigh");
+  assert.match(two.input, /main model is Fable/);
+  assert.doesNotMatch(two.input, /\bmax\b/);
+  assert.match(log, /session 02: Fable is the main model, but its allowance is at 65%, at or over the 60% ceiling; it runs on Opus at xhigh\n/);
+  assert.match(log, /session 02 runs Opus at xhigh\n/);
+  const { sessionMessage } = await import("./night-report.mjs");
+  const card = sessionMessage(state, "02", process.pid).text;
+  assert.match(card, /xhigh/);
+  assert.doesNotMatch(card, /olmalı/);
+  assert.doesNotMatch(card, /max/);
+});
+
+test("fable mode: a session the allowance cuts off goes on on Opus at xhigh, with no EFFORT line", async () => {
+  const resets = Math.floor(Date.now() / 1000) + 3 * 86_400;
+  const { state, log, seen, flag } = await fableRun("hard piece", {
+    1: { fable: 1, resets, refuse: "model_requires_usage_credits" }, 2: { next: "STOP: done" } }, FM);
+  const two = seen(2);
+  assert.doesNotMatch(fs.readFileSync(path.join(state, "prompts", "02.md"), "utf8"), /^EFFORT:/m);
+  assert.equal(flag(two, "--model"), "opus");
+  assert.equal(flag(two, "--effort"), null);
+  assert.match(two.input, /was cut off/);
+  assert.ok(two.input.endsWith("\n\nhard piece\n"));
+  assert.match(log, /session 01's piece goes on in the next session on Opus at xhigh/);
+  const { sessionMessage } = await import("./night-report.mjs");
+  const card = sessionMessage(state, "01", process.pid).text;
+  assert.match(card, /xhigh/);
+  assert.doesNotMatch(card, /max/);
+});
+
+test("fable mode: Fable comes back once the reset has passed", async () => {
+  const { seen, flag } = await fableRun("first piece", { 1: { next: "STOP: done" } }, FM,
+    (state) => fs.writeFileSync(path.join(state, "fable.json"), JSON.stringify({ outUntil: Date.now() - 1000 })));
+  assert.equal(flag(seen(1), "--model"), "fable");
+});
+
+test("fable mode: MODEL: opus runs that one session on the stand-in Opus at xhigh", async () => {
+  const { log, seen, flag } = await fableRun("MODEL: opus\nmechanical piece", { 1: { next: "second" }, 2: { next: "STOP: done" } },
+    { ...FM, opusModel: "claude-opus-5-5" });
+  assert.equal(flag(seen(1), "--model"), "claude-opus-5-5");
+  assert.match(log, /session 01 runs Opus \(claude-opus-5-5\) at xhigh/);
+  assert.equal(flag(seen(2), "--model"), "fable");
+});
+
+test("a run.json from before modes with model fable runs as fable mode", async () => {
+  const { log, seen, flag } = await fableRun("first piece", { 1: { next: "second" }, 2: { next: "third" }, 3: { next: "STOP: done" } }, { model: "fable" });
+  for (const n of [1, 2, 3]) {
+    assert.equal(flag(seen(n), "--model"), "fable", `session ${n}`);
+    assert.equal(seen(n).settings.fable.effortLevel, "high");
+  }
+  assert.doesNotMatch(log, /at max/);
+});
+
+test("start works out the mode from --mode, the config and the model, and names a mismatch", () => {
+  const runOf = (extra) => {
+    const c = pointerCase();
+    const r = c.run("start", ["--state", c.state, "--allow-dirty", "--prompt", "x", ...extra]);
+    return { ...r, json: r.stderr.includes("launch refused (test)") ? JSON.parse(fs.readFileSync(path.join(c.state, "run.json"), "utf8")) : undefined };
+  };
+  const f = runOf(["--model", "fable"]).json;
+  assert.deepEqual([f.mode, f.model, f.opusModel, f.effort], ["fable", "fable", "opus", "high"]);
+  const s = runOf(["--mode", "fable", "--model", "claude-opus-5-5"]).json;
+  assert.deepEqual([s.mode, s.model, s.opusModel], ["fable", "fable", "claude-opus-5-5"]);
+  const o = runOf([]).json;
+  assert.deepEqual([o.mode, o.model, o.effort], ["opus", "opus", "xhigh"]);
+  const bad = runOf(["--mode", "opus", "--model", "fable"]);
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /mode "opus"/);
+  assert.doesNotMatch(bad.stderr, /launch refused/);
+  const both = runOf(["--mode", "both"]);
+  assert.equal(both.status, 1);
+  assert.match(both.stderr, /--mode must be one of opus, fable/);
+});
+
+test("a runner in a visible console moves to a hidden one,and puts back the pointer its old parent marks finished", async () => {
   // What an older runner's hand-over starts: `run` without --headless, NIGHT_SHIFT_RELOADED=1,
   // in the old runner's console; the old runner marks the pointer finished once it exits.
   const { state, env, root, home } = setup();

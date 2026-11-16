@@ -22,7 +22,9 @@
 //    opens with "MODEL: fable" runs on Fable at high (or its EFFORT) while Fable's weekly allowance is
 //    under --fable-ceiling ("fableCeiling"; while its ratio is unknown, at most --fable-sessions
 //    "fableSessions" in a chain), else on Opus at max; a Fable session its allowance cuts off runs
-//    again from its prompt on Opus at max, and so does every MODEL: fable prompt until the allowance resets)
+//    again from its prompt on Opus at max, and so does every MODEL: fable prompt until the allowance resets.
+//    --mode fable ("mode") makes Fable every session's model at high, and Opus at xhigh (never max)
+//    stands in while its allowance is at or over the ceiling or used up)
 //   node night-chain.mjs status --repo <dir>
 //   node night-chain.mjs wait   --repo <dir> [--state <dir>]  (returns once the chain is over: exit 0
 //                               with status's first lines and what waits for the user, 2 if it died;
@@ -50,10 +52,10 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { buildReport, userWaits, stateStrings } from "./night-report.mjs";
 import { strings, langOf, LANG_NAMES } from "./lang/index.mjs";
-import { mergedConfig, LANGS, stateDirProblem, tempRoot } from "./config.mjs";
+import { mergedConfig, LANGS, MODES, stateDirProblem, tempRoot } from "./config.mjs";
 import { sessionOutcome, windowSpan } from "./session-outcome.mjs";
 import { MAIN_MODEL, SUB_MODEL, MAIN_EFFORT, subEffortText, MAX_NOTE, FABLE_NOTE, nightModelSettings, sessionPlan,
-  promptDirectives, directiveLines, fableGate, familyOf } from "./effort.mjs";
+  promptDirectives, directiveLines, fableGate, mainGate, fallbackNote, resolveMode, familyOf } from "./effort.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const SKILL_DIR = path.dirname(path.dirname(SELF)); // the folder that holds SKILL.md
@@ -216,6 +218,9 @@ function start(opt) {
   }
   // A language is never guessed from "TR" or "tr-TR": a night in English that was asked for in Turkish is worse than a refusal.
   if (opt.lang !== undefined && !LANGS.includes(opt.lang)) fail(`--lang must be one of ${LANGS.join(", ")} (got ${opt.lang === true ? "no value" : opt.lang})`);
+  if (opt.mode !== undefined && !MODES.includes(opt.mode)) fail(`--mode must be one of ${MODES.join(", ")} (got ${opt.mode === true ? "no value" : opt.mode})`);
+  const picked = resolveMode({ mode: opt.mode ?? cfg.mode, model: typeof opt.model === "string" ? opt.model : cfg.model });
+  if (picked.error) fail(picked.error);
   let state = path.resolve(typeof opt.state === "string" ? opt.state
     : (cfg.stateDir || path.join(tempRoot(), `night-shift-${path.basename(repo)}-{date}`)).replace("{date}", today()));
   // The runner writes here and a session reads its instructions from here: not a folder of the user's own.
@@ -255,8 +260,10 @@ function start(opt) {
     deadline: opt.until ? deadline(opt.until) : null,
     maxSessions: opt["max-sessions"] ? Number(opt["max-sessions"]) : null,
     sessionHours: Number(opt["session-hours"] || 4),
-    model: typeof opt.model === "string" ? opt.model : cfg.model || MAIN_MODEL,
-    effort: typeof opt.effort === "string" ? opt.effort : cfg.effort || "xhigh",
+    mode: picked.mode,
+    model: picked.model,
+    opusModel: picked.opusModel,
+    effort: typeof opt.effort === "string" ? opt.effort : cfg.effort || MAIN_EFFORT[picked.mode],
     // MODEL: fable prompts: Fable while its weekly allowance is under this share, and at most this
     // many Fable sessions while the share is unknown (effort.mjs, fableGate).
     fableCeiling: ratioArg(opt["fable-ceiling"] ?? cfg.fableCeiling, 0.6),
@@ -291,7 +298,11 @@ function start(opt) {
 // ---------------------------------------------------------------- run
 async function runChain(opt) {
   const state = path.resolve(opt.state || fail("run needs --state"));
-  const run = JSON.parse(read(path.join(state, "run.json")) || fail(`no run.json in ${state}`));
+  const stored = JSON.parse(read(path.join(state, "run.json")) || fail(`no run.json in ${state}`));
+  // A run.json from before modes has no mode: its model says which it is, and a Fable one runs at Fable's
+  // level, not at the effort that was stored for Opus.
+  const run = stored.mode ? stored : (({ error, ...r }) => ({ ...stored, ...r, ...(r.mode === "fable" ? { effort: MAIN_EFFORT.fable } : {}) }))(resolveMode({ model: stored.model }));
+  const fableMode = run.mode === "fable";
   const { repo } = run;
   const logFile = path.join(state, "chain.log");
   const log = (line) => { const l = `[${now()}] ${line}`; console.log(l); fs.appendFileSync(logFile, l + "\n"); };
@@ -364,7 +375,7 @@ async function runChain(opt) {
       // Not NODE_OPTIONS or NIGHT_SHIFT_*: a session could plant a --require or point the guard's
       // state folder elsewhere through them (Windows names are case-blind, hence the i).
       env: { ...Object.fromEntries(Object.entries(prev.env && typeof prev.env === "object" ? prev.env : {}).filter(([k]) => !/^(NODE_OPTIONS$|NIGHT_SHIFT_)/i.test(k))), CLAUDE_CODE_SUBAGENT_MODEL: SUB_MODEL },
-      modelSettings: nightModelSettings(prev.modelSettings, lowerSettings(repo), { opus: run.effort || "xhigh", fable: MAIN_EFFORT.fable, ...levels }),
+      modelSettings: nightModelSettings(prev.modelSettings, lowerSettings(repo), { opus: fableMode ? MAIN_EFFORT.opus : run.effort || MAIN_EFFORT.opus, fable: fableMode ? run.effort || MAIN_EFFORT.fable : MAIN_EFFORT.fable, ...levels }),
     }, null, 2));
   };
   writeSettings();
@@ -423,7 +434,7 @@ async function runChain(opt) {
   const readFable = () => parseOr(read(fableFile), {});
   const writeFable = (patch) => fs.writeFileSync(fableFile, JSON.stringify({ ...readFable(), ...patch }, null, 2));
   const fableCeiling = run.fableCeiling ?? 0.6, fableSessions = run.fableSessions ?? 2;
-  const opusModel = run.model && familyOf(run.model) === "opus" ? run.model : MAIN_MODEL;
+  const opusModel = run.opusModel || MAIN_MODEL;
   const whyText = (g) => (g.why === "out" ? `its allowance is used up until ${stamp(g.until)}`
     : g.why === "ceiling" ? `its allowance is at ${pct(g.ratio)}, at or over the ${pct(g.ceiling)} ceiling`
       : `${g.sessions} Fable sessions already ran in this chain while its allowance's share is unknown`);
@@ -436,7 +447,9 @@ async function runChain(opt) {
     while (Date.now() < until && !fs.existsSync(stopFile)) await new Promise((r) => setTimeout(r, tick));
   };
 
-  log(`chain starts in ${repo}${reloaded ? " (runner reloaded)" : ""}, until ${run.until || "the work is done"}, from session ${session}${run.maxSessions ? ` to ${run.maxSessions}` : ""}, ${run.model || MAIN_MODEL} at ${run.effort || "xhigh"}, subagents ${SUB_MODEL} (${subEffortText()}), Fable on request under ${pct(fableCeiling)} of its allowance (${fableSessions} sessions while unknown)`);
+  log(`chain starts in ${repo}${reloaded ? " (runner reloaded)" : ""}, until ${run.until || "the work is done"}, from session ${session}${run.maxSessions ? ` to ${run.maxSessions}` : ""}, ${run.model || MAIN_MODEL} at ${run.effort || "xhigh"}, subagents ${SUB_MODEL} (${subEffortText()}), ${fableMode
+    ? `Fable as the main model under ${pct(fableCeiling)} of its allowance, else ${opusModel} at ${MAIN_EFFORT.opus}`
+    : `Fable on request under ${pct(fableCeiling)} of its allowance (${fableSessions} sessions while unknown)`}`);
   while (!run.maxSessions || session <= run.maxSessions) {
     if (fs.existsSync(stopFile)) finish("stop requested");
     if (fs.existsSync(reloadFile)) handOver(); // returns only when the hand-over failed
@@ -458,16 +471,18 @@ async function runChain(opt) {
     // allowance is used up.
     let plan = resume?.model ? { ...asked, model: resume.model, family: familyOf(resume.model), effort: resume.effort || asked.effort } : asked;
     if (plan.family === "fable") {
-      const g = fableGate(readFable(), { ceiling: fableCeiling, maxSessions: fableSessions });
-      if (!g.ok && (!resume || g.why === "out")) plan = { ...plan, model: opusModel, family: "opus", effort: "max", downgrade: g };
+      // Fable mode: no count rule, and the stand-in runs at xhigh (or the level its prompt asked), never at max on its own.
+      const g = fableMode ? mainGate(readFable(), { ceiling: fableCeiling }) : fableGate(readFable(), { ceiling: fableCeiling, maxSessions: fableSessions });
+      if (!g.ok && (!resume || g.why === "out")) plan = { ...plan, model: opusModel, family: "opus", effort: fableMode ? asked.askedEffort || MAIN_EFFORT.opus : "max", downgrade: g, why: whyText(g) };
     }
     log(resume ? `session ${nn} resumes ${resume.sessionId} ${resume.why === "stopped" ? "where the last runner stopped" : resume.why === "error" ? "after the error" : "after the usage limit"}`
       : `session ${nn} starts: ${asked.body.split("\n")[0].slice(0, 120)}`);
     if (asked.note && !resume) log(`session ${nn}: ${asked.note}`);
-    if (plan.downgrade) log(`session ${nn} asked for Fable, but ${whyText(plan.downgrade)}; it runs on Opus at max`);
+    if (plan.downgrade) log(fableMode ? `session ${nn}: Fable is the main model, but ${whyText(plan.downgrade)}; it runs on Opus at ${plan.effort}`
+      : `session ${nn} asked for Fable, but ${whyText(plan.downgrade)}; it runs on Opus at max`);
     // night-report.mjs and cutOffSession read this line back.
-    log(`session ${nn} runs ${modelText(plan)} at ${plan.effort}${plan.effort === "max" && asked.effort === "max" && !plan.downgrade ? " (its prompt asks for it)" : ""}`);
-    if (plan.family === "fable" && !resume) writeFable({ sessions: (readFable().sessions || 0) + 1 });
+    log(`session ${nn} runs ${modelText(plan)} at ${plan.effort}${plan.effort === "max" && asked.effort === "max" && (!plan.downgrade || fableMode) ? " (its prompt asks for it)" : ""}`);
+    if (plan.family === "fable" && !resume && !fableMode) writeFable({ sessions: (readFable().sessions || 0) + 1 });
     writeSettings({ [plan.family]: plan.effort });
     const result = await runSession(run, session, plan, nn, resume);
     log(`session ${nn} ends: ${result.summary}`);
@@ -490,9 +505,11 @@ async function runChain(opt) {
       log(`session ${nn}: Fable's allowance is used up (${result.apiError || result.limitType || "refused"}) until ${stamp(until)}${result.fableResetAt ? "" : " (a guess: the CLI gave no reset time)"}; limit record ${JSON.stringify(result.limitInfo)}`);
       fs.rmSync(resumeFile, { force: true });
       if (!wrote) {
-        fs.writeFileSync(next, `EFFORT: max\nThe previous Fable session (${nn}) was cut off because the Fable allowance ran out; this piece goes on at Opus max. ` +
+        // Fable mode: no EFFORT line unless the piece's own prompt had one; Fable takes the piece back by itself after the reset.
+        const level = fableMode ? asked.askedEffort || MAIN_EFFORT.opus : "max";
+        fs.writeFileSync(next, `${fableMode ? (asked.askedEffort ? `EFFORT: ${level}\n` : "") : "EFFORT: max\n"}The previous Fable session (${nn}) was cut off because the Fable allowance ran out; this piece goes on at Opus ${fableMode ? level : "max"}. ` +
           `First look at git status and git diff: unfinished work may be there; do not redo finished work.\n\n${plan.body}`);
-        log(`session ${nn}'s piece goes on in the next session on Opus at max`);
+        log(`session ${nn}'s piece goes on in the next session on Opus at ${level}`);
       }
       session++;
       continue;
@@ -536,7 +553,7 @@ async function runChain(opt) {
         // conversation: it waits out the outage and resumes the same one.
         const outage = result.apiError != null || result.apiErrorStatus != null || /^API Error\b|\b(?:ENOTFOUND|ECONN\w*|ETIMEDOUT|EAI_AGAIN)\b/.test(result.errorText);
         if (!outage && ++deadResumes >= 2) { fs.rmSync(resumeFile, { force: true }); retryHandover = true; }
-      } else if (plan.family === "fable" && result.mainModels.length === 0) writeFable({ sessions: Math.max(0, (readFable().sessions || 0) - 1) }); // it never had a turn: the retry is not a second Fable session
+      } else if (plan.family === "fable" && !fableMode && result.mainModels.length === 0) writeFable({ sessions: Math.max(0, (readFable().sessions || 0) - 1) }); // it never had a turn: the retry is not a second Fable session
       if (!retryHandover) {
         const ms = Number(process.env.NIGHT_SHIFT_BACKOFF_MS) || [1, 2, 5, 10, 20, 30][Math.min(streak, 6) - 1] * 60_000;
         const until = Math.min(Date.now() + ms, run.deadline || Infinity);
@@ -568,7 +585,7 @@ async function runChain(opt) {
   } catch (e) { die(e); }
 }
 
-// plan: sessionPlan's { model, family, effort, body }, with downgrade when Fable was refused.
+// plan: sessionPlan's { model, family, effort, body }, with downgrade (and why, its words) when Fable was refused.
 function runSession(run, session, plan, nn, resume) {
   const resumeId = resume?.sessionId;
   const { effort, body } = plan;
@@ -584,9 +601,11 @@ function runSession(run, session, plan, nn, resume) {
     `The user is away ${run.until ? `until ${run.until}` : "until the chain ends"} and cannot answer any question.`,
     `First invoke the night-shift skill and follow its "Inside a night session" part.`,
     `The user reads ${LANG_NAMES[langOf(run)]}: write the night report's own text and its Waits-for-you items in that language, and keep the report's fixed words as the skill gives them.`,
+    `Mode: ${run.mode}.`,
     `Skill folder: ${SKILL_DIR}. Continuation file: ${path.join(run.state, "next-prompt.md")}. Night report: ${run.report}.`,
-    ...(plan.family === "fable" ? [FABLE_NOTE] : []),
-    ...(plan.downgrade ? ["The prompt asked for MODEL: fable, but Fable's weekly allowance does not cover it tonight; this piece runs on Opus at max."] : []),
+    ...(plan.family === "fable" && run.mode !== "fable" ? [FABLE_NOTE] : []),
+    ...(plan.downgrade && run.mode === "fable" ? [fallbackNote(plan.why)] : []),
+    ...(plan.downgrade && run.mode !== "fable" ? ["The prompt asked for MODEL: fable, but Fable's weekly allowance does not cover it tonight; this piece runs on Opus at max."] : []),
     ...(effort === "max" ? [MAX_NOTE] : []),
     "",
     "---",
