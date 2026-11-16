@@ -2,7 +2,7 @@
 // text is data, and a variable target must resolve. node --test guard.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -271,7 +271,7 @@ test("a wildcard delete that can reach the state folder or a protected one is re
   assert.match(bash("rm -f C:/temp/x-night/run.*"), /refusing a delete of the run's state folder through a wildcard/);
   assert.match(bash("rm -f C:/work/repo/.claude/settings.*"), /refusing a delete of the project's \.claude folder through a wildcard/);
   for (const c of [
-    "rm -rf dist/*", "rm -rf build/.cache", "rm -f C:/temp/x-night/scratch.txt", 'find . -name "*.tmp" -delete', 'find . -name "*" -delete', 'find -L . -name "*.tmp" -delete', 'find -D tree . -name "*" -delete',
+    "rm -rf dist/*", "rm -rf build/.cache", "rm -f C:/temp/x-night/scratch.txt", 'find . -name "*.tmp" -delete', 'find -L . -name "*.tmp" -delete', 'find -D tree . -name "*.tmp" -delete',
     "rm -f C:/temp/*.txt", "rm -f src/*.bak", "rm -rf C:/temp/demo-*", "rm -f C:/work/repo/.cache/*",
   ]) assert.equal(bash(c), null, c);
 });
@@ -533,4 +533,79 @@ test("an escaped backslash leaves the semicolon after it a separator; an escaped
   for (const c of [`echo x\\\\; rm -rf ~`, `printf a\\\\; git push --force`, `bash -c 'echo x\\\\; rm -rf ~'`, `true \\\\; rm -rf /c/Users/u/Documents`])
     assert.ok(bash(c), c);
   assert.equal(bash(`echo a\\; rm -rf ~`), null);
+});
+
+// ---------------------------------------------------------------- final-review fix wave B
+test("a short-form TEMP leaves the tool's own temp paths writable; a short name still is refused", () => {
+  // A directory junction named like an 8.3 name stands in for a volume that makes short names.
+  const base = mkdtempSync(join(tmpdir(), "night-short-temp-"));
+  const long = join(base, "LongTempFolderName"), link = join(base, "LONGUS~1");
+  mkdirSync(long);
+  symlinkSync(long, link, "junction");
+  const saved = { TEMP: process.env.TEMP, TMP: process.env.TMP };
+  process.env.TEMP = process.env.TMP = link;
+  try {
+    const state = long.replace(/\\/g, "/") + "/night-x";
+    const e = { ...env, NIGHT_SHIFT_STATE: state };
+    assert.equal(decide({ tool_name: "Write", tool_input: { file_path: `${state}/next-prompt.md` } }, e), null);
+    assert.equal(bash(`cat > "$NIGHT_SHIFT_STATE/next-prompt.md" <<'EOF'\nx\nEOF`, e), null);
+    assert.equal(bash("echo x > /tmp/scratch.txt", e), null);
+    assert.equal(bash(`D=$(mktemp -d) && rm -rf "$D"`, e), null);
+    assert.match(bash(`echo x > ${link.replace(/\\/g, "/")}/a.txt`, e), /short \(8\.3\) name/);
+  } finally {
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("a find delete rooted at the repository or its .claude folder needs a test that narrows it or leaves .git out", () => {
+  for (const c of ["find . -delete", "find . -type f -delete", `find . -name '*' -delete`, `find C:/work/repo -name '*' -delete`, `find -D tree . -name "*" -delete`,
+    "find -delete", `find . -name '.*' -delete`, "find .claude -delete", `find . -path '*/.git/*' -delete`, "find . -mtime +7 -delete", "find .. -type f -delete",
+    String.raw`find . -exec rm {} \;`, "find C:/work/repo/.claude -type f -delete", `find . -not -name '*.keep' -delete`])
+    assert.match(bash(c) ?? "", /find delete/, c);
+  assert.match(decide({ tool_name: "Bash", tool_input: { command: "find .. -delete" }, cwd: "C:/work/repo/src" }, env) ?? "", /find delete/);
+  for (const c of [`find . -name '*.tmp' -delete`, `find . -not -path './.git/*' -delete`, `find . ! -path '*/.git/*' -type f -delete`, `find . -path ./.git -prune -o -type f -delete`,
+    "find dist -delete", "find src -type f -delete", String.raw`find . -name '*.log' -exec rm {} \;`, "find . -type f", `find . -name '*' -print`])
+    assert.equal(bash(c), null, c);
+});
+
+test("a stateDir that reaches system or per-user program folders is refused by the guard's roots", () => {
+  for (const s of ["C:/Users/u/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/n", "C:/Windows/Temp/n", "C:/Program Files/x/n", "C:/Program Files (x86)/x/n", "C:/ProgramData/n"]) {
+    const e = { ...env, NIGHT_SHIFT_STATE: s };
+    assert.ok(decide({ tool_name: "Write", tool_input: { file_path: `${s}/x.txt` } }, e), s);
+  }
+});
+
+test("empty input, or input without a tool name, is a deny, not an allow", () => {
+  const GUARD = fileURLToPath(new URL("./guard.mjs", import.meta.url));
+  for (const input of ["", "   ", "{}", `{"cwd":"C:/work/repo"}`, `{"tool_name":""}`, `{"tool_name":5}`]) {
+    const r = spawnSync(process.execPath, [GUARD], { input, encoding: "utf8" });
+    assert.equal(r.status, 0, input);
+    assert.equal(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision, "deny", input);
+  }
+  assert.ok(decide({}, env));
+  assert.equal(decide({ tool_name: "Read", tool_input: {} }, env), null);
+});
+
+test("PowerShell provider drives are not NTFS streams; a stream or short name still is refused", () => {
+  const ps = (command) => decide({ tool_name: "PowerShell", tool_input: { command } }, env);
+  for (const c of ["Remove-Item Env:FOO", "Remove-Item Env:\\FOO", "Remove-Item -Path Env:FOO -Force", "Remove-Item Alias:ll", "Remove-Item Variable:x -Force", "Remove-Item Function:prompt", "ri env:FOO"])
+    assert.equal(ps(c), null, c);
+  for (const c of ["Remove-Item a.ts:hidden", "Remove-Item 'C:\\work\\repo\\.git::$INDEX_ALLOCATION'", "Remove-Item SETTIN~1.JSO", "Remove-Item Env:FOO:bar"])
+    assert.match(ps(c) ?? "", /NTFS stream|short \(8\.3\)/, c);
+});
+
+test(".Delete($true), FileSystem::DeleteDirectory and a find -exec that deletes through any wrapper are refused", () => {
+  const ps = (command) => decide({ tool_name: "PowerShell", tool_input: { command } }, env);
+  for (const c of ["(Get-Item C:\\Users\\u\\Documents).Delete($true)", "$d.Delete($true)", "(Get-Item x).Delete( $true )",
+    `[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory("C:\\Users\\u\\Documents", "DeletePermanently")`])
+    assert.match(ps(c) ?? "", /\.NET/, c);
+  for (const c of [`$cache.Delete("key")`, "$f.Delete()", "Write-Host .Delete($true)", `echo "x.Delete($true)"`]) assert.equal(ps(c), null, c);
+  for (const c of [String.raw`find /c/Users/u/Documents -exec bash -c 'rm "$0"' {} \;`, String.raw`find /c/Users/u/Documents -exec rmdir {} \;`,
+    String.raw`find /c/Users/u/Documents -exec shred {} \;`, String.raw`find /c/Users/u/Documents -execdir sh -c 'unlink "$0"' {} +`,
+    String.raw`find /c/Users/u/Documents -exec env X=1 rm {} \;`, String.raw`find /c/Users/u/Documents -name '*.bak' -exec cmd /c del {} \;`])
+    assert.match(bash(c) ?? "", /limited to the repository and temp/, c);
+  for (const c of [String.raw`find /c/Users/u/Documents -exec grep -l rm {} \;`, String.raw`find /c/Users/u/Documents -exec bash -c 'echo "$0"' {} \;`,
+    String.raw`find src -name '*.o' -exec rmdir {} \;`])
+    assert.equal(bash(c), null, c);
 });

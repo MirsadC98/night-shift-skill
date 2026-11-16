@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { readProjectConfig, stateDirProblem } from "./config.mjs";
+import { readProjectConfig, stateDirProblem, tempRoot, norm } from "./config.mjs";
 
 const repoWith = (text) => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "night-config-test-"));
@@ -63,4 +63,33 @@ test("a state folder may not be a drive, the home folder, the repository, temp i
     assert.ok(stateDirProblem(bad, where), bad);
   for (const good of ["C:/temp/my-game-night-20261116", "C:/Users/u/AppData/Local/Temp/night-shift-My Game-20261116", "C:/Users/u/Masaüstü/My Game/.night"])
     assert.equal(stateDirProblem(good, where), null, good);
+});
+
+test("a state folder may not sit in AppData outside temp, in Windows, Program Files or ProgramData", () => {
+  const where = { home: "C:\\Users\\u", repo: "C:/work/repo", temp: "C:/Users/u/AppData/Local/Temp" };
+  for (const bad of ["C:/Users/u/AppData/Roaming/night", "C:/Users/u/AppData/Local/night", "C:/Users/u/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/n",
+    "C:/Windows/Temp/n", "C:/Windows/n", "C:/Program Files/x/n", "C:/Program Files (x86)/x/n", "C:/ProgramData/n"])
+    assert.ok(stateDirProblem(bad, where), bad);
+  for (const good of ["C:/Users/u/AppData/Local/Temp/night-shift-My Game-20261116", "C:/temp/my-game-night", "C:/Users/u/Desktop/night-shift/n"])
+    assert.equal(stateDirProblem(good, where), null, good);
+  // The default (what night-chain builds from the temp folder) stays valid.
+  assert.equal(stateDirProblem(path.join(tempRoot(), "night-shift-My Game-20261116"), { home: os.homedir(), repo: "C:/work/repo" }), null);
+});
+
+test("tempRoot is the temp folder in long form: a short-form TEMP resolves, one that cannot be resolved is kept", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "night-temproot-"));
+  const long = path.join(base, "LongTempFolderName"), link = path.join(base, "LONGUS~1");
+  fs.mkdirSync(long);
+  fs.symlinkSync(long, link, "junction");
+  const saved = { TEMP: process.env.TEMP, TMP: process.env.TMP };
+  try {
+    process.env.TEMP = process.env.TMP = link;
+    assert.equal(tempRoot().toLowerCase(), fs.realpathSync.native(long).toLowerCase());
+    assert.equal(norm("/tmp/x").toLowerCase(), `${fs.realpathSync.native(long).replace(/\\/g, "/")}/x`.toLowerCase());
+    process.env.TEMP = process.env.TMP = path.join(base, "missing~1");
+    assert.equal(tempRoot(), path.join(base, "missing~1"));
+  } finally {
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    fs.rmSync(base, { recursive: true, force: true });
+  }
 });

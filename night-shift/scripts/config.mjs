@@ -8,6 +8,14 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
+// The temp folder in long form. %TEMP% is often written as an 8.3 short name (C:\Users\JOHNSM~1\…),
+// which the guard refuses in any path, so the tool's own temp paths all come from this one spelling.
+// A folder that cannot be resolved is kept as it is.
+export const tempRoot = () => {
+  const t = os.tmpdir();
+  try { return fs.realpathSync.native(t); } catch { return t; }
+};
+
 // A path the way Windows resolves it, so that two spellings of one file compare equal: one kind
 // of slash, lower case, an MSYS drive (/c/…) and \\?\C:\… as a drive path, Git Bash's /tmp as the
 // temp folder, . and .. resolved, and a segment's trailing dots and spaces dropped (Windows opens
@@ -18,7 +26,7 @@ export const norm = (p) => {
   s = s.replace(/^\/\/[?.]\/(?=[a-z]:)/, "");
   const msys = /^\/([a-z])\//.exec(s);
   if (msys) s = `${msys[1]}:/${s.slice(3)}`;
-  else if (process.platform === "win32" && /^\/tmp(\/|$)/.test(s)) s = `${os.tmpdir().replace(/\\/g, "/").toLowerCase()}${s.slice(4)}`;
+  else if (process.platform === "win32" && /^\/tmp(\/|$)/.test(s)) s = `${tempRoot().replace(/\\/g, "/").toLowerCase()}${s.slice(4)}`;
   const lead = /^\/{0,2}/.exec(s)[0].slice(0, 2);
   const out = [];
   for (const raw of s.slice(lead.length).split("/")) {
@@ -85,7 +93,7 @@ export function readProjectConfig(repo) {
 // The runner writes into the state folder, trusts inbox.md and next-prompt.md there as
 // instructions, and the guard lets a night session write into it: so never a folder that holds
 // anything else the user owns.
-export function stateDirProblem(dir, { home = os.homedir(), repo = "", temp = os.tmpdir() } = {}) {
+export function stateDirProblem(dir, { home = os.homedir(), repo = "", temp = tempRoot() } = {}) {
   const d = norm(dir);
   if (!d) return "is empty";
   if (d.replace(/^\/\/|^[a-z]:/, "").split("/").filter(Boolean).length < 2) return "is a drive root or sits directly below one";
@@ -94,5 +102,9 @@ export function stateDirProblem(dir, { home = os.homedir(), repo = "", temp = os
   }
   if (repo && under(d, `${norm(repo)}/.git`)) return "is inside .git";
   if (home && under(d, `${norm(home)}/.claude`)) return "is inside ~/.claude";
+  // The guard lets a night session write into the state folder, so not where Windows runs things from:
+  // the Startup folder lives in AppData\Roaming, and the system's own folders hold programs.
+  if (home && under(d, `${norm(home)}/appdata`) && !under(d, norm(temp))) return "is inside AppData, outside the temp folder";
+  if (/^c:\/(windows|program files[^/]*|programdata)(\/|$)/.test(d)) return "is inside a system or program folder";
   return null;
 }

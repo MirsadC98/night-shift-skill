@@ -11,10 +11,10 @@
 
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { norm, readProjectConfig, stateDirProblem } from "./config.mjs";
+import { norm, readProjectConfig, stateDirProblem, tempRoot } from "./config.mjs";
 
 const under = (p, root) => root && (p === root || p.startsWith(root + "/"));
 
@@ -27,7 +27,7 @@ function roots(env) {
   const repo = norm(env.NIGHT_SHIFT_REPO || "");
   // A state folder that is a drive, the home folder or the like (a typo in stateDir) would make
   // all of it writable: it adds nothing, and the runner refuses to start with one.
-  const state = env.NIGHT_SHIFT_STATE && !stateDirProblem(env.NIGHT_SHIFT_STATE, { home, repo, temp: tmpdir() }) ? norm(env.NIGHT_SHIFT_STATE) : "";
+  const state = env.NIGHT_SHIFT_STATE && !stateDirProblem(env.NIGHT_SHIFT_STATE, { home, repo, temp: tempRoot() }) ? norm(env.NIGHT_SHIFT_STATE) : "";
   return {
     repo,
     state,
@@ -35,7 +35,7 @@ function roots(env) {
       repo,
       "c:/temp",
       state,
-      norm(tmpdir()),
+      norm(tempRoot()),
       `${home}/appdata/local/temp`,
     ].filter(Boolean),
     home,
@@ -50,8 +50,11 @@ export function oddPath(p) {
   if (p.split("/").some((s) => /~\d/.test(s))) return "a short (8.3) name";
   return null;
 }
+// PowerShell's own drives (Env:FOO, Alias:ll) are no files: the colon after their name is not a stream.
+const PS_DRIVE = /^(env|alias|variable|function):(?!:)/i;
 const oddReason = (p, shown) => {
-  const what = oddPath(p);
+  const drive = PS_DRIVE.exec(String(shown));
+  const what = drive ? oddPath(norm(String(shown).slice(drive[0].length))) : oddPath(p);
   return what && `refusing a path with ${what} (${shown}): the guard cannot tell which file it is`;
 };
 
@@ -91,14 +94,14 @@ const GENERIC = [
   [/\b(shutdown(\.exe)?\s|Restart-Computer|Stop-Computer|diskpart|bcdedit|vssadmin|cipher\s+\/w|format(\.com)?\s+[a-z]:)/i, "system-level commands are not allowed"],
   [/\breg(\.exe)?\s+(add|delete|import|restore|load)\b|\b(Set|New|Remove|Rename)-ItemProperty\b|\bRemove-Item\b[^\n]*\bHK(CU|LM):/i, "registry writes change the live system"],
   [/\b(taskkill|Stop-Process|pkill|killall)\b[^\n]*\b(node|claude|powershell|pwsh|explorer|code|bash)(\.exe)?\b/i, "that process may be the run itself or the user's"],
-  [/\[(System\.)?IO\.(Directory|File)\]::Delete\b/i, "deletes through .NET cannot be checked"],
+  [/\[(System\.)?IO\.(Directory|File)\]::Delete\b|::DeleteDirectory\b/i, "deletes through .NET cannot be checked"],
   [/\bSystemParametersInfo\b/i, "changing system parameters touches the live desktop"],
 ];
 
 // PowerShell takes any prefix of -Recurse (-r, -rec) and has aliases for Remove-Item.
 const RECURSIVE_DELETE = /\brm\s+(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b|\b(Remove-Item|ri|rm|del|erase|rd|rmdir)\b[^\n]*\s-r(e(c(u(r(se?)?)?)?)?)?\b|\b(rmdir|rd)\s+\/s\b|\bdel\s+\/s\b|\brimraf\b/i;
 const DELETE_WORD = /^(?:.*[\\/])?(rm|del|erase|remove-item|ri|rd|rmdir|unlink|rimraf|find)(\.exe)?$/i;
-const ANY_DELETE = /\b(rm|del|erase|Remove-Item|ri|rd|rmdir|unlink|rimraf)\b|\s-delete\b/i;
+const ANY_DELETE = /\b(rm|del|erase|Remove-Item|ri|rd|rmdir|unlink|rimraf|shred)\b|\s-delete\b/i;
 const CD_WORD = /^(cd|chdir|pushd|set-location|sl|push-location)$/i;
 const POP_WORD = /^(popd|pop-location)$/i;
 
@@ -201,7 +204,7 @@ const MKTEMP_FLAG = /^-[dqtu]+$|^--(directory|quiet|dry-run)$/;
 function mktempFolder(args) {
   const flags = args.filter((a) => /^-/.test(a)), names = args.filter((a) => !/^-/.test(a));
   if (!flags.every((a) => MKTEMP_FLAG.test(a)) || !names.every((a) => /^[\w.]+$/.test(a))) return null;
-  return names.length && !flags.some((a) => /^-\w*t/.test(a)) ? null : `${norm(tmpdir())}/mktemp.XXXX`;
+  return names.length && !flags.some((a) => /^-\w*t/.test(a)) ? null : `${norm(tempRoot())}/mktemp.XXXX`;
 }
 const mktempValue = (v) => {
   const m = /^(?:\$\(|`)\s*mktemp((?:\s+[^\s()`]+)*)\s*(?:\)|`)$/.exec(v);
@@ -539,6 +542,47 @@ const valueParam = (t) => { const n = /^-([a-z]{2,})$/i.exec(t)?.[1].toLowerCase
 const PATH_PARAM = (n) => { n = n.toLowerCase(); return "path".startsWith(n) || "literalpath".startsWith(n) || n === "pspath" || n === "lp"; };
 const XARGS_VALUE = /^(-[aEdILnPs]|--(arg-file|delimiter|max-lines|max-args|max-procs|max-chars|process-slot-var))$/;
 
+// The commands a find runs (-exec ... ; or +), one word list each.
+const FIND_EXEC = /^-(exec|execdir|ok|okdir)$/;
+function execGroups(words) {
+  const groups = [];
+  for (let k = 0; k < words.length; k++) {
+    if (!FIND_EXEC.test(words[k])) continue;
+    let e = k + 1;
+    while (e < words.length && !/^(\\?;|\\|\+)$/.test(words[e])) e++;
+    groups.push(words.slice(k + 1, e));
+    k = e;
+  }
+  return groups;
+}
+// A find whose -exec deletes makes find a delete, so its paths are checked: the command itself, or
+// a shell or cmd it starts (bash -c 'rm "$0"'), whose script holds a delete word.
+const DELETING = /^(rm|unlink|del|erase|remove-item|ri|rd|rmdir|shred|rimraf)$/;
+const findExecDeletes = (words) => execGroups(words).some((g) => {
+  const k = nameIndex(g);
+  if (k < 0) return false;
+  const cmd = base(g[k]);
+  return DELETING.test(cmd) || (SHELL_NAME.test(cmd) && g.slice(k + 1).join(" ").split(/[\s;&|()`"'{}]+/).some((w) => DELETING.test(base(w))));
+});
+// find . -delete takes .git with it. A find from the repository (or its .claude folder) up is safe
+// only with a name, path or regex test that cannot match .git, or one that leaves .git out
+// (-not -path '*/.git/*', -path ./.git -prune).
+const NAME_TEST = /^-(i?name|i?lname|i?path|i?wholename|i?regex)$/;
+function findNarrowed(words) {
+  const w = words.map(unmark).map((x) => x.toLowerCase());
+  const prune = w.includes("-prune");
+  return w.some((x, k) => {
+    if (!NAME_TEST.test(x) || w[k + 1] == null) return false;
+    const pat = w[k + 1], isName = /name$/.test(x) && !/path|whole/.test(x);
+    const names = pat.includes(".git") || (isName ? segMatch(pat, ".git") : /^[*?./\\]*$/.test(pat));
+    if (/^(-not|!)$/.test(w[k - 1] ?? "")) return pat.includes(".git");
+    return pat.includes(".git") ? prune : !names;
+  });
+}
+
+const wideFind = (q, r) => Boolean(r.repo) && (under(r.repo, q) || under(`${r.repo}/.claude`, q));
+const wideFindReason = (t) => `refusing a find delete from the repository or its .claude folder (${t}) without a name, path or regex test that leaves .git out: it would take .git with it`;
+
 // Deletes: a recursive one anywhere in a simple command, and a plain one (rm, del, Remove-Item,
 // unlink, find -delete) where it is the command. where.at is the folder the command stands in
 // (the hook's cwd, moved by each cd before it), so a relative target is read from where the delete
@@ -548,18 +592,20 @@ function checkDelete(words, ni, env, where, vars, r) {
   if (!RECURSIVE_DELETE.test(text) && !ANY_DELETE.test(text)) return null;
   const name = words[ni];
   const recursive = RECURSIVE_DELETE.test(text);
-  const plain = !recursive && DELETE_WORD.test(name) && (!/find(\.exe)?$/i.test(name) || words.includes("-delete") || (words.some((w) => /^-(exec|execdir|ok|okdir)$/.test(w)) && words.some((w) => /^(rm|unlink)$/.test(w))));
+  const plain = !recursive && DELETE_WORD.test(name) && (!/find(\.exe)?$/i.test(name) || words.includes("-delete") || findExecDeletes(words));
   if (!recursive && !plain) return null;
   const kind = recursive ? "recursive deletes" : "deletes";
   // find's own tests (-name "*.tmp") follow its first -option: patterns, not targets.
   const isFind = /find(\.exe)?$/i.test(name);
-  let expr = false, dNext = false, seen = 0, skip = false;
+  let expr = false, dNext = false, seen = 0, skip = false, starts = 0, prev = "";
   // Its targets come after the delete's own word. A plain delete's {a,b} is expanded here, one target
   // for each alternative; a recursive one with a list is refused below.
   const list = words.slice(words.findIndex((w) => DELETE_WORD.test(w)) + 1);
   for (let raw of recursive ? list : list.flatMap((w) => braces(w))) {
     // What a find -exec runs is read as a command of its own; its words are not find's targets.
     if (isFind && /^-(exec|execdir|ok|okdir)$/.test(raw)) break;
+    const before = prev;
+    prev = raw;
     // PowerShell's -Path:x and -LiteralPath=x name their target in the same word.
     const pv = /^-(\w+)[:=](.+)$/s.exec(raw);
     if (pv && PATH_PARAM(pv[1])) raw = pv[2];
@@ -576,9 +622,12 @@ function checkDelete(words, ni, env, where, vars, r) {
       else if (!/^-([HLP]|O\d*|D\S+)$/.test(t) && /^[-(!]/.test(t)) expr = true;
     }
     if (/^-/.test(t) || /^\/[sqfa]$/i.test(t) || /^(\/dev\/null|nul)$/i.test(t)) { skip = valueParam(t); continue; }
+    // The pattern of a name, path or regex test is no target (-not -path './.git/*').
+    if (isFind && expr && NAME_TEST.test(before)) continue;
     // The value of -Include or -ErrorAction is no folder to delete, so it does not count as a target.
     if (!skip) seen++;
     skip = false;
+    if (isFind && !expr) starts++;
     if (/^~([\\/]|$)/.test(t)) return `refusing a ${recursive ? "recursive delete" : "delete"} in the home folder ("${t}")`;
     // A .* can match .. and the dot folders (.git), a {a,b} list is any paths the shell makes of it.
     if (recursive && (/^(\.|\.\/|\*|\.\/\*|\/|\.git|\.git\/.*)$/.test(t) || /(^|[\\/])\.\.([\\/]|$)/.test(t) || /(^|[\\/])\.\*$/.test(t))) return `refusing a recursive delete of "${t}"`;
@@ -601,8 +650,11 @@ function checkDelete(words, ni, env, where, vars, r) {
       const hit = protectedTargets(r).find(([c]) => overlaps(p, c));
       if (hit) return `refusing a delete of ${hit[1]} through a wildcard (${t})`;
     }
+    if (isFind && !expr && wideFind(q, r) && !findNarrowed(words)) return wideFindReason(t);
     if (!r.writable.some((root) => under(q, root) && !(recursive && q === root))) return `${kind} are limited to the repository and temp folders (got ${t})`;
   }
+  // find's start path defaults to the folder it stands in.
+  if (isFind && !starts && where.at && !where.lost && wideFind(where.at, r) && !findNarrowed(words)) return wideFindReason(".");
   // `gci x | ri -Recurse` and a backtick substitution take their targets from where the command does not show them.
   if (recursive && !isFind && !seen) return "refusing a recursive delete whose target the guard cannot see";
   return null;
@@ -725,6 +777,9 @@ function walk(cmds, env, where, opts, depth) {
     while (lvl < c.lvl) { saved.push({ ...where }); lvl++; }
     while (lvl > c.lvl) { Object.assign(where, saved.pop()); lvl--; }
     const pipe = isPipe(c.sep);
+    // The splitter cuts `(Get-Item x).Delete($true)` at its (: a .Delete method given $true removes a folder and what it holds.
+    const nx = cmds[i + 1];
+    if (/\.Delete$/i.test(c.words.at(-1)) && !PRINTS.test(base(c.words[0])) && nx?.pre === "(" && /^\$true$/i.test(nx.words[0])) return "deletes through .NET cannot be checked";
     const why = readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r, mktempAfter(cmds, i));
     if (why) return why;
     sawPipe ||= pipe; prev = c;
@@ -753,6 +808,8 @@ function projectRules(env) {
 
 export function decide(input, env = process.env, opts = {}) {
   const tool = input.tool_name;
+  // Empty or unrecognisable input is not a call the guard may wave through.
+  if (typeof tool !== "string" || !tool) return "the hook input names no tool, so the guard cannot check the call";
   const ti = input.tool_input || {};
   if (["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(tool)) {
     return checkWrite(ti.file_path || ti.notebook_path, env);
@@ -831,6 +888,14 @@ function selfTest() {
     [bash("rm -rf .*"), true], [bash("rm -rf C:/work/repo/*"), true], [bash("if cd /c/Users/u; then rm -rf Documents; fi"), true],
     [write("C:/work/repo/.git::$INDEX_ALLOCATION/config"), true], [mcp("mcp__x__y"), true],
     [bash('grep -n "taskkill|reg import" a.ps1'), false],
+    // The final review: find from the repository root, a delete inside -exec, .NET deletes, the hook's empty input, a PowerShell drive.
+    [bash("find . -delete"), true], [bash("find . -name '*' -delete"), true], [bash("find . -type f -delete"), true], [bash("find . -name '*.tmp' -delete"), false],
+    [bash("find . -not -path './.git/*' -delete"), false],
+    [bash(String.raw`find /c/Users/u/Documents -exec bash -c 'rm "$0"' {} \;`), true], [bash(String.raw`find /c/Users/u/Documents -exec rmdir {} \;`), true],
+    [bash(String.raw`find /c/Users/u/Documents -exec shred {} \;`), true],
+    [decide({ tool_name: "PowerShell", tool_input: { command: "(Get-Item C:\\Users\\u\\Documents).Delete($true)" } }, env), true],
+    [decide({ tool_name: "PowerShell", tool_input: { command: "Remove-Item Env:FOO" } }, env), false],
+    [decide({}, env), true],
   ];
   let failed = 0;
   cases.forEach(([got, deny], i) => {

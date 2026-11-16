@@ -1059,3 +1059,19 @@ test("start refuses a state folder that already holds something else", () => {
   assert.ok(fs.existsSync(path.join(other, "notes.txt")));
   assert.ok(!fs.existsSync(path.join(other, "prompts")));
 });
+
+test("start builds the default state folder from the temp folder in long form, so the guard accepts it", () => {
+  // A directory junction named like an 8.3 name stands in for a TEMP written in short form.
+  const { root, home, repo, env } = setup();
+  const long = path.join(root, "LongTempFolderName"), link = path.join(root, "LONGUS~1");
+  fs.mkdirSync(long);
+  fs.symlinkSync(long, link, "junction");
+  const r = spawnSync(process.execPath, [CHAIN, "start", "--repo", repo, "--prompt", "x"],
+    { env: { ...env, NIGHT_SHIFT_LAUNCH: "fail", NIGHT_SHIFT_CLAUDE: process.execPath, TEMP: link, TMP: link }, encoding: "utf8", cwd: root });
+  assert.match(r.stderr, /launch refused \(test\)/);
+  const made = fs.readdirSync(long).filter((f) => f.startsWith("night-shift-"));
+  assert.equal(made.length, 1, r.stderr);
+  const run = JSON.parse(fs.readFileSync(path.join(long, made[0], "run.json"), "utf8"));
+  assert.ok(!run.state.includes("~"), run.state);
+  assert.equal(run.state.toLowerCase(), fs.realpathSync.native(path.join(long, made[0])).toLowerCase());
+});
