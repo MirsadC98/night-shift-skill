@@ -609,3 +609,87 @@ test(".Delete($true), FileSystem::DeleteDirectory and a find -exec that deletes 
     String.raw`find src -name '*.o' -exec rmdir {} \;`])
     assert.equal(bash(c), null, c);
 });
+
+// The final review's second fix wave: the walker (eval, cd across & and |, here-document substitutions) and the git rules.
+const psh = (command) => decide({ tool_name: "PowerShell", tool_input: { command } }, env, { gitAlias: () => null });
+
+test("eval of a substitution that only echoes or prints is read as the script; a tool's own output is not", () => {
+  for (const c of [`eval "$(echo 'rm -rf /c/Users/u/Documents')"`, `eval "$(printf '%s' 'rm -rf /c/Users/u/Documents')"`, `eval "$(echo rm -rf /c/Users/u/Documents)"`,
+    "eval \"`echo 'rm -rf /c/Users/u/Documents'`\"", `eval "$(fnm env; echo 'rm -rf /c/Users/u/Documents')"`])
+    assert.match(bash(c) ?? "", /limited to the repository and temp/, c);
+  for (const c of [`eval "$(fnm env)"`, `eval "$(ssh-agent -s)"`, `eval "$(echo 'cd app')"`, `eval "$(echo hello)"`, `eval "$(echo 'rm -rf dist')"`]) assert.equal(bash(c), null, c);
+});
+
+test("a cd in a pipeline or before & runs in a subshell and leaves the folder of the commands after it alone", () => {
+  const at = (command) => decide({ tool_name: "Bash", cwd: "C:\\Users\\u", tool_input: { command } }, env);
+  for (const c of ["cd C:/temp & rm -rf Documents", "cd C:/temp | cat; rm -rf Documents", "cat x | cd C:/temp; rm -rf Documents", "cd C:/temp |& cat; rm -rf Documents",
+    "cd /c/temp/x && ls & rm -rf Documents", "(cd C:/temp & true); rm -rf Documents"])
+    assert.match(at(c) ?? "", /limited to the repository and temp/, c);
+  for (const c of ["cd C:/temp && rm -rf old", "cd C:/temp; rm -rf old", "git status | cat; cd C:/temp; rm -rf old", "cd C:/temp && ls & cd C:/temp && rm -rf old", "cd C:/temp && rm -rf old | cat"])
+    assert.equal(at(c), null, c);
+  // PowerShell's | and & are no subshell: its cd moves the session
+  assert.equal(decide({ tool_name: "PowerShell", cwd: "C:\\Users\\u", tool_input: { command: "cd C:/temp | Out-Null; Remove-Item -Recurse old" } }, env), null);
+});
+
+test("an unquoted here-document runs its $( ) and backtick spans; a quoted delimiter keeps them text", () => {
+  for (const c of ["cat <<EOF\n$(rm -rf /c/Users/u/Documents)\nEOF", "cat > C:/temp/x/n.md <<EOF\nnote `rm -rf /c/Users/u/Documents` here\nEOF", "cat <<-EOF\n\tdone $(rm -rf /c/Users/u/Documents)\n\tEOF",
+    "cat <<EOF\nline\n$(cd /c/Users/u\nrm -rf Documents\n)\nEOF", "cat <<A <<B\nx\nA\n$(rm -rf /c/Users/u/Documents)\nB"])
+    assert.match(bash(c) ?? "", /limited to the repository and temp/, c);
+  for (const c of ["cat <<'EOF'\n$(rm -rf /c/Users/u/Documents)\nEOF", 'cat <<"EOF"\n$(rm -rf /c/Users/u/Documents)\nEOF', "cat <<'EOF'\n`rm -rf /c/Users/u/Documents`\nEOF",
+    "cat <<EOF\n\\$(rm -rf /c/Users/u/Documents)\nEOF", "cat <<EOF\n\\`rm -rf /c/Users/u/Documents\\`\nEOF", "cat <<EOF\ntoday is $(date) and $((1+2))\nEOF", "cat <<EOF\nplain text\nEOF"])
+    assert.equal(bash(c), null, c);
+  assert.match(bash("cat <<EOF\nx\nEOF\nrm -rf /c/Users/u/Documents") ?? "", /limited to the repository and temp/);
+});
+
+test("the environment variables git runs as a command are read as one; the ones that name a program are refused", () => {
+  for (const c of [`GIT_SSH_COMMAND='rm -rf /c/Users/u/Documents' git fetch`, `GIT_PAGER='rm -rf /c/Users/u/Documents' git log`, `export GIT_EDITOR="bash -c 'rm -rf /c/Users/u/Documents'"; git commit`,
+    `GIT_ASKPASS='rm -rf /c/Users/u/Documents' git push origin night`, `GIT_EXTERNAL_DIFF='rm -rf /c/Users/u/Documents' git diff`, `GIT_PROXY_COMMAND='rm -rf /c/Users/u/Documents' git fetch`,
+    `env GIT_PAGER='rm -rf /c/Users/u/Documents' git log`])
+    assert.match(git(c) ?? "", /limited to the repository and temp/, c);
+  for (const c of [`GIT_EXEC_PATH=/c/temp/h git status`, `GIT_SSH=/c/temp/h/ssh git fetch`, `export GIT_EXEC_PATH=/c/temp/h; git log`, `GIT_PAGER=$UNKNOWN git log`, `export GIT_PAGER=$(x); git log`])
+    assert.ok(git(c), c);
+  for (const c of [`GIT_PAGER=cat git log`, `export GIT_PAGER=cat; git log`, `GIT_EDITOR=true git commit -m x`, `GIT_SSH_COMMAND='ssh -i /c/temp/key' git fetch`, `GIT_ASKPASS=echo git fetch`, `GIT_TERMINAL_PROMPT=0 git fetch`])
+    assert.equal(git(c), null, c);
+  // (a value with rm -rf in it is refused at the assignment already; a plain delete is only read where git runs it)
+  assert.match(psh(`$env:GIT_PAGER = 'del C:\\Users\\u\\Documents\\a.txt'; git log`) ?? "", /limited to the repository and temp/);
+  assert.match(psh(`$env:GIT_SSH_COMMAND='rm C:\\Users\\u\\Documents\\a.txt'; git fetch`) ?? "", /limited to the repository and temp/);
+  assert.match(decide({ tool_name: "Bash", tool_input: { command: `set GIT_PAGER=del C:\\Users\\u\\Documents\\a.txt && git log` } }, env, { gitAlias: () => null }) ?? "", /limited to the repository and temp/);
+  assert.ok(psh(`$env:GIT_EXEC_PATH = 'C:\\temp\\h'; git status`));
+  assert.equal(psh(`$env:GIT_PAGER = 'cat'; git log`), null);
+});
+
+test("more config keys that make git run a command or open a protocol cannot be set", () => {
+  for (const k of ["pager.log", "gpg.ssh.program", "gpg.x509.program", "gpg.openpgp.program", "core.askpass", "core.gitProxy", "core.alternateRefsCommand", "uploadpack.packObjectsHook",
+    "remote.origin.uploadpack", "remote.origin.receivepack", "diff.a.command", "difftool.a.cmd", "mergetool.a.cmd", "trailer.a.command", "protocol.ext.allow", "protocol.allow", "Core.GitProxy"]) {
+    assert.ok(git(`git config ${k} x`), k);
+    assert.ok(git(`git -c ${k}=x log`), k);
+  }
+  for (const c of [`git config --get pager.log`, `git config protocol.version 2`, `git config uploadpack.allowFilter true`, `git config diff.tool vimdiff`, `git config diff.algorithm patience`,
+    `git config remote.origin.fetch +refs/heads/*:refs/remotes/origin/*`, `git config gpg.format ssh`, `git config trailer.sign.key Signed-off-by`, `git config --get-all remote.origin.uploadpack`])
+    assert.equal(git(c), null, c);
+});
+
+test("a transport option that names a program is refused wherever git takes one", () => {
+  for (const c of [`git fetch --upload-pack='rm -rf /c/Users/u/Documents;' origin`, `git fetch --upload-pack x origin`, `git fetch --upload origin`, `git pull --ff-only --upload-pack=x`,
+    `git push --receive-pack=x origin night`, `git push --exec=x origin night`, `git push --rece x`, `git ls-remote --upload-pack=x origin`, `git clone -u x url`, `git clone -qu x url`,
+    `git clone --upload-pack=x url`, `git archive --exec=x HEAD`, `git fetch origin --upload-pack=x`, `git -C /c/temp/y fetch --upload-pack=x`])
+    assert.ok(git(c), c);
+  for (const c of [`git fetch origin`, `git fetch --all --prune`, `git fetch --update-head-ok origin`, `git clone --depth 1 url`, `git clone -b dev url`, `git clone -q url dir`, `git archive -o x.zip HEAD`,
+    `git archive --remote=origin HEAD`, `git ls-remote origin`, `git ls-remote --heads origin`, `git push -u origin night`, `git pull --ff-only`, `git fetch origin -- --upload-pack=x`])
+    assert.equal(git(c), null, c);
+});
+
+test("restoring or checking out every file by a glob is the same as the whole tree", () => {
+  for (const c of [`git checkout -- '*'`, `git checkout -- *`, `git restore '*'`, `git restore *`, `git restore :/*`, `git restore ':/*'`, `git checkout -- :/*`, `git checkout -- './*'`, `git restore --worktree '*'`])
+    assert.match(git(c) ?? "", /whole tree/, c);
+  for (const c of [`git checkout -- src/*.ts`, `git restore --staged '*'`, `git restore src/a.ts`, `git checkout main`, `git checkout -- src/a.ts`])
+    assert.equal(git(c), null, c);
+});
+
+test("git's options given through a variable the walker knows are read as the value", () => {
+  for (const c of [`F=--force; git push $F origin main`, `F=--force; git push "$F" origin main`, `F=--force; git push \${F} origin main`, `export F=--hard; git reset $F HEAD`, `F='--force --no-verify'; git push $F origin`,
+    `B=:old; git push origin $B`, `OPT=--amend; git commit $OPT`, `D=--delete; F=$D; git push $F origin x`, `O=-f; git push $O`, `F=--force; git -C app push $F`])
+    assert.ok(git(c), c);
+  for (const c of [`F=--no-verify; git commit $F -m x`, `M=--force; git commit -m "$M"`, `B=night; git push origin $B`, `git push origin $UNSET`, `F=--force; git status $F`, `git commit -m 'cost $5 and $X'`])
+    assert.equal(git(c), null, c);
+});

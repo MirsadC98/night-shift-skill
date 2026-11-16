@@ -109,14 +109,17 @@ const SHELL = String.raw`(?:\S*[\\/])?(?:bash|sh|zsh|dash|pwsh|powershell|cmd)(?
 
 // Drops here-document bodies: text for cat, git commit -F, node and the like is data,
 // not commands (session 08's note "318 files / 3434 tests" read as `rm -rf /`).
-// A body fed to a shell (`bash <<EOF`, `cat <<EOF | sh`) stays, since it is commands.
+// A body fed to a shell (`bash <<EOF`, `cat <<EOF | sh`) stays, since it is commands. So do the
+// $( ) and backtick spans of a body whose delimiter is unquoted: bash runs those whatever reads the text.
 function dropHeredocs(cmd) {
   const out = [], pending = [];
+  const flush = (h) => { for (const span of h.body ? bodySpans(h.body.join("\n")) : []) out.push(`(${span})`); };
   for (const line of cmd.split("\n")) {
     if (pending.length) {
       const h = pending[0];
       const end = line.replace(/\r$/, "");
-      if ((h.dash ? end.replace(/^\t+/, "") : end) === h.delim) pending.shift();
+      if ((h.dash ? end.replace(/^\t+/, "") : end) === h.delim) { pending.shift(); flush(h); }
+      else h.body?.push(line);
       if (h.keep) out.push(line);
       continue;
     }
@@ -127,10 +130,21 @@ function dropHeredocs(cmd) {
       const words = bare.slice(0, m.index).split(/[;&|()]/).pop().trim().split(/\s+/);
       const word = words.find((w) => !/^[A-Za-z_]\w*\+?=/.test(w)) || "";
       const keep = new RegExp(`^${SHELL}$`, "i").test(word) || new RegExp(String.raw`\|\s*${SHELL}(\s|$)`, "i").test(bare.slice(m.index));
-      pending.push({ delim: m[3], dash: m[1] === "-", keep });
+      pending.push({ delim: m[3], dash: m[1] === "-", keep, body: keep || m[2] ? null : [] });
     }
   }
+  pending.forEach(flush); // a body the text ends inside of
   return out.join("\n");
+}
+// The commands an unquoted here-document body runs: $( ) and backtick spans, not \$ or \` and not $(( )) arithmetic.
+function bodySpans(body) {
+  const spans = [];
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] === "\\") i++;
+    else if (body[i] === "$" && body[i + 1] === "(" && body[i + 2] !== "(") { const e = closeParen(body, i + 1); spans.push(body.slice(i + 2, e)); i = e; }
+    else if (body[i] === "`") { const e = body.indexOf("`", i + 1); if (e < 0) break; spans.push(body.slice(i + 1, e)); i = e; }
+  }
+  return spans;
 }
 
 // Splits a command line into simple commands at unquoted ; & | ( ) ` and newlines. Each has
@@ -320,7 +334,7 @@ function gitGlobals(args) {
 // Config that makes git run something the guard cannot read: an alias, a file that can define one
 // (include), or a command git calls (editor, pager, hooks, helpers, drivers). Reading a key is fine.
 const CONFIG_ALIAS = /^(alias|include|includeif)\./i;
-const CONFIG_RUNS = /^(core\.(fsmonitor|sshcommand|hookspath|editor|pager)|sequence\.editor|credential\.(.+\.)?helper|diff\.external|diff\..+\.textconv|filter\..+\.(clean|smudge|process)|merge\..+\.driver|gpg\.program|help\.autocorrect)$/i;
+const CONFIG_RUNS = /^(core\.(fsmonitor|sshcommand|hookspath|editor|pager|askpass|gitproxy|alternaterefscommand)|sequence\.editor|credential\.(.+\.)?helper|diff\.external|diff\..+\.(textconv|command)|filter\..+\.(clean|smudge|process)|merge\..+\.driver|gpg\.(.+\.)?program|help\.autocorrect|pager\..+|uploadpack\.packobjectshook|remote\..+\.(uploadpack|receivepack)|(difftool|mergetool)\..+\.cmd|trailer\..+\.command|protocol\.(.+\.)?allow)$/i;
 const configReason = (key) => CONFIG_ALIAS.test(key) ? "git aliases are not read during a night run" : CONFIG_RUNS.test(key) ? "git settings that run commands are not changed during a night run" : null;
 // Options stop at a bare `--`. A long option may be cut short as long as it stays unambiguous
 // (`--forc`, even `--f` for clean), so any prefix of the name counts; short ones may be clustered (-uf).
@@ -329,11 +343,17 @@ const long = (a, name) => upToDashes(a).some((w) => { const m = /^--([a-z][a-z-]
 const short = (a, letter) => upToDashes(a).some((w) => /^-[A-Za-z]+$/.test(w) && w.includes(letter));
 const anyLong = (a, ...names) => names.some((n) => long(a, n));
 const anyShort = (a, letters) => [...letters].some((l) => short(a, l));
-// The whole tree as a pathspec: `.`, `./`, `:/`.
-const wholeTree = (a) => a.some((w) => /^(\.\/?|:\/\.?)$/.test(w));
+// The whole tree as a pathspec: `.`, `./`, `:/`, and the glob `*` (`./*`, `:/*`) that names every file in it.
+const wholeTree = (a) => a.some((w) => /^(\.\/?|:\/\.?|(\.\/|:\/)?\*)$/.test(w));
 const firstArg = (a) => a.find((w) => !w.startsWith("-"));
+// The remote's program (--upload-pack, --receive-pack, --exec; clone's -u is --upload-pack) runs as a command line.
+const transport = (a, shortToo) => (anyLong(a, "upload-pack", "receive-pack", "exec") || (shortToo && short(a, "u"))) && "git options that name a program to run are not used during a night run";
 const GIT_RULES = {
-  push: (a) => (anyLong(a, "force", "force-with-lease", "force-if-includes", "delete", "mirror", "prune") || anyShort(a, "fd") || a.some((w) => /^[+:]/.test(w))) && "force or deleting pushes rewrite shared history",
+  push: (a) => transport(a) || ((anyLong(a, "force", "force-with-lease", "force-if-includes", "delete", "mirror", "prune") || anyShort(a, "fd") || a.some((w) => /^[+:]/.test(w))) && "force or deleting pushes rewrite shared history"),
+  fetch: (a) => transport(a),
+  "ls-remote": (a) => transport(a),
+  clone: (a) => transport(a, true),
+  archive: (a) => transport(a),
   reset: (a) => anyLong(a, "hard", "merge") && "git reset --hard discards work",
   checkout: (a) => (long(a, "force") || anyShort(a, "fB") || wholeTree(a)) && "checking out over the whole tree discards work",
   switch: (a) => (anyLong(a, "force", "discard-changes", "force-create") || anyShort(a, "fC")) && "switching by force discards work",
@@ -348,17 +368,39 @@ const GIT_RULES = {
   branch: (a) => (anyLong(a, "delete", "force") || anyShort(a, "dDfMC")) && "deleting or force-moving branches needs the user",
   reflog: (a) => /^(expire|delete)$/.test(a[0]) && "expiring the reflog discards the way back",
   clean: (a) => (long(a, "force") || short(a, "f")) && "git clean deletes untracked work",
-  pull: (a) => !a.includes("--ff-only") && "only git pull --ff-only is allowed",
+  pull: (a) => transport(a) || (!a.includes("--ff-only") && "only git pull --ff-only is allowed"),
   stash: (a) => /^(drop|clear)$/.test(a[0]) && "dropping stashes discards work",
   // `git remote -v add x url` works: the options come first.
   remote: (a) => /^(add|remove|rm|set-url|rename)$/.test(firstArg(a)) && "changing remotes needs the user",
   config: (a) => (anyLong(a, "global", "system") && "global git config is the user's") || a.map((w, i) => i + 1 < a.length && configReason(w)).find(Boolean) || null,
 };
 // Git's own commands the guard has no rule for: an alias cannot replace them, so nothing is looked up.
-const GIT_PLAIN = new Set(`status add log diff show fetch rev-parse ls-files describe blame grep tag mv rm init worktree cherry-pick revert apply
-  bisect shortlog cat-file ls-tree rev-list for-each-ref show-ref symbolic-ref check-ignore merge-base name-rev submodule notes format-patch am archive gc help version`.split(/\s+/));
+const GIT_PLAIN = new Set(`status add log diff show rev-parse ls-files describe blame grep tag mv rm init worktree cherry-pick revert apply
+  bisect shortlog cat-file ls-tree rev-list for-each-ref show-ref symbolic-ref check-ignore merge-base name-rev submodule notes format-patch am gc help version`.split(/\s+/));
 // Variables that point git at other config or another repository, as prefix words or an earlier assignment.
 const GIT_ENV_VAR = /^(\$env:|set:)?(GIT_CONFIG_(COUNT|PARAMETERS|KEY_\d+|VALUE_\d+|GLOBAL|SYSTEM)|HOME|XDG_CONFIG_HOME|GIT_DIR|GIT_COMMON_DIR)(=|$)/i;
+// The twins of the config keys that run a command: git takes these from the environment as a command line,
+// and these name a program outright (the exec path holds git's own helpers, GIT_SSH is run as the transport).
+const GIT_ENV_RUNS = /^(?:\$env:|set:)?GIT_(?:SSH_COMMAND|PAGER|EDITOR|ASKPASS|EXTERNAL_DIFF|PROXY_COMMAND)$/i;
+const GIT_ENV_PROG = /^(?:\$env:|set:)?GIT_(?:EXEC_PATH|SSH)$/i;
+// prefix: the words before git's name (`GIT_PAGER=x git log`); vars: what the command line set before it.
+function gitEnvReason(prefix, vars, env, where, opts, depth) {
+  const given = prefix.map((w) => /^([A-Za-z_]\w*)\+?=(.*)$/s.exec(w)).filter(Boolean).map(([, k, v]) => [k, expand(v, vars, env)]);
+  for (const [k, v] of [...given, ...vars]) {
+    if (GIT_ENV_PROG.test(k)) return "git is not pointed at another program during a night run";
+    if (!GIT_ENV_RUNS.test(k)) continue;
+    if (v == null) return `${k.replace(/^(\$env:|set:)/i, "")} is a command line git runs, and its value cannot be read`;
+    const why = checkCommand(v, env, { ...where }, { ...opts, vars: new Map(), ps: false }, depth + 1);
+    if (why) return why;
+  }
+  return null;
+}
+// git's words with the $NAMEs the walker knows filled in, so `F=--force; git push $F` is read as the push it is.
+// A word that is only a variable is as many words as its value has.
+const gitWords = (words, vars, env) => words.flatMap((w) => {
+  const v = w.includes("$") ? expand(w, vars, env) : null;
+  return v === null ? [w] : /^\$\{?\w+\}?$/.test(w) ? v.split(/\s+/).filter(Boolean) : [v];
+});
 const quoteArg = (w) => `"${w.replace(/(["\\$`])/g, "\\$1")}"`;
 const configuredAlias = (name, cwd) => {
   try {
@@ -444,6 +486,19 @@ function closeParen(s, i) {
 // `eval "$(fnm env)"` runs what a tool prints, which no one can read beforehand; the tool's own
 // command is checked as a substitution. Only when the substitution is the whole script.
 const isSubstitution = (s) => (s.startsWith("$(") ? closeParen(s, 1) === s.length - 1 : /^`[^`]*`$/.test(s));
+
+// `eval "$(echo 'rm -rf x')"`: the words of the echo or printf inside are what eval runs.
+function checkEchoed(s, env, where, opts, depth) {
+  const body = s.startsWith("$(") ? s.slice(2, -1) : s.slice(1, -1);
+  for (const c of simpleCommands(body, opts.ps)) {
+    const k = nameIndex(c.words);
+    if (k < 0 || !/^(echo|printf)$/.test(base(c.words[k]))) continue;
+    const words = c.words.slice(k + 1).filter((w) => !/^-[neE]+$/.test(w));
+    const why = checkCommand(words.map(unmark).join(" "), env, where, { ...opts, vars: new Map() }, depth + 1);
+    if (why) return why;
+  }
+  return null;
+}
 
 // Redirections are files written or read, not arguments: `> f`, `>>f`, `2>f`, `< f`, `<<EOF`, `<<< text`.
 function splitRedirects(c) {
@@ -674,7 +729,11 @@ function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r, tmp) {
   // PowerShell's `$env:NAME = x` and cmd's `set NAME=x` change the environment of the git after them;
   // kept apart from the shell variables (a key no $NAME can match) and read by the git check below.
   const pe = /^\$env:(\w+)/i.exec(c.words[0]) ?? (/^set$/i.test(c.words[0]) ? /^(\w+)=/.exec(c.words[1] ?? "") : null);
-  if (pe) vars.set(`${/^set$/i.test(c.words[0]) ? "set:" : "$env:"}${pe[1]}`, "");
+  if (pe) {
+    // The value is kept for the git check: some variables are command lines.
+    const set = /^set$/i.test(c.words[0]), w0 = c.words[0];
+    vars.set(`${set ? "set:" : "$env:"}${pe[1]}`, set ? c.words.slice(1).join(" ").replace(/^\w+=/, "") : w0.includes("=") ? w0.replace(/^[^=]*=/, "") : c.words[1] === "=" ? c.words.slice(2).join(" ") : "");
+  }
   const { args, writes, here, input } = splitRedirects(c);
   for (const t of writes) { const why = writeDenial(t, env, where, vars, r); if (why) return why; }
   let ni = nameIndex(args);
@@ -718,7 +777,9 @@ function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r, tmp) {
   // eval runs its words in this shell, so what it cd's and sets carries on.
   if (/^(eval|iex|invoke-expression)$/.test(nm)) {
     const script = rest.join(" ").trim();
-    return !script || isSubstitution(script) ? null : checkCommand(scriptText(script, vars, env), env, where, opts, depth + 1);
+    if (!script) return null;
+    // A substitution that only echoes is the script itself; what any other tool prints cannot be read beforehand.
+    return isSubstitution(script) ? checkEchoed(script, env, where, opts, depth) : checkCommand(scriptText(script, vars, env), env, where, opts, depth + 1);
   }
   if (nm === "find") {
     for (let k = 0; k < rest.length; k++) {
@@ -743,7 +804,9 @@ function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r, tmp) {
   // like are the same commands under their dashed names.
   if (nm === "git" || nm.startsWith("git-")) {
     if (args.slice(0, ni).some((w) => GIT_ENV_VAR.test(w)) || [...vars.keys()].some((k) => GIT_ENV_VAR.test(k))) return "git is not pointed at other config or another repository during a night run";
-    const why = gitRule(nm === "git" ? rest : [nm.slice(4), ...rest], { env, where, opts, depth });
+    const env2 = gitEnvReason(args.slice(0, ni), vars, env, where, opts, depth);
+    if (env2) return env2;
+    const why = gitRule(gitWords(nm === "git" ? rest : [nm.slice(4), ...rest], vars, env), { env, where, opts, depth });
     if (why) return why;
   }
   if (nm !== "git" && !PRINTS.test(nm)) {
@@ -757,7 +820,7 @@ function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r, tmp) {
   if (nm !== "git" && !nm.startsWith("git-")) {
     for (let k = ni + 1; k < args.length; k++) {
       if (base(args[k]) !== "git") continue;
-      const why = gitRule(args.slice(k + 1), { env, where, opts, depth });
+      const why = gitRule(gitWords(args.slice(k + 1), vars, env), { env, where, opts, depth });
       if (why) return why;
     }
   }
@@ -768,20 +831,32 @@ function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r, tmp) {
   return checkDelete(args, ni, env, where, vars, r);
 }
 
+// where is put back to a copy of it (keys a later cd added are dropped too).
+const setWhere = (where, to) => { for (const k of Object.keys(where)) delete where[k]; Object.assign(where, to); };
+// bash runs a command before a lone & in the background, and each part of a pipeline in a subshell of its own:
+// a cd there does not move the commands after it. PowerShell's & is the call operator and its pipeline shares the session.
+const background = (sep) => /(^|[^&|])&$/.test(sep);
+const continues = (sep) => /(&&|\|\|)$/.test(sep) || isPipe(sep);
+
 function walk(cmds, env, where, opts, depth) {
   if (depth > 4) return NESTED;
   const r = roots(env), saved = [];
-  let lvl = 0, sawPipe = false, prev = null;
+  let lvl = 0, sawPipe = false, prev = null, listStart = { ...where };
   for (const [i, c] of cmds.entries()) {
     // A cd inside ( ) lasts until the ), so the folder it left is put back there.
     while (lvl < c.lvl) { saved.push({ ...where }); lvl++; }
-    while (lvl > c.lvl) { Object.assign(where, saved.pop()); lvl--; }
+    while (lvl > c.lvl) { setWhere(where, saved.pop()); lvl--; }
+    // The whole && / || list before a lone & ran in the background: back to where it started.
+    if (!opts.ps && background(c.sep)) setWhere(where, listStart);
+    if (!continues(c.sep)) listStart = { ...where };
     const pipe = isPipe(c.sep);
     // The splitter cuts `(Get-Item x).Delete($true)` at its (: a .Delete method given $true removes a folder and what it holds.
     const nx = cmds[i + 1];
     if (/\.Delete$/i.test(c.words.at(-1)) && !PRINTS.test(base(c.words[0])) && nx?.pre === "(" && /^\$true$/i.test(nx.words[0])) return "deletes through .NET cannot be checked";
+    const before = { ...where };
     const why = readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r, mktempAfter(cmds, i));
     if (why) return why;
+    if (!opts.ps && (pipe || isPipe(nx?.sep ?? ""))) setWhere(where, before);
     sawPipe ||= pipe; prev = c;
   }
   return null;
@@ -896,6 +971,16 @@ function selfTest() {
     [decide({ tool_name: "PowerShell", tool_input: { command: "(Get-Item C:\\Users\\u\\Documents).Delete($true)" } }, env), true],
     [decide({ tool_name: "PowerShell", tool_input: { command: "Remove-Item Env:FOO" } }, env), false],
     [decide({}, env), true],
+    // The second fix wave: eval of an echo, a cd in a subshell, here-document substitutions, git's env twins, config keys, transport options, glob pathspecs, option variables.
+    [bash(`eval "$(echo 'rm -rf /c/Users/u/Documents')"`), true], [bash(`eval "$(fnm env)"`), false],
+    [decide({ tool_name: "Bash", cwd: "C:\\Users\\u", tool_input: { command: "cd C:/temp & rm -rf Documents" } }, env), true],
+    [decide({ tool_name: "Bash", cwd: "C:\\Users\\u", tool_input: { command: "cd C:/temp | cat; rm -rf Documents" } }, env), true],
+    [bash("cat <<EOF\n$(rm -rf /c/Users/u/Documents)\nEOF"), true], [bash("cat <<'EOF'\n$(rm -rf /c/Users/u/Documents)\nEOF"), false],
+    [bash(`GIT_SSH_COMMAND='rm -rf /c/Users/u/Documents' git fetch`), true], [bash("GIT_PAGER=cat git log"), false], [bash("GIT_EXEC_PATH=/c/temp git status"), true],
+    [bash("git -c protocol.ext.allow=always fetch origin"), true], [bash("git config pager.log x"), true],
+    [bash(`git fetch --upload-pack='rm -rf /c/Users/u/Documents;' origin`), true], [bash("git clone -u x url"), true], [bash("git fetch origin"), false],
+    [bash("git checkout -- '*'"), true], [bash("git restore ':/*'"), true], [bash("git checkout -- src/*.ts"), false],
+    [bash("F=--force; git push $F origin main"), true], [bash("B=night; git push origin $B"), false],
   ];
   let failed = 0;
   cases.forEach(([got, deny], i) => {
