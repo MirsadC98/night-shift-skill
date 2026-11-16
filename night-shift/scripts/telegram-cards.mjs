@@ -41,7 +41,8 @@ function trimHtml(s, max) {
 
 // A long message as parts of at most max characters, each cut at a line end. A tag open at
 // the cut (<pre>, <blockquote expandable>) is closed there and opened again in the next part.
-// A line longer than max is cut hard, still outside a tag or an entity.
+// A line longer than max is cut hard, still outside a tag or an entity. A max below the
+// length of the tags open at the cut is not supported.
 export function splitHtml(html, max = 4000) {
   if (html.length <= max) return [html];
   const parts = [];
@@ -82,14 +83,16 @@ function card(head, blocks, silent = false) {
   const body = blocks.filter((b) => b.lines.length)
     .map((b) => `<b>${b.name}</b>${b.count ? ` · ${b.lines.length}` : ""}\n${[...b.lines, ...(b.extra ? [b.extra] : [])].map(esc).join("\n")}`)
     .join("\n\n");
-  // A head within 40 of the limit leaves no room for a quote worth opening: send the head alone.
-  if (!body || top.length > LIMIT - 40) return { text: trimHtml(top, LIMIT), silent };
+  if (!body) return { text: trimHtml(top, LIMIT), silent };
   const open = "\n<blockquote expandable>", close = "</blockquote>";
   let inner = body;
   if (top.length + open.length + inner.length + close.length > LIMIT) {
-    // A line end is outside every tag and entity, so this cut leaves the HTML whole.
-    inner = inner.slice(0, LIMIT - top.length - open.length - close.length - 2);
-    inner = `${inner.slice(0, inner.lastIndexOf("\n"))}\n…`;
+    // A cut at a line end is outside every tag and entity; a cut holding no line end (a head
+    // that nearly fills the message) would leave half a tag, so the head goes alone then.
+    const room = LIMIT - top.length - open.length - close.length - 2;
+    const end = room > 0 ? inner.slice(0, room).lastIndexOf("\n") : -1;
+    if (end <= 0) return { text: trimHtml(top, LIMIT), silent };
+    inner = `${inner.slice(0, end)}\n…`;
   }
   return { text: `${top}${open}${inner}${close}`, silent };
 }

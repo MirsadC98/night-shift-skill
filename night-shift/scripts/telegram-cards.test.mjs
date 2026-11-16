@@ -338,3 +338,14 @@ test("a single line longer than the limit is cut hard, but not inside a tag or a
     assert.doesNotMatch(p.replace(/<[^>]*>|&amp;/g, ""), /[<>&]/);
   }
 });
+test("a head that nearly fills the message never leaves a half tag or an open one, for any title length", () => {
+  const waits = ["w1", `w2 ${"z".repeat(300)}`];
+  for (let n = 3900; n <= 4060; n++) {
+    const { text } = sessionCard({ ...done, title: "x".repeat(n), waits });
+    assert.ok(text.length <= 4096, `length at ${n}`);
+    for (const tag of ["b", "blockquote", "pre"]) {
+      assert.equal((text.match(new RegExp(`<${tag}[ >]`, "g")) || []).length, (text.match(new RegExp(`</${tag}>`, "g")) || []).length, `<${tag}> at ${n}`);
+    }
+    assert.doesNotMatch(text.replace(/<[^>]*>/g, ""), /[<>]/, `half tag at ${n}`);
+  }
+});
