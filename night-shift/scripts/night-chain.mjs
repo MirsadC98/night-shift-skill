@@ -470,6 +470,7 @@ async function runChain(opt) {
     // conversation, so a session of its own), unless it already wrote the next prompt. Every
     // MODEL: fable prompt runs on Opus at max until the allowance resets (fableGate).
     if (plan.family === "fable" && result.fableOut) {
+      streak = streakStart = deadResumes = 0; // the API answered: a streak must not span this wait
       const until = result.fableResetAt || Date.now() + 24 * 3_600_000;
       writeFable({ outUntil: until });
       log(`session ${nn}: Fable's allowance is used up (${result.apiError || result.limitType || "refused"}) until ${stamp(until)}${result.fableResetAt ? "" : " (a guess: the CLI gave no reset time)"}; limit record ${JSON.stringify(result.limitInfo)}`);
@@ -483,6 +484,7 @@ async function runChain(opt) {
       continue;
     }
     if (result.limited) {
+      streak = streakStart = deadResumes = 0; // the API answered: a streak must not span the limit wait
       if (result.limitInfo) log(`session ${nn}: ${result.limitType || "a usage limit"} cut it off; limit record ${JSON.stringify(result.limitInfo)}`);
       // After a handover there is nothing to resume: next-prompt.md carries the chain.
       if (wrote) {
@@ -516,8 +518,10 @@ async function runChain(opt) {
         deadResumes = 0;
       } else if (resume) {
         // A resume that dies without a turn gets one more try; then the conversation is given up
-        // and the piece goes on from the recovery note below.
-        if (++deadResumes >= 2) { fs.rmSync(resumeFile, { force: true }); retryHandover = true; }
+        // and the piece goes on from the recovery note below. An API or network error is not a dead
+        // conversation: it waits out the outage and resumes the same one.
+        const outage = result.apiError != null || /^API Error\b|\b(?:ENOTFOUND|ECONN\w*|ETIMEDOUT|EAI_AGAIN)\b/.test(result.errorText);
+        if (!outage && ++deadResumes >= 2) { fs.rmSync(resumeFile, { force: true }); retryHandover = true; }
       } else if (plan.family === "fable" && result.mainModels.length === 0) writeFable({ sessions: Math.max(0, (readFable().sessions || 0) - 1) }); // it never had a turn: the retry is not a second Fable session
       if (!retryHandover) {
         const ms = Number(process.env.NIGHT_SHIFT_BACKOFF_MS) || [1, 2, 5, 10, 20, 30][Math.min(streak, 6) - 1] * 60_000;
@@ -532,8 +536,8 @@ async function runChain(opt) {
     fs.rmSync(resumeFile, { force: true });
     const after = read(next).trim();
     if (fs.statSync(next).mtimeMs <= before || after === prompt) {
-      failures++;
-      if (failures >= 2) finish("two sessions in a row ended without writing next-prompt.md");
+      // A given-up conversation is the resume's fault, not a failed handover: it does not count.
+      if (!retryHandover && ++failures >= 2) finish("two sessions in a row ended without writing next-prompt.md");
       // The retry does the same piece, so its MODEL and EFFORT lines stay the first lines.
       const d = promptDirectives(prompt);
       fs.writeFileSync(next, `${directiveLines(d)}Önceki gece oturumu (${nn}) devam promptu yazmadan bitti (${result.summary}). ` +

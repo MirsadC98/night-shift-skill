@@ -920,6 +920,48 @@ test("errors that outlast --max-wait-hours end the chain", async () => {
   assert.match(log, /chain ends: session 01 kept failing for [\d.]+ h \(API Error: 500 Internal server error\)/);
 });
 
+// A session that had a turn and then met an API error: resume.json is written, and the next call resumes it.
+const WORKED_THEN_ERROR = `if (call === 1) {
+  console.log(JSON.stringify({ type: "assistant", session_id: "fake-1", parent_tool_use_id: null, message: { model: "claude-opus-5-5", content: [] } }));
+  console.log(JSON.stringify({ type: "result", subtype: "success", is_error: true, api_error: "overloaded_error", api_error_status: 529, num_turns: 4, total_cost_usd: 0, session_id: "fake-1", result: "Overloaded" }));
+  process.exit(1);
+}
+`;
+
+test("an outage that outlasts two resumes keeps the conversation and counts no failed handover", async () => {
+  const { log, calls } = await errorRun(WORKED_THEN_ERROR + `if (call <= 4) apiError(); stop();`);
+  assert.deepEqual(calls, ["1 -", "1 fake-1", "1 fake-1", "1 fake-1", "1 fake-1"]);
+  assert.match(log, /session 01 resumes fake-1 after the error/);
+  assert.doesNotMatch(log, /left no continuation prompt|two sessions in a row/);
+  assert.match(log, /chain ends: STOP: done/);
+});
+
+test("a conversation that cannot be resumed is given up after two tries, without counting a failed handover", async () => {
+  const { log, calls } = await errorRun(WORKED_THEN_ERROR + `
+if (call <= 3) { console.error("No conversation found with session ID: fake-1"); process.exit(1); }
+if (call === 4) ok(n); else stop();
+`);
+  // Two dead resumes, then a fresh session that ends without a handover (the one failure), then one that finishes.
+  assert.deepEqual(calls, ["1 -", "1 fake-1", "1 fake-1", "2 -", "3 -"]);
+  assert.doesNotMatch(log, /two sessions in a row/);
+  assert.match(log, /chain ends: STOP: done/);
+});
+
+test("an error streak does not survive a usage-limit wait", async () => {
+  // Errors from call 1 on build a 2 s streak, call 3 meets a limit that resets about 3 s on, call 4 errs
+  // again: the limit wait must not count toward the 4 s (--max-wait-hours) the streak may last.
+  const { log, calls } = await errorRun(`
+if (call === 1) apiError();
+if (call === 2) { await new Promise((r) => setTimeout(r, 2000)); apiError(); }
+if (call === 3) limit(Math.floor(Date.now() / 1000) - 57);
+if (call === 4) apiError();
+stop();
+`, { maxWaitHours: 0.0011 });
+  assert.doesNotMatch(log, /kept failing/);
+  assert.equal(calls.length, 5);
+  assert.match(log, /chain ends: STOP: done/);
+});
+
 test("a claude that cannot be started is retried, not a silent death", async () => {
   const s = setup();
   const run = JSON.parse(fs.readFileSync(path.join(s.state, "run.json"), "utf8"));
