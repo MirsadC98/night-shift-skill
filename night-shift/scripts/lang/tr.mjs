@@ -46,6 +46,7 @@ export default {
     quiet: (e) => `⚠️ #${e.nn} ${e.minutes} dakikadır sessiz · son adım: ${e.step}`,
     died: () => "🛑 Zincir beklenmedik şekilde durdu (runner kapandı)",
     effort: (e) => `⚠️ #${e.nn} ${e.got} düzeyde çalışıyor (${e.want} olmalı)`,
+    rules: (e) => `⚠️ Kural dosyası: ${e.text}`,
   },
 
   // problems, in the report and on the cards

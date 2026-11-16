@@ -312,6 +312,12 @@ const settings = JSON.parse(fs.readFileSync(path.join(st, "night-settings.json")
 fs.writeFileSync(path.join(st, "seen-" + n + ".json"), JSON.stringify({ args: process.argv.slice(2), input, settings,
   noFallback: process.env.CLAUDE_CODE_NO_MODEL_FALLBACK ?? null }));
 const step = JSON.parse(process.env.TEST_SCRIPT)[n] || {};
+// step.rules: { global, project } rewrites the user's rule files (null deletes one), as a session or an editor may.
+for (const [k, v] of Object.entries(step.rules || {})) {
+  const f = k === "global" ? path.join(process.env.USERPROFILE, ".claude", "night-shift", "rules.md") : path.join(process.cwd(), ".claude", "night-shift-rules.md");
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  if (v == null) fs.rmSync(f, { force: true }); else fs.writeFileSync(f, v);
+}
 if (step.fable != null) console.log(JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "allowed",
   unifiedWindows: { five_hour: { utilization: 0.4 }, seven_day: { utilization: 0.3 }, seven_day_overage_included: { utilization: step.fable, resetsAt: step.resets } } } }));
 if (step.next != null) fs.writeFileSync(path.join(st, "next-prompt.md"), step.next);
@@ -326,7 +332,7 @@ async function fableRun(first, script, runPatch = {}, before = null) {
   const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
   fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake, maxSessions: null, ...runPatch }));
   fs.writeFileSync(path.join(state, "next-prompt.md"), first);
-  if (before) before(state);
+  if (before) before(state, { home: env.USERPROFILE, repo: run.repo });
   const { code } = await runOnce(["--state", state, "--headless"], { ...env, TEST_SCRIPT: JSON.stringify(script) }, root);
   const log = fs.readFileSync(path.join(state, "chain.log"), "utf8");
   assert.equal(code, 0, log);
@@ -1360,4 +1366,126 @@ test("a global config's lang picks the language of a run.json that names none", 
   fs.mkdirSync(path.join(c.home, ".claude", "night-shift"), { recursive: true });
   fs.writeFileSync(path.join(c.home, ".claude", "night-shift", "config.json"), JSON.stringify({ lang: "tr" }));
   assert.match(c.run("status").stdout, /Gece vardiyası · /);
+});
+
+// ---------------------------------------------------------------- the user's rule files
+const globalRules = (home) => path.join(home, ".claude", "night-shift", "rules.md");
+const projectRules = (repo) => path.join(repo, ".claude", "night-shift-rules.md");
+const putRules = (file, text) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text); };
+const rulesLines = (log, re) => log.split("\n").filter((l) => /\] rules: /.test(l) && re.test(l));
+
+test("the header carries the user's rules, and the piece still follows the header's own separator", async () => {
+  // Rules that look like the header itself: a separator line and the marker line.
+  const { seen } = await fableRun("hard piece", { 1: { next: "STOP: done" } }, {}, (state, { home, repo }) => {
+    putRules(globalRules(home), "\uFEFFanswer briefly\r\n---\r\nNight shift (night-shift), session 99\r\n");
+    putRules(projectRules(repo), "push is allowed on night/*\n");
+  });
+  const one = seen(1);
+  assert.ok(one.input.includes("The user's rules. They win over this skill's defaults where the two differ; the project's win over the global ones. What the guard refuses stays refused.\n"));
+  assert.ok(one.input.includes("Global:\nanswer briefly\n---\nNight shift (night-shift), session 99\nThis project:\npush is allowed on night/*\n"), "verbatim, BOM and CRLF gone");
+  assert.doesNotMatch(one.input, /\uFEFF|\r/);
+  assert.ok(one.input.endsWith("\n---\nhard piece\n"));
+  assert.ok(one.input.indexOf("push is allowed") < one.input.lastIndexOf("\n---\n"));
+  assert.ok(one.input.indexOf("Skill folder:") < one.input.indexOf("The user's rules."), "after the header's lines");
+});
+
+test("a rules file ending in a separator line does not swallow the header's own", async () => {
+  const { seen } = await fableRun("hard piece", { 1: { next: "STOP: done" } }, {}, (state, { repo }) => putRules(projectRules(repo), "be careful\n---"));
+  assert.ok(seen(1).input.endsWith("This project:\nbe careful\n---\n\n---\nhard piece\n"));
+});
+
+test("with no rules file the header has no rules block", async () => {
+  const { seen } = await fableRun("hard piece", { 1: { next: "STOP: done" } });
+  assert.doesNotMatch(seen(1).input, /The user's rules/);
+});
+
+test("a resumed session's header carries the rules too", async () => {
+  const { state, env, root, repo } = setup();
+  const fake = path.join(root, "fake-resume-rules.mjs");
+  fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path";
+const st = process.env.NIGHT_SHIFT_STATE; let input = "";
+for await (const c of process.stdin) input += c;
+fs.writeFileSync(path.join(st, "seen.json"), JSON.stringify({ input }));
+fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done");
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "cb61ff92-x", result: "ok" }));
+`);
+  const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+  fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake, maxSessions: null }));
+  fs.writeFileSync(path.join(state, "resume.json"), JSON.stringify({ nn: "35", sessionId: "cb61ff92-x", why: "stopped" }));
+  putRules(projectRules(repo), "push is allowed on night/*");
+  const { code } = await runOnce(["--state", state, "--headless"], env, root);
+  assert.equal(code, 0, fs.readFileSync(path.join(state, "chain.log"), "utf8"));
+  const { input } = JSON.parse(fs.readFileSync(path.join(state, "seen.json"), "utf8"));
+  assert.match(input, /^The session was cut off: the runner stopped/);
+  assert.ok(input.includes(".\n\nThe user's rules. They win"), "after an empty line, at the header's end");
+  assert.ok(input.endsWith("This project:\npush is allowed on night/*\n"));
+  assert.doesNotMatch(input, /Global:/);
+});
+
+test("a rules file that grows past the limit mid-chain keeps its last text, and the log says so once", async () => {
+  const { log, seen } = await fableRun("first", { 1: { rules: { global: "x".repeat(9000) }, next: "second" }, 2: { next: "third" }, 3: { next: "STOP: done" } }, {},
+    (state, { home }) => putRules(globalRules(home), "answer briefly"));
+  for (const n of [1, 2, 3]) assert.ok(seen(n).input.includes("Global:\nanswer briefly\n"), `session ${n} still gets the first text`);
+  assert.equal(rulesLines(log, /rules\.md is 9000 bytes, over the 8192 limit; the last text read stays in force/).length, 1, log);
+  assert.equal(rulesLines(log, /./).length, 1, "and nothing else about rules");
+});
+
+test("a rules file removed mid-chain drops out of the header, and the log says so once", async () => {
+  const { log, seen } = await fableRun("first", { 1: { rules: { global: null }, next: "second" }, 2: { next: "third" }, 3: { next: "STOP: done" } }, {},
+    (state, { home, repo }) => { putRules(globalRules(home), "answer briefly"); putRules(projectRules(repo), "keep commits small"); });
+  assert.ok(seen(1).input.includes("Global:\nanswer briefly"));
+  for (const n of [2, 3]) {
+    assert.doesNotMatch(seen(n).input, /Global:/);
+    assert.ok(seen(n).input.includes("This project:\nkeep commits small\n"), "the other file stays");
+  }
+  assert.equal(rulesLines(log, /rules\.md is gone or empty; its rules no longer apply/).length, 1, log);
+  assert.equal(rulesLines(log, /./).length, 1);
+});
+
+test("a rules file over the limit from the start is left out, and the log says so once", async () => {
+  const { log, seen } = await fableRun("first", { 1: { next: "second" }, 2: { next: "STOP: done" } }, {},
+    (state, { home, repo }) => { putRules(globalRules(home), "ş".repeat(4097)); putRules(projectRules(repo), "keep commits small"); });
+  for (const n of [1, 2]) {
+    assert.doesNotMatch(seen(n).input, /Global:/);
+    assert.ok(seen(n).input.includes("This project:\nkeep commits small\n"));
+  }
+  assert.equal(rulesLines(log, /rules\.md is 8194 bytes, over the 8192 limit; this session runs without it/).length, 1, log);
+  assert.equal(rulesLines(log, /./).length, 1);
+});
+
+test("a rules file that is fixed and breaks again is reported again, and a new text takes effect at once", async () => {
+  const { log, seen } = await fableRun("first", {
+    1: { rules: { project: "x".repeat(9000) }, next: "second" },
+    2: { rules: { project: "second text" }, next: "third" },
+    3: { rules: { project: "x".repeat(9001) }, next: "fourth" },
+    4: { next: "STOP: done" } }, {}, (state, { repo }) => putRules(projectRules(repo), "first text"));
+  assert.ok(seen(1).input.includes("This project:\nfirst text\n"));
+  assert.ok(seen(2).input.includes("This project:\nfirst text\n"), "the broken file leaves the last text in force");
+  assert.ok(seen(3).input.includes("This project:\nsecond text\n"));
+  assert.ok(seen(4).input.includes("This project:\nsecond text\n"));
+  assert.equal(rulesLines(log, /is 9000 bytes/).length, 1);
+  assert.equal(rulesLines(log, /is 9001 bytes/).length, 1);
+});
+
+test("start refuses a rules file over the limit and status names the files in force", () => {
+  const c = pointerCase();
+  putRules(projectRules(c.repo), "a".repeat(9000));
+  const over = c.run("start", ["--prompt", "x"]);
+  assert.equal(over.status, 1);
+  assert.match(over.stderr, /night-shift-rules\.md is 9000 bytes, over the 8192 limit/);
+  putRules(globalRules(c.home), "a".repeat(8193));
+  assert.match(c.run("start", ["--prompt", "x"]).stderr, /[\\/]night-shift[\\/]rules\.md is 8193 bytes, over the 8192 limit/);
+  // The launch is refused (NIGHT_SHIFT_LAUNCH=fail), so the lines start prints on success are checked through status, which prints the same.
+  fs.rmSync(projectRules(c.repo));
+  putRules(globalRules(c.home), "ş".repeat(10));
+  fs.writeFileSync(path.join(c.state, "chain.log"), "[2026-11-16 03:00:00] chain starts\n[2026-11-16 03:30:00] chain ends: STOP: done\n");
+  c.write({ finished: true, finishedAt: "2026-11-16 03:30:00", reason: "STOP: done" });
+  assert.match(c.run("status").stdout, /^finished .*\nstate: .*\n {2}rules: {2}.*[\\/]night-shift[\\/]rules\.md \(20 bytes\)\n\n/);
+  fs.rmSync(globalRules(c.home));
+  assert.match(c.run("status").stdout, /\n {2}rules: {2}none\n\n/);
+  putRules(projectRules(c.repo), "b");
+  assert.match(c.run("status").stdout, /\n {2}rules: {2}.*night-shift-rules\.md \(1 bytes\)\n\n/);
+  // status does not refuse: a file that cannot be used is named.
+  putRules(projectRules(c.repo), "a".repeat(9000));
+  assert.match(c.run("status").stdout, /\n {2}rules: {2}.*night-shift-rules\.md is 9000 bytes, over the 8192 limit\n\n/);
 });

@@ -54,6 +54,7 @@ import { buildReport, userWaits, stateStrings } from "./night-report.mjs";
 import { strings, langOf, LANG_NAMES } from "./lang/index.mjs";
 import { mergedConfig, LANGS, MODES, stateDirProblem, tempRoot } from "./config.mjs";
 import { sessionOutcome, windowSpan } from "./session-outcome.mjs";
+import { ruleFiles, readRuleFile, rulesBlock } from "./rules.mjs";
 import { MAIN_MODEL, SUB_MODEL, MAIN_EFFORT, subEffortText, MAX_NOTE, FABLE_NOTE, nightModelSettings, sessionPlan,
   promptDirectives, directiveLines, fableGate, mainGate, fallbackNote, resolveMode, familyOf } from "./effort.mjs";
 
@@ -110,6 +111,14 @@ const projectConfig = (repo) => {
   if (errors.length) fail(errors.join("; "));
   return config;
 };
+// start and status: what each rule file is to the user, in order (a file with no text is left out). A file
+// that cannot be used is named, not dropped, so the user is never left thinking rules apply that do not.
+const ruleStatus = (repo) => Object.values(ruleFiles(repo)).flatMap((file) => {
+  const r = readRuleFile(file);
+  return r.error ? [{ file, error: r.error }] : r.text ? [{ file, bytes: fs.statSync(file).size }] : [];
+});
+const ruleLines = (found) => (found.length ? found : [{ none: true }])
+  .map((f) => `  rules:  ${f.none ? "none" : f.error ? `${f.file} ${f.error}` : `${f.file} (${f.bytes} bytes)`}`);
 const slug = (repo) => `${path.basename(repo)}-${crypto.createHash("sha1").update(repo.toLowerCase()).digest("hex").slice(0, 8)}`;
 const pointerFile = (repo) => path.join(os.homedir(), ".claude", "night-shift", "runs", `${slug(repo)}.json`);
 const readPointer = (repo) => { const t = read(pointerFile(repo)); return t ? JSON.parse(t) : null; };
@@ -221,6 +230,9 @@ function start(opt) {
   if (opt.mode !== undefined && !MODES.includes(opt.mode)) fail(`--mode must be one of ${MODES.join(", ")} (got ${opt.mode === true ? "no value" : opt.mode})`);
   const picked = resolveMode({ mode: opt.mode ?? cfg.mode, model: typeof opt.model === "string" ? opt.model : cfg.model });
   if (picked.error) fail(picked.error);
+  // A file the runner would have to leave out is refused here, while the user is at the keyboard.
+  const badRules = ruleStatus(repo).filter((f) => f.error);
+  if (badRules.length) fail(badRules.map((f) => `${f.file} ${f.error}`).join("; "));
   let state = path.resolve(typeof opt.state === "string" ? opt.state
     : (cfg.stateDir || path.join(tempRoot(), `night-shift-${path.basename(repo)}-{date}`)).replace("{date}", today()));
   // The runner writes here and a session reads its instructions from here: not a folder of the user's own.
@@ -291,6 +303,7 @@ function start(opt) {
   if (cut) console.log(`  resumes session ${cut.nn} (${cut.sessionId}), which the last runner left unfinished`);
   console.log(`  state:  ${state}`);
   console.log(`  until:  ${run.until ? `${run.until} (no new session after that)` : "the work is done (STOP)"}${run.maxSessions ? `, at most ${run.maxSessions} sessions` : ""}`);
+  for (const l of ruleLines(ruleStatus(repo))) console.log(l);
   console.log(`  status: node "${SELF}" status --repo "${repo}"`);
   console.log(`  stop:   node "${SELF}" stop --repo "${repo}" [--now]`);
 }
@@ -435,6 +448,21 @@ async function runChain(opt) {
   const writeFable = (patch) => fs.writeFileSync(fableFile, JSON.stringify({ ...readFable(), ...patch }, null, 2));
   const fableCeiling = run.fableCeiling ?? 0.6, fableSessions = run.fableSessions ?? 2;
   const opusModel = run.opusModel || MAIN_MODEL;
+  // The user's rule files, read before every session, a resumed one too. Per file, the last text this runner
+  // read and the last line it told the user, so a file that stays broken is reported once, not every session.
+  const ruleMemo = { global: { text: "", told: "" }, project: { text: "", told: "" } };
+  const readRules = () => {
+    for (const [which, file] of Object.entries(ruleFiles(repo))) {
+      const m = ruleMemo[which], r = readRuleFile(file);
+      let note = "";
+      if (r.error) note = `${file} ${r.error}; ${m.text ? "the last text read stays in force" : "this session runs without it"}`;
+      else if (r.text) m.text = r.text;
+      else if (m.text) { m.text = ""; note = `${file} is gone or empty; its rules no longer apply`; }
+      if (note && note !== m.told) log(`rules: ${note}`);
+      m.told = note;
+    }
+    return rulesBlock({ global: ruleMemo.global.text, project: ruleMemo.project.text });
+  };
   const whyText = (g) => (g.why === "out" ? `its allowance is used up until ${stamp(g.until)}`
     : g.why === "ceiling" ? `its allowance is at ${pct(g.ratio)}, at or over the ${pct(g.ceiling)} ceiling`
       : `${g.sessions} Fable sessions already ran in this chain while its allowance's share is unknown`);
@@ -484,7 +512,7 @@ async function runChain(opt) {
     log(`session ${nn} runs ${modelText(plan)} at ${plan.effort}${plan.effort === "max" && asked.effort === "max" && (!plan.downgrade || fableMode) ? " (its prompt asks for it)" : ""}`);
     if (plan.family === "fable" && !resume && !fableMode) writeFable({ sessions: (readFable().sessions || 0) + 1 });
     writeSettings({ [plan.family]: plan.effort });
-    const result = await runSession(run, session, plan, nn, resume);
+    const result = await runSession(run, session, plan, nn, resume, readRules());
     log(`session ${nn} ends: ${result.summary}`);
     // A session that wrote its handover has done its piece, even when a limit cut off what came after.
     const wrote = fs.statSync(next).mtimeMs > before && read(next).trim() !== prompt;
@@ -586,7 +614,8 @@ async function runChain(opt) {
 }
 
 // plan: sessionPlan's { model, family, effort, body }, with downgrade (and why, its words) when Fable was refused.
-function runSession(run, session, plan, nn, resume) {
+// rules: the user's rulesBlock ("" for none), the header's last part (a new session's before its separator, a resumed one's after an empty line).
+function runSession(run, session, plan, nn, resume, rules = "") {
   const resumeId = resume?.sessionId;
   const { effort, body } = plan;
   const header = resumeId ? [
@@ -596,6 +625,7 @@ function runSession(run, session, plan, nn, resume) {
     ] : [resume.why === "error" ? `A connection or API error has passed (night shift, ${now()}).` : `The usage limit has reset (night shift, ${now()}).`]),
     `Go on where you stopped: check the unfinished step with git status and do not redo finished work. End the session with the night-shift skill's three steps`,
     `(commit, gece raporu, ${path.join(run.state, "next-prompt.md")}).`,
+    ...(rules ? ["", rules] : []),
   ].join("\n") : [
     `Night shift (night-shift), session ${session}${run.maxSessions ? `/${run.maxSessions}` : ""}, ${now()}.`,
     `The user is away ${run.until ? `until ${run.until}` : "until the chain ends"} and cannot answer any question.`,
@@ -607,6 +637,7 @@ function runSession(run, session, plan, nn, resume) {
     ...(plan.downgrade && run.mode === "fable" ? [fallbackNote(plan.why, { asked: plan.askedEffort })] : []),
     ...(plan.downgrade && run.mode !== "fable" ? ["The prompt asked for MODEL: fable, but Fable's weekly allowance does not cover it tonight; this piece runs on Opus at max."] : []),
     ...(effort === "max" ? [MAX_NOTE] : []),
+    ...(rules ? ["", rules] : []),
     "",
     "---",
     "",
@@ -677,7 +708,7 @@ function status(opt) {
   const ptr = readPointer(repo);
   if (!ptr) return console.log(strings(langOf({ repo })).cli.noRun);
   const running = !ptr.finished && isRunner(ptr.pid);
-  console.log(`${statusHead(ptr, running, stateStrings(ptr.state, repo)).join("\n")}\n`);
+  console.log(`${[...statusHead(ptr, running, stateStrings(ptr.state, repo)), ...ruleLines(ruleStatus(repo))].join("\n")}\n`);
   console.log(buildReport(ptr.state, { focus: "all", pid: running ? ptr.pid : 0 }).plain);
 }
 

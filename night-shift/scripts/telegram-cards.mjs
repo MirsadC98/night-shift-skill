@@ -152,9 +152,9 @@ export function sessionCard(f, T = strings()) {
 }
 
 // Which events make no sound; the text of each is the table's.
-const SILENT = { start: true, limit: true, resume: true, error: true, retry: false, quiet: false, died: false, effort: false };
+const SILENT = { start: true, limit: true, resume: true, error: true, retry: false, quiet: false, died: false, effort: false, rules: false };
 export function eventLine(kind, d = {}, T = strings()) {
-  const e = { ...d, project: esc(d.project), until: esc(d.until), progress: d.progress ? esc(d.progress) : "", step: esc(d.step || "?"), got: esc(d.got), want: esc(d.want) };
+  const e = { ...d, project: esc(d.project), until: esc(d.until), progress: d.progress ? esc(d.progress) : "", step: esc(d.step || "?"), got: esc(d.got), want: esc(d.want), text: esc(d.text) };
   return { text: T.ev[kind](e), silent: SILENT[kind] };
 }
 

@@ -728,6 +728,7 @@ async function watch(opt) {
           else if ((m = /^session (\d+) resumes /.exec(t))) await say(eventLine("resume", { nn: m[1] }, T));
           else if ((m = /^session (\d+): transient error .*; try 1, waiting until \S+ (\d\d:\d\d)/.exec(t))) await say(eventLine("error", { nn: m[1], until: m[2] }, T)); // later tries stay quiet
           else if ((m = /^session (\d+) left no continuation prompt/.exec(t))) await say(eventLine("retry", { nn: m[1] }, T));
+          else if ((m = /^rules: (.+)$/.exec(t))) await say(eventLine("rules", { text: m[1] }, T)); // the runner tells a rules file's change once
           else if ((m = /^chain ends: (.*)$/.exec(t))) {
             await say(chainMessage(state, m[1], pid));
             mark.lines++;

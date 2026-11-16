@@ -300,3 +300,21 @@ test("a log line no card can be made of is skipped on the third try, and later l
     assert.equal(marks(state).lines, 2);
   });
 });
+
+test("a rules: line from the runner is sent as a card, not silent, in the run's language", async () => {
+  await scene(() => undefined, {}, async ({ api, state, chain }) => {
+    chain("rules: C:/Users/demo-app/.claude/night-shift/rules.md is 9000 bytes, over the 8192 limit; the last text read stays in force");
+    chain(RETRY);
+    await until(() => api.sends().length >= 2, 10_000, "two cards");
+    const [rules] = api.sends();
+    assert.equal(rules.body.text, "⚠️ Kural dosyası: C:/Users/demo-app/.claude/night-shift/rules.md is 9000 bytes, over the 8192 limit; the last text read stays in force");
+    assert.notEqual(rules.body.disable_notification, true, "it makes a sound");
+    assert.match(api.sends()[1].body.text, /#02 devam istemi/);
+    assert.equal(marks(state).lines, 2);
+  });
+  await scene(() => undefined, { lang: "en" }, async ({ api, chain }) => {
+    chain("rules: <b>x</b>.md is gone or empty; its rules no longer apply");
+    await until(() => api.sends().length >= 1, 10_000, "the card");
+    assert.equal(api.sends()[0].body.text, "⚠️ Rules file: &lt;b&gt;x&lt;/b&gt;.md is gone or empty; its rules no longer apply");
+  });
+});

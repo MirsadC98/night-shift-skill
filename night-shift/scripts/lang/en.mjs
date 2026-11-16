@@ -48,6 +48,7 @@ export default {
     quiet: (e) => `⚠️ #${e.nn} quiet for ${e.minutes} minutes · last step: ${e.step}`,
     died: () => "🛑 The chain stopped unexpectedly (the runner is gone)",
     effort: (e) => `⚠️ #${e.nn} is running at ${e.got} (should be ${e.want})`,
+    rules: (e) => `⚠️ Rules file: ${e.text}`,
   },
 
   // problems, in the report and on the cards
