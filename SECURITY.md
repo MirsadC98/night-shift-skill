@@ -6,6 +6,10 @@
 
 It is a safety net, not a sandbox. It does not confine a process: a program the session starts can do what the program does, and a script file the session writes and then runs is not read. Run a chain only on a repository you have committed and can restore, on a machine and with credentials you would hand to an unattended script.
 
+## Rule files
+
+A project's `.claude/night-shift-rules.md` is trusted like its `CLAUDE.md`, and `start` names the rule files in force. A night session cannot write the rule files, the config files or anything under `~/.claude/night-shift/`.
+
 ## Reporting a bypass
 
 If you find a command or a path the guard should have refused and did not, report it privately: open a private security advisory on this repository (the Security tab, "Report a vulnerability"). Please do not open a public issue for it. Include the command or path, the guard's answer, and what it should have been.

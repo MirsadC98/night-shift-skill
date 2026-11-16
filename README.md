@@ -7,11 +7,8 @@ It runs a chain of fresh headless sessions (`claude -p`). Each session is like o
 ## Read this first
 
 - **Windows only.** The runner starts itself through Task Scheduler in a hidden console (`conhost --headless`) and uses PowerShell, so it keeps running after your editor closes.
-- **Opinionated.** It was built for one person's workflow, and `SKILL.md` quotes that person's rules. Read it and change what doesn't fit you.
-- **Partly in Turkish.** A night session's prompt must start with `Gece vardiyası (night-shift)`. The Telegram cards, the status lines and some rules are in Turkish.
-- **It assumes a `~/.claude/CLAUDE.md` you will have to write yourself.** `SKILL.md` points to one section of it, "Models and effort", for the models and levels subagents run at. Write your own version or edit that line.
 - **It runs unattended with no permission prompts.** Sessions run with `--permission-mode auto --permission-prompts none`, and `AskUserQuestion` and plan mode are turned off. `scripts/guard.mjs` is a hook that blocks dangerous commands (see below). It is a safety net, not a sandbox. Run it only on a repository you have committed and can restore.
-- **It costs tokens.** By default every session runs Opus at `xhigh`, subagents run Sonnet at `medium` and Haiku at `high`, and the chain has no end time. Use `--max-sessions` or `--until` if you want a limit. A session whose prompt opens with `MODEL: fable` runs on Fable at `high`; `SKILL.md` allows that for one hard piece only. Fable has its own weekly allowance, so the runner grants it only while less than 60 % of that allowance is used, and to at most two sessions in a chain while the share is unknown. A piece it refuses, or one the allowance cuts off, runs on Opus at `max`.
+- **It costs tokens.** By default (mode `opus`) every session runs Opus at `xhigh`, subagents run Sonnet at `medium` and Haiku at `high`, and the chain has no end time. Use `--max-sessions` or `--until` if you want a limit. A session whose prompt opens with `MODEL: fable` runs on Fable at `high`; `SKILL.md` allows that for one hard piece only. Fable has its own weekly allowance, so the runner grants it only while less than 60 % of that allowance is used, and to at most two sessions in a chain while the share is unknown. A piece it refuses, or one the allowance cuts off, runs on Opus at `max`. See "Modes" for the other mode.
 
 ## Requirements
 
@@ -31,7 +28,7 @@ cp -r <this-repo>/night-shift ~/.claude/skills/night-shift
 
 ## Use
 
-In a Claude Code chat, ask for a night shift ("run a night shift on the plan in docs/plan.md until it is done"). The skill's `references/interactive.md` tells Claude how to write the first prompt, start the chain and report back when it ends.
+In a Claude Code chat, ask for a night shift ("run a night shift on the plan in docs/plan.md until it is done"). A night session's prompt opens with `Night shift (night-shift)`; that is how the skill knows it is inside one. The skill's `references/interactive.md` tells Claude how to write the first prompt, start the chain and report back when it ends.
 
 You can also drive the runner yourself:
 
@@ -43,7 +40,7 @@ node ~/.claude/skills/night-shift/scripts/night-chain.mjs stop   --repo <dir> [-
 node ~/.claude/skills/night-shift/scripts/night-chain.mjs reload --repo <dir>
 ```
 
-`start` also takes `--until HH:MM`, `--max-sessions <n>`, `--model <m>`, `--effort <level>`, `--fable-ceiling <share>`, `--fable-sessions <n>`, `--max-wait-hours <h>` (the longest wait for a usage limit or an outage, default 6; a value that is not a positive number stops `start`), `--state <dir>` (continue in an earlier run's folder) and `--window` (a visible console; closing it stops the chain). `start` without a prompt goes on from a session a limit or an error cut off, kept in `<state>/resume.json`.
+`start` also takes `--until HH:MM`, `--max-sessions <n>`, `--model <m>`, `--effort <level>`, `--fable-ceiling <share>`, `--fable-sessions <n>`, `--mode opus|fable`, `--lang en|tr`, `--max-wait-hours <h>` (the longest wait for a usage limit or an outage, default 6; a value that is not a positive number stops `start`), `--state <dir>` (continue in an earlier run's folder) and `--window` (a visible console; closing it stops the chain). `start` without a prompt goes on from a session a limit or an error cut off, kept in `<state>/resume.json`.
 
 While a chain runs, write new work or changed rules into `<state>/inbox.md`. The next session reads that file first.
 
@@ -56,6 +53,8 @@ Put a `.claude/night-shift.json` in the target repository. Every key is optional
   "stateDir": "C:/temp/my-app-night-{date}",
   "report": "docs/NIGHT_RUNS.md",
   "lessons": "docs/agents/NOTES.md",
+  "mode": "opus",
+  "lang": "en",
   "model": "opus",
   "effort": "xhigh",
   "fableCeiling": 0.6,
@@ -71,11 +70,48 @@ Put a `.claude/night-shift.json` in the target repository. Every key is optional
 - `stateDir`: the folder for the chain's log, prompts and inbox. The default is `<temp>/night-shift-<repo>-{date}`, inside your own profile. A folder under `C:/temp` is shorter to type, but on a PC with other accounts those users can write there too, and the next session reads `inbox.md` and `next-prompt.md` from this folder as instructions. On a shared PC keep the default. A drive root, a folder directly below one, your home folder, the repository, the temp folder itself, `.git` and `~/.claude` are refused.
 - `report`: the night report. The default is `NIGHT_RUNS.md`.
 - `lessons`: the notes file where sessions keep lessons that outlast one session.
-- `model`, `effort`: what a session runs on when its prompt names neither.
+- `mode`: `"opus"` (the default) or `"fable"` (see "Modes").
+- `lang`: `"en"` (the default) or `"tr"` (see "Language").
+- `model`, `effort`: what a session runs on when its prompt names neither. What `model` means depends on the mode (see "Modes").
 - `fableCeiling`, `fableSessions`: the share of Fable's weekly allowance above which a `MODEL: fable` prompt runs on Opus at `max` instead, and how many Fable sessions a chain may run while that share is unknown.
 - `maxWaitHours`: the longest the chain waits for a usage limit to reset or for an outage to pass (see "When a session fails"). The default is 6.
 - `mcp`: `"none"` (the default), `"inherit"` or a list of server names. A night run loads no MCP server and the guard refuses every `mcp__` tool, unless the project lists the server (`"mcp": ["my-server"]`) or sets `"inherit"`.
 - `deny`: your own guard rules. `pattern` is a regular expression and `flags` defaults to `i`.
+
+### Modes
+
+`mode` in the project file, or `--mode` on `start`, picks how the chain uses models.
+
+- **`opus`** (the default): every session runs on Opus at `xhigh`. A session whose prompt opens with `MODEL: fable` runs on Fable at `high`, for one hard piece, while the Fable gate allows it (see above).
+- **`fable`**: every session runs on Fable at `high`. While Fable's weekly share is at or over `fableCeiling` (default 0.6), or used up, sessions run on Opus at `xhigh` until the reset. The runner never picks `max` in this mode.
+
+What `model` means: in mode `opus` it is the main model, and any model that is not Fable passes. In mode `fable` a Fable id is the main model and an Opus id is the fallback. `--model fable` alone means mode `fable`; `--mode opus --model fable` is refused.
+
+The limit: Fable's share arrives only on Fable calls. If the CLI never reports it, fable mode uses Fable until its weekly allowance runs out, then Opus until the reset.
+
+### Your rules
+
+Write rules in plain text, in any language, in either file:
+
+- `~/.claude/night-shift/rules.md`: for every project.
+- `<repo>/.claude/night-shift-rules.md`: for one project. Its rules win over the global ones, and both win over the skill's defaults.
+
+Each file is at most 8 KB (UTF-8 bytes) and is read again at every session start, so an edit takes effect on the next session. `start` and `status` name the files in force. A file that grows too big or cannot be read mid-chain keeps its last text, and the log and Telegram say so; a file you empty or remove drops out. A project rule file is a file in the repository: commit it (or ignore it in git) before `start`, which refuses a working tree with uncommitted changes, an untracked file included (`--allow-dirty` exists).
+
+| A rule can change | A rule cannot change |
+|---|---|
+| The five tests a piece must pass | What the guard refuses: merges, branch deletes, history rewrites, force pushes |
+| How work is split into pieces | Deletes outside the repository and temp folders |
+| The stops the guard does not enforce: live desktop, physical tests, messages, work outside the roadmap | Publishing |
+| When a session asks for another model | |
+
+### Language
+
+`lang` (`"en"` by default, or `"tr"`; `--lang` on `start`) sets the language of what you read: the Telegram cards, the `/status` and `/report` answers, the `status` and `wait` output, dates and units. `/durum` and `/rapor` still work. Everything the model reads (prompts, headers, notes) stays English.
+
+### Global settings
+
+`~/.claude/night-shift/config.json` holds defaults for every project. It takes six keys: `mode`, `lang`, `effort`, `fableCeiling`, `fableSessions` and `maxWaitHours`. Any other key, bad JSON or a value of the wrong type stops `start` and names the file. A setting comes from the first of these that has it: the command-line flag, the project file `.claude/night-shift.json`, the global file, the default.
 
 ## The guard
 
