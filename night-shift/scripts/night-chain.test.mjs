@@ -173,8 +173,8 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
   assert.ok(fs.existsSync(mark), "the session's Node processes must load hide-windows.cjs");
   const seen = JSON.parse(fs.readFileSync(path.join(state, "seen.json"), "utf8"));
   assert.deepEqual(seen.args.slice(seen.args.indexOf("--resume"), seen.args.indexOf("--resume") + 2), ["--resume", "cb61ff92-x"]);
-  assert.match(seen.input, /^Oturum yarıda kesildi: runner durdu/);
-  assert.doesNotMatch(seen.input, /Kullanım limiti/);
+  assert.match(seen.input, /^The session was cut off: the runner stopped/);
+  assert.doesNotMatch(seen.input, /The usage limit has reset/);
   assert.equal(fs.existsSync(path.join(state, "resume.json")), false);
   const s = JSON.parse(fs.readFileSync(path.join(state, "night-settings.json"), "utf8"));
   assert.equal(s.env.CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS, "0");
@@ -214,15 +214,15 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
   assert.equal(flag(one, "--effort"), "max");
   assert.doesNotMatch(one.input, /^EFFORT:/m);
   assert.match(one.input, /\n---\nhard piece\n$/);
-  assert.match(one.input, /Sonnet "medium", önemli iş "high"/);
+  assert.match(one.input, /Sonnet "medium", work that matters "high"/);
   // Max is for that one piece: finished or blocked, the session takes no other work at max.
-  assert.match(one.input, /yalnız bu parça için/);
-  assert.match(one.input, /başka işe geçme/);
+  assert.match(one.input, /only for this piece/);
+  assert.match(one.input, /take no other work/);
   assert.equal(one.effortEnv, null);
   assert.equal(flag(two, "--model"), "opus");
   assert.equal(flag(two, "--effort"), null);
-  assert.doesNotMatch(two.input, /önemli iş "high"/);
-  assert.doesNotMatch(two.input, /başka işe geçme/);
+  assert.doesNotMatch(two.input, /work that matters "high"/);
+  assert.doesNotMatch(two.input, /take no other work/);
   assert.match(log, /session 01 starts: hard piece/);
   assert.match(log, /session 01 runs Opus at max/);
   const s = JSON.parse(fs.readFileSync(path.join(state, "night-settings.json"), "utf8"));
@@ -253,7 +253,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
   assert.equal(code, 0, log);
   const two = JSON.parse(fs.readFileSync(path.join(state, "seen-2.json"), "utf8"));
   assert.equal(two.args[two.args.indexOf("--effort") + 1], "max");
-  assert.match(two.input, /devam promptu yazmadan bitti/);
+  assert.match(two.input, /ended without writing a continuation prompt/);
   assert.match(two.input, /Neden: a race across two subsystems\.\nhard piece/);
   assert.doesNotMatch(two.input, /^EFFORT:/m);
   assert.match(log, /session 02 runs Opus at max/);
@@ -335,6 +335,30 @@ async function fableRun(first, script, runPatch = {}) {
   return { state, log, seen, flag, fable };
 }
 
+test("a session's header opens with the marker and names the user's language and the skill folder", async () => {
+  const { root, state, env } = setup();
+  const fake = path.join(root, "fake-marker.mjs");
+  fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path";
+const st = process.env.NIGHT_SHIFT_STATE; let input = "";
+for await (const c of process.stdin) input += c;
+fs.writeFileSync(path.join(st, "seen-1.json"), JSON.stringify({ input, skill: process.env.NIGHT_SHIFT_SKILL ?? null }));
+fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done");
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-1", result: "ok" }));
+`);
+  const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+  fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake, maxSessions: null }));
+  fs.writeFileSync(path.join(state, "next-prompt.md"), "hard piece");
+  const { code } = await runOnce(["--state", state, "--headless"], env, root);
+  assert.equal(code, 0, fs.readFileSync(path.join(state, "chain.log"), "utf8"));
+  const one = JSON.parse(fs.readFileSync(path.join(state, "seen-1.json"), "utf8"));
+  const skillDir = path.dirname(path.dirname(CHAIN));
+  assert.match(one.input, /^Night shift \(night-shift\), session 1, \d{4}-\d\d-\d\d /);
+  assert.match(one.input, /The user reads Turkish: /);
+  assert.ok(one.input.includes(`Skill folder: ${skillDir}.`));
+  assert.equal(one.skill, skillDir);
+  assert.ok(one.input.endsWith("\n---\nhard piece\n"));
+});
+
 test("a MODEL: fable prompt runs that session on Fable at high without the model fallback; the next one on Opus", async () => {
   const resets = Math.floor(Date.now() / 1000) + 3 * 86_400;
   const { log, seen, flag, fable } = await fableRun("MODEL: fable — the parser resisted Opus twice\nhard piece", {
@@ -347,10 +371,10 @@ test("a MODEL: fable prompt runs that session on Fable at high without the model
   assert.equal(one.noFallback, "1");
   assert.doesNotMatch(one.input, /^MODEL:/m);
   assert.match(one.input, /\n---\nthe parser resisted Opus twice\nhard piece\n$/);
-  assert.match(one.input, /Bu oturum Fable'da, yalnız bu parça için/);
+  assert.match(one.input, /This session runs on Fable, only for this piece/);
   assert.equal(flag(two, "--model"), "opus");
   assert.equal(two.noFallback, null);
-  assert.doesNotMatch(two.input, /Fable'da/);
+  assert.doesNotMatch(two.input, /runs on Fable/);
   assert.match(log, /session 01 starts: the parser resisted Opus twice\n/);
   assert.match(log, /session 01 runs Fable at high\n/);
   assert.match(log, /session 01 limits: 5h 40%→40% · 7d 30%→30% · fable 20%→20%; it ran on no model reply/);
@@ -368,8 +392,8 @@ test("a Fable session its allowance cuts off goes on from its prompt on Opus at 
   assert.equal(flag(two, "--model"), "opus");
   assert.equal(flag(two, "--effort"), "max");
   assert.equal(two.noFallback, null);
-  assert.match(two.input, /Önceki Fable oturumu \(01\) Fable payı bittiği için kesildi/);
-  assert.match(two.input, /git status ve git diff/);
+  assert.match(two.input, /The previous Fable session \(01\) was cut off/);
+  assert.match(two.input, /git status and git diff/);
   assert.match(two.input, /\n\nhard piece\n$/);
   assert.doesNotMatch(two.input, /^(MODEL|EFFORT):/m);
   assert.match(fs.readFileSync(path.join(state, "prompts", "02.md"), "utf8"), /^EFFORT: max\n/);
@@ -381,7 +405,7 @@ test("a Fable session its allowance cuts off goes on from its prompt on Opus at 
   // The next Fable request runs on Opus at max until the allowance resets.
   assert.equal(flag(three, "--model"), "opus");
   assert.equal(flag(three, "--effort"), "max");
-  assert.match(three.input, /İstem MODEL: fable istedi/);
+  assert.match(three.input, /The prompt asked for MODEL: fable/);
   assert.match(three.input, /\n---\nanother hard piece\n$/);
   assert.match(log, /session 03 asked for Fable, but its allowance is used up until \S+ \S+; it runs on Opus at max\n/);
   assert.match(log, /session 03 runs Opus at max\n/);
@@ -411,8 +435,8 @@ test("a retry keeps both MODEL and EFFORT; a resume goes on on the model it ran 
   assert.equal(retry.flag(two, "--model"), "fable");
   assert.equal(retry.flag(two, "--effort"), null);
   assert.equal(two.settings.fable.effortLevel, "xhigh");
-  assert.match(two.input, /devam promptu yazmadan bitti[^]*\n\nhard piece\n$/);
-  assert.match(fs.readFileSync(path.join(retry.state, "prompts", "02.md"), "utf8"), /^MODEL: fable\nEFFORT: xhigh\nÖnceki gece oturumu/);
+  assert.match(two.input, /ended without writing a continuation prompt[^]*\n\nhard piece\n$/);
+  assert.match(fs.readFileSync(path.join(retry.state, "prompts", "02.md"), "utf8"), /^MODEL: fable\nEFFORT: xhigh\nThe previous night session/);
   assert.match(retry.log, /session 02 runs Fable at xhigh\n/);
 
   const { state, env, root } = setup();
@@ -892,7 +916,7 @@ stop();
 `);
   assert.match(log, /session 01: transient error \(Overloaded\); try 1/);
   assert.match(log, /session 01 resumes fake-1 after the error/);
-  assert.match(fs.readFileSync(path.join(state, "stdin-2.txt"), "utf8"), /^Bağlantı ya da API hatası geçti \(gece vardiyası, /);
+  assert.match(fs.readFileSync(path.join(state, "stdin-2.txt"), "utf8"), /^A connection or API error has passed \(night shift, /);
   assert.deepEqual(calls, ["1 -", "1 fake-1"]);
   assert.match(log, /chain ends: STOP: done/);
 });

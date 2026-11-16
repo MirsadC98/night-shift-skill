@@ -49,13 +49,14 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { buildReport, userWaits, stateStrings } from "./night-report.mjs";
-import { strings, langOf } from "./lang/index.mjs";
+import { strings, langOf, LANG_NAMES } from "./lang/index.mjs";
 import { mergedConfig, LANGS, stateDirProblem, tempRoot } from "./config.mjs";
 import { sessionOutcome, windowSpan } from "./session-outcome.mjs";
 import { MAIN_MODEL, SUB_MODEL, MAIN_EFFORT, subEffortText, MAX_NOTE, FABLE_NOTE, nightModelSettings, sessionPlan,
   promptDirectives, directiveLines, fableGate, familyOf } from "./effort.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
+const SKILL_DIR = path.dirname(path.dirname(SELF)); // the folder that holds SKILL.md
 const GUARD = path.join(path.dirname(SELF), "guard.mjs");
 const REPORT = path.join(path.dirname(SELF), "night-report.mjs");
 const HIDE = path.join(path.dirname(SELF), "hide-windows.cjs");
@@ -489,8 +490,8 @@ async function runChain(opt) {
       log(`session ${nn}: Fable's allowance is used up (${result.apiError || result.limitType || "refused"}) until ${stamp(until)}${result.fableResetAt ? "" : " (a guess: the CLI gave no reset time)"}; limit record ${JSON.stringify(result.limitInfo)}`);
       fs.rmSync(resumeFile, { force: true });
       if (!wrote) {
-        fs.writeFileSync(next, `EFFORT: max\nÖnceki Fable oturumu (${nn}) Fable payı bittiği için kesildi; bu parça Opus max'te sürüyor. ` +
-          `Önce git status ve git diff'e bak: yarım kalan iş orada olabilir; bitmiş işi yeniden yapma.\n\n${plan.body}`);
+        fs.writeFileSync(next, `EFFORT: max\nThe previous Fable session (${nn}) was cut off because the Fable allowance ran out; this piece goes on at Opus max. ` +
+          `First look at git status and git diff: unfinished work may be there; do not redo finished work.\n\n${plan.body}`);
         log(`session ${nn}'s piece goes on in the next session on Opus at max`);
       }
       session++;
@@ -553,8 +554,8 @@ async function runChain(opt) {
       if (!retryHandover && ++failures >= 2) finish("two sessions in a row ended without writing next-prompt.md");
       // The retry does the same piece, so its MODEL and EFFORT lines stay the first lines.
       const d = promptDirectives(prompt);
-      fs.writeFileSync(next, `${directiveLines(d)}Önceki gece oturumu (${nn}) devam promptu yazmadan bitti (${result.summary}). ` +
-        `Durumu git log, projenin günlükleri ve gece raporundan çıkar; bitmiş işi yeniden yapma.\n\n${d.model || d.effort ? d.body : prompt}`);
+      fs.writeFileSync(next, `${directiveLines(d)}The previous night session (${nn}) ended without writing a continuation prompt (${result.summary}). ` +
+        `Work out the state from git log, the project's logs and the night report; do not redo finished work.\n\n${d.model || d.effort ? d.body : prompt}`);
       log(`session ${nn} left no continuation prompt; retrying with a recovery note`);
     } else {
       failures = 0;
@@ -573,18 +574,19 @@ function runSession(run, session, plan, nn, resume) {
   const { effort, body } = plan;
   const header = resumeId ? [
     ...(resume.why === "stopped" ? [
-      `Oturum yarıda kesildi: runner durdu (bilgisayar kapanmış ya da yeniden başlamış olabilir); gece vardiyası, ${now()}.`,
-      `Çalışan alt ajanlar ve araçlar öldü; yarım kalan dosyaları git status ve git diff ile incele, gerekirse o adımı baştan al.`,
-    ] : [resume.why === "error" ? `Bağlantı ya da API hatası geçti (gece vardiyası, ${now()}).` : `Kullanım limiti sıfırlandı (gece vardiyası, ${now()}).`]),
-    `Kaldığın yerden devam et: yarım kalan adımı git status ile kontrol et, bitmiş işi yeniden yapma. Oturumu night-shift skill'inin üç adımıyla bitir`,
+      `The session was cut off: the runner stopped (the computer may have shut down or restarted); night shift, ${now()}.`,
+      `Running subagents and tools died; inspect half-written files with git status and git diff and redo that step if needed.`,
+    ] : [resume.why === "error" ? `A connection or API error has passed (night shift, ${now()}).` : `The usage limit has reset (night shift, ${now()}).`]),
+    `Go on where you stopped: check the unfinished step with git status and do not redo finished work. End the session with the night-shift skill's three steps`,
     `(commit, gece raporu, ${path.join(run.state, "next-prompt.md")}).`,
   ].join("\n") : [
-    `Gece vardiyası (night-shift), oturum ${session}${run.maxSessions ? `/${run.maxSessions}` : ""}, ${now()}.`,
-    `Kullanıcı ${run.until ? `${run.until}'e kadar` : "zincir bitene kadar"} yok ve hiçbir soruya yanıt veremez.`,
-    `Önce night-shift skill'ini çağır ve "Inside a night session" bölümüne uy.`,
-    `Devam dosyası: ${path.join(run.state, "next-prompt.md")}. Gece raporu: ${run.report}.`,
+    `Night shift (night-shift), session ${session}${run.maxSessions ? `/${run.maxSessions}` : ""}, ${now()}.`,
+    `The user is away ${run.until ? `until ${run.until}` : "until the chain ends"} and cannot answer any question.`,
+    `First invoke the night-shift skill and follow its "Inside a night session" part.`,
+    `The user reads ${LANG_NAMES[langOf(run)]}: write the night report's own text and its Waits-for-you items in that language, and keep the report's fixed words as the skill gives them.`,
+    `Skill folder: ${SKILL_DIR}. Continuation file: ${path.join(run.state, "next-prompt.md")}. Night report: ${run.report}.`,
     ...(plan.family === "fable" ? [FABLE_NOTE] : []),
-    ...(plan.downgrade ? ["İstem MODEL: fable istedi, ama Fable'ın haftalık payı bu gece ona yetmiyor; bu parça Opus max'te çalışıyor."] : []),
+    ...(plan.downgrade ? ["The prompt asked for MODEL: fable, but Fable's weekly allowance does not cover it tonight; this piece runs on Opus at max."] : []),
     ...(effort === "max" ? [MAX_NOTE] : []),
     "",
     "---",
@@ -615,7 +617,7 @@ function runSession(run, session, plan, nn, resume) {
       // -p stops background agents 10 min after the main turn ends (run 2's #18 lost its work so);
       // the session timer above still bounds the session.
       // Every Node process of the session hides the windows of what it starts (hide-windows.cjs).
-      env: { ...withoutEffortEnv(process.env), PATH: run.path, NIGHT_SHIFT: "1", NIGHT_SHIFT_STATE: run.state, NIGHT_SHIFT_REPO: run.repo,
+      env: { ...withoutEffortEnv(process.env), PATH: run.path, NIGHT_SHIFT: "1", NIGHT_SHIFT_STATE: run.state, NIGHT_SHIFT_SKILL: SKILL_DIR, NIGHT_SHIFT_REPO: run.repo,
         NIGHT_SHIFT_SESSION: String(session), NIGHT_SHIFT_UNTIL: run.until || "", CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0",
         // A Fable session whose allowance runs out would go on, on another model, on its own; this
         // ends it instead (model_substitution_disabled), so the runner hands the piece to Opus at max.

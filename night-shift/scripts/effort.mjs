@@ -105,9 +105,9 @@ export function nightModelSettings(prev = {}, lower = [], main = MAIN_EFFORT) {
 // The header lines a max session gets. Max is for the one hard piece its prompt names (the user's
 // rule, 2026-11-11), and --effort max would run its subagents at max too.
 export const MAX_NOTE = [
-  "Bu oturum max eforda, yalnız bu parça için: istemin adını verdiği zor parça. O parça bitince ya da engellenince (masaüstü yok, bir girdi eksik) max'ta başka işe geçme: durumu kaydet, sonraki istemi yaz (başka iş EFFORT satırı olmadan; engellenen parça sürecekse yine EFFORT: max ile) ve bitir.",
-  `Alt ajanlar da max'a çıkmasın diye her Agent çağrısına effort ver (Sonnet "medium", önemli iş "high"; Haiku "high"; Opus inceleyici "xhigh") ve workflow başlatma.`,
+  "This session runs at max effort, only for this piece: the hard piece the prompt names. When that piece is finished or blocked (no desktop, an input is missing), take no other work at max: save the state, write the next prompt (other work without an EFFORT line; a blocked piece that will go on keeps EFFORT: max) and finish.",
+  `So that subagents do not run at max too, pass effort on every Agent call (Sonnet "medium", work that matters "high"; Haiku "high"; Opus reviewer "xhigh") and start no workflow.`,
 ].join("\n");
 // The same for a Fable session: Fable is for the hard piece its prompt names, and its allowance is
 // the user's for the day.
-export const FABLE_NOTE = "Bu oturum Fable'da, yalnız bu parça için: istemin adını verdiği zor parça. Fable'ın haftalık payı kullanıcının gündüz işinin; o parça bitince ya da engellenince Fable'da başka işe geçme: durumu kaydet, sonraki istemi yaz (başka iş MODEL satırı olmadan; engellenen parça sürecekse yine MODEL: fable ile) ve bitir.";
+export const FABLE_NOTE = "This session runs on Fable, only for this piece: the hard piece the prompt names. Fable's weekly allowance is the user's for daytime work; when that piece is finished or blocked, take no other work on Fable: save the state, write the next prompt (other work without a MODEL line; a blocked piece that will go on keeps MODEL: fable) and finish.";
