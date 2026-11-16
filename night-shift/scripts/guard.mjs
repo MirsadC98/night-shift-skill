@@ -757,6 +757,14 @@ export function decide(input, env = process.env, opts = {}) {
   if (["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(tool)) {
     return checkWrite(ti.file_path || ti.notebook_path, env);
   }
+  if (typeof tool === "string" && tool.startsWith("mcp__")) {
+    // A server the project did not name may do anything its tools do, outside every rule here.
+    const { config, errors } = env.NIGHT_SHIFT_REPO ? readProjectConfig(env.NIGHT_SHIFT_REPO) : { config: {}, errors: [] };
+    if (errors.length) return `.claude/night-shift.json is invalid (${errors[0]}); the user must fix it`;
+    const mode = config.mcp ?? "none", server = tool.slice(5, Math.max(5, tool.lastIndexOf("__")));
+    if (mode === "inherit" || (Array.isArray(mode) && mode.includes(server))) return null;
+    return `MCP tools are off in a night run (server "${server}"); the user allows one with "mcp": ["${server}"] in .claude/night-shift.json`;
+  }
   if (tool === "Bash" || tool === "PowerShell") {
     const raw = String(ti.command || "");
     const { rules, error } = projectRules(env);
@@ -774,7 +782,9 @@ function selfTest() {
   const env = { NIGHT_SHIFT_REPO: "C:/work/repo", NIGHT_SHIFT_STATE: "C:/temp/x-night", USERPROFILE: "C:\\Users\\u" };
   const bash = (command) => decide({ tool_name: "Bash", tool_input: { command } }, env);
   const write = (file_path) => decide({ tool_name: "Write", tool_input: { file_path } }, env);
+  const mcp = (tool_name) => decide({ tool_name, tool_input: {} }, env);
   const cases = [
+    [mcp("mcp__blender__execute_blender_code"), true],
     [bash("git push --force origin master"), true], [bash("git push -f"), true], [bash("git push origin :old"), true],
     [bash("git push origin master"), false], [bash("git push"), false],
     [bash("git reset --hard HEAD~1"), true], [bash("git reset HEAD file"), false],

@@ -250,6 +250,8 @@ function start(opt) {
     fableSessions: countArg(opt["fable-sessions"] ?? cfg.fableSessions, 2),
     // The longest a usage limit's reset may be away for the chain to wait for it; farther ends the chain.
     maxWaitHours: (() => { const n = Number(opt["max-wait-hours"] ?? cfg.maxWaitHours); return Number.isFinite(n) && n > 0 ? n : 6; })(),
+    // "none", "inherit" or the list of servers the guard lets through (the guard reads the same file).
+    mcp: cfg.mcp ?? "none",
     claude: findClaude(),
     report: cfg.report || "NIGHT_RUNS.md",
     path: sessionPath,
@@ -335,7 +337,7 @@ async function runChain(opt) {
     const prev = parseOr(read(settings), {});
     fs.writeFileSync(settings, JSON.stringify({
       ...prev,
-      hooks: { ...prev.hooks, PreToolUse: [{ matcher: "Bash|PowerShell|Write|Edit|MultiEdit|NotebookEdit",
+      hooks: { ...prev.hooks, PreToolUse: [{ matcher: "Bash|PowerShell|Write|Edit|MultiEdit|NotebookEdit|mcp__.*",
         hooks: [{ type: "command", command: NODE, args: [GUARD], timeout: 15, onFailure: "block" }] }] },
       // A session that set this to true would turn every hook, the guard's included, off.
       disableAllHooks: false,
@@ -576,6 +578,8 @@ function runSession(run, session, plan, nn, resume) {
     "--settings", path.join(run.state, "night-settings.json"),
     "--disallowedTools", "AskUserQuestion,EnterPlanMode,ExitPlanMode"];
   args.push("--model", plan.model);
+  // Without MCP no server starts at all; with "inherit" or a list the user's servers load and the guard decides per server.
+  if ((run.mcp ?? "none") === "none") args.push("--strict-mcp-config");
   if (effort === "max") args.push("--effort", "max");
   // Without --fork-session the conversation keeps its id, so the report still finds its transcript.
   if (resumeId) args.push("--resume", resumeId);

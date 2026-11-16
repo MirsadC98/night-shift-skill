@@ -261,6 +261,47 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
 });
 
 // ---------------------------------------------------------------- Fable
+test("the hook covers MCP tools, and a run without MCP starts its sessions without servers", async () => {
+  // One session per run mode; the stand-in writes its argv and ends the chain.
+  const argvOf = async (patch) => {
+    const { state, env, root } = setup();
+    const fake = path.join(root, "fake-mcp.mjs");
+    fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path";
+const st = process.env.NIGHT_SHIFT_STATE; for await (const c of process.stdin);
+fs.writeFileSync(path.join(st, "argv-1.json"), JSON.stringify(process.argv.slice(2)));
+fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done");
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-1", result: "ok" }));
+`);
+    const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+    fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake, maxSessions: null, ...patch }));
+    const { code } = await runOnce(["--state", state, "--headless"], env, root);
+    assert.equal(code, 0, fs.readFileSync(path.join(state, "chain.log"), "utf8"));
+    return { argv: JSON.parse(fs.readFileSync(path.join(state, "argv-1.json"), "utf8")),
+      settings: JSON.parse(fs.readFileSync(path.join(state, "night-settings.json"), "utf8")) };
+  };
+  const none = await argvOf({});
+  assert.equal(none.settings.hooks.PreToolUse[0].matcher, "Bash|PowerShell|Write|Edit|MultiEdit|NotebookEdit|mcp__.*");
+  assert.ok(none.argv.includes("--strict-mcp-config"), "no mcp in run.json means none");
+  assert.ok((await argvOf({ mcp: "none" })).argv.includes("--strict-mcp-config"));
+  // The user's servers load for these two; the guard refuses what the list does not name.
+  assert.ok(!(await argvOf({ mcp: "inherit" })).argv.includes("--strict-mcp-config"));
+  assert.ok(!(await argvOf({ mcp: ["plugin_x_y"] })).argv.includes("--strict-mcp-config"));
+});
+
+test("start copies the project's mcp setting into run.json", () => {
+  const modeOf = (cfg) => {
+    const c = pointerCase();
+    fs.mkdirSync(path.join(c.repo, ".claude"), { recursive: true });
+    fs.writeFileSync(path.join(c.repo, ".claude", "night-shift.json"), JSON.stringify(cfg));
+    // The launch is refused (NIGHT_SHIFT_LAUNCH=fail), but run.json is written before it.
+    c.run("start", ["--state", c.state, "--allow-dirty", "--prompt", "x"]);
+    return JSON.parse(fs.readFileSync(path.join(c.state, "run.json"), "utf8")).mcp;
+  };
+  assert.equal(modeOf({}), "none");
+  assert.equal(modeOf({ mcp: "inherit" }), "inherit");
+  assert.deepEqual(modeOf({ mcp: ["plugin_x_y"] }), ["plugin_x_y"]);
+});
+
 // A stand-in that notes what each session got (its flags, input, env and the settings layer) and
 // then does what the test's SCRIPT says for its session number: write a next prompt, send a limit
 // event, end refused.

@@ -195,6 +195,23 @@ test("a broken project config refuses shell commands with its reason, and does n
   assert.equal(bash("ls", ok), null);
 });
 
+test("an MCP tool is refused unless the project's config allows its server", () => {
+  const call = (tool, e) => decide({ tool_name: tool, tool_input: {} }, e);
+  const none = repoWithConfig({}), off = repoWithConfig({ mcp: "none" }), listed = repoWithConfig({ mcp: ["plugin_x_y"] }), inherit = repoWithConfig({ mcp: "inherit" });
+  assert.match(call("mcp__plugin_x_y__do_it", none), /MCP tools are off in a night run \(server "plugin_x_y"\); the user allows one with "mcp": \["plugin_x_y"\] in \.claude\/night-shift\.json/);
+  assert.ok(call("mcp__plugin_x_y__do_it", off));
+  assert.equal(call("mcp__plugin_x_y__do_it", listed), null);
+  assert.match(call("mcp__blender__execute_blender_code", listed), /server "blender"/);
+  assert.equal(call("mcp__blender__execute_blender_code", inherit), null);
+  // The server is what lies before the last "__"; a longer name that merely starts with a listed one is another server.
+  assert.ok(call("mcp__plugin_x_y_z__do_it", listed));
+  // Outside a project (no repo named) it is the same as "none".
+  assert.ok(call("mcp__blender__look", { ...env, NIGHT_SHIFT_REPO: "" }));
+  // A config that does not validate refuses, as it does for a shell command.
+  assert.match(call("mcp__plugin_x_y__do_it", repoWithConfig("{ not json")), /\.claude\/night-shift\.json is invalid/);
+  assert.match(call("mcp__plugin_x_y__do_it", repoWithConfig({ mcp: 3 })), /\.claude\/night-shift\.json is invalid/);
+});
+
 test("a state folder that is too wide adds nothing to what may be written", () => {
   const wide = { ...env, NIGHT_SHIFT_STATE: "C:/Users/u" };
   assert.ok(bash("rm -rf C:/Users/u/Documents", wide));
