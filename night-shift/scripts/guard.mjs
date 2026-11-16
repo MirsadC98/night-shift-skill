@@ -100,12 +100,12 @@ const GENERIC = [
 
 // PowerShell takes any prefix of -Recurse (-r, -rec) and has aliases for Remove-Item.
 const RECURSIVE_DELETE = /\brm\s+(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b|\b(Remove-Item|ri|rm|del|erase|rd|rmdir)\b[^\n]*\s-r(e(c(u(r(se?)?)?)?)?)?\b|\b(rmdir|rd)\s+\/s\b|\bdel\s+\/s\b|\brimraf\b/i;
-const DELETE_WORD = /^(?:.*[\\/])?(rm|del|erase|remove-item|ri|rd|rmdir|unlink|rimraf|find)(\.exe)?$/i;
+const DELETE_WORD = /^(?:.*[\\/])?(rm|del|erase|remove-item|ri|rd|rmdir|unlink|rimraf|shred|find)(\.exe)?$/i;
 const ANY_DELETE = /\b(rm|del|erase|Remove-Item|ri|rd|rmdir|unlink|rimraf|shred)\b|\s-delete\b/i;
 const CD_WORD = /^(cd|chdir|pushd|set-location|sl|push-location)$/i;
 const POP_WORD = /^(popd|pop-location)$/i;
 
-const SHELL = String.raw`(?:\S*[\\/])?(?:bash|sh|zsh|dash|pwsh|powershell|cmd)(?:\.exe)?`;
+const SHELL = String.raw`(?:\S*[\\/])?(?:bash|sh|zsh|dash|ksh|mksh|ash|fish|pwsh|powershell|cmd)(?:\.exe)?`;
 
 // Drops here-document bodies: text for cat, git commit -F, node and the like is data,
 // not commands (session 08's note "318 files / 3434 tests" read as `rm -rf /`).
@@ -157,10 +157,24 @@ function bodySpans(body) {
 //   lvl    how many ( are open, so that a cd inside ( ) can end at the )
 // An unquoted < or > starts a word of its own (`echo x>f` writes f); `2>f` and `>|f` stay one word.
 const unmark = (s) => s.replace(/\0/g, "$").replace(/\x01/g, "`");
-export function simpleCommands(text, ps = false) {
+// bash drops an unquoted backslash before an ordinary character (`r\m` is rm, `--for\ce` is --force). The pair
+// stays in the word as written, and the result is marked soft; with soft set the line is read the way bash
+// reads it. A word with a live $ keeps its pairs, and so does a Windows path (C:\temp\x), which sessions
+// write under Bash as well.
+const WINDOWS_WORD = /(^|[=:,])(?:[a-z]:\\|\\\\|\.{1,2}\\|~\\)/i;
+export function simpleCommands(text, ps = false, soft = false) {
   const cmds = [];
-  let words = [], bare = [], word = null, wb = false, q = null, run = "", lvl = 0;
-  const endWord = () => { if (word !== null) { words.push(word); bare.push(wb); } word = null; };
+  let words = [], bare = [], word = null, wb = false, q = null, run = "", lvl = 0, esc = [];
+  const endWord = () => {
+    if (word !== null) {
+      if (esc.length) {
+        cmds.soft = true;
+        if (soft && !/[$`]/.test(word) && !WINDOWS_WORD.test(word)) word = word.split("").filter((_, k) => !esc.includes(k)).join("");
+      }
+      words.push(word); bare.push(wb);
+    }
+    word = null; esc = [];
+  };
   const endCmd = () => {
     endWord();
     if (words.length) { cmds.push({ words, bare, sep: run.replace(/[()`\n]/g, "") || run, pre: run, lvl }); run = ""; }
@@ -180,7 +194,12 @@ export function simpleCommands(text, ps = false) {
     // bash: a backslash escapes the next character, so `\;` is a literal semicolon (`find -exec ... \; -delete`
     // is one command) and the second `\` of `\\;` leaves the `;` a separator. The pair stays in the word as
     // written ($ and ` keep their live meaning, which only makes the guard refuse more). PowerShell has no such escape.
-    if (!ps && c === "\\" && i + 1 < text.length) { if (word === null) wb = true; word = (word ?? "") + c + text[++i]; continue; }
+    if (!ps && c === "\\" && i + 1 < text.length) {
+      if (word === null) wb = true;
+      if (/[\w-]/.test(text[i + 1])) esc.push((word ?? "").length);
+      word = (word ?? "") + c + text[++i];
+      continue;
+    }
     if (/[;&|()`\n]/.test(c)) {
       endCmd(); run += c;
       if (c === "(") lvl++; else if (c === ")") lvl = Math.max(0, lvl - 1);
@@ -213,12 +232,16 @@ function expand(word, vars, env) {
 
 const ASSIGN = /^[A-Za-z_]\w*\+?=/;
 // What `$(mktemp -d)` makes lives under the temp root, unless an option or a template word could put
-// it elsewhere (-p DIR, --tmpdir, a template without -t is made in the current folder).
+// it elsewhere (-p DIR, --tmpdir, a template without -t is made in the current folder). A template that
+// is a full path (/tmp/build.XXXXXX) names the folder itself, wherever that is.
 const MKTEMP_FLAG = /^-[dqtu]+$|^--(directory|quiet|dry-run)$/;
 function mktempFolder(args) {
   const flags = args.filter((a) => /^-/.test(a)), names = args.filter((a) => !/^-/.test(a));
-  if (!flags.every((a) => MKTEMP_FLAG.test(a)) || !names.every((a) => /^[\w.]+$/.test(a))) return null;
-  return names.length && !flags.some((a) => /^-\w*t/.test(a)) ? null : `${norm(tempRoot())}/mktemp.XXXX`;
+  if (!flags.every((a) => MKTEMP_FLAG.test(a))) return null;
+  const t = flags.some((a) => /^-\w*t/.test(a));
+  if (names.length === 1 && !t && isAbsolute(names[0]) && /^[\w.:\\/-]+XXX$/.test(names[0])) return norm(names[0]);
+  if (!names.every((a) => /^[\w.]+$/.test(a))) return null;
+  return names.length && !t ? null : `${norm(tempRoot())}/mktemp.XXXX`;
 }
 const mktempValue = (v) => {
   const m = /^(?:\$\(|`)\s*mktemp((?:\s+[^\s()`]+)*)\s*(?:\)|`)$/.exec(v);
@@ -227,22 +250,25 @@ const mktempValue = (v) => {
 // The splitter cuts an unquoted `D=$(mktemp -d)` into `D=$` and `mktemp -d`. It is that substitution when
 // the next command is a mktemp opened right there and the one after it (if any) starts with the closing
 // mark and a separator: `)/x` or `)$(cat y)` would add to the folder, `) rm` would not even set D.
+// Returns the folder it makes, or null.
 function mktempAfter(cmds, i) {
   const [a, n, z] = [cmds[i], cmds[i + 1], cmds[i + 2]];
-  if (!n || n.words[0] !== "mktemp" || !/=\$?$/.test(a.words.at(-1))) return false;
+  if (!n || n.words[0] !== "mktemp" || !/=\$?$/.test(a.words.at(-1))) return null;
   const close = n.pre === "(" ? "\\)" : n.pre === "`" ? "`" : null;
-  return close !== null && (!z || new RegExp(`^${close}[;&|\\n)]`).test(z.pre)) && mktempFolder(n.words.slice(1)) !== null;
+  return close !== null && (!z || new RegExp(`^${close}[;&|\\n)]`).test(z.pre)) ? mktempFolder(n.words.slice(1)) : null;
 }
 
 // A command made only of assignments (`D=C:/temp/x`, `export D=...`) sets them for the
 // commands after it. A prefix assignment (`D=x rm -rf $D`) does not: bash expands the
-// arguments first. `D+=x` appends to what D held (unknown when D is not known).
+// arguments first. `D+=x` appends to what D held (unknown when D is not known). `declare -x D=...` sets it
+// as well: the options of export, declare and the like are passed over. tmp is the folder of the mktemp
+// that the splitter cut off the last assignment.
 function recordAssignments(words, vars, env, tmp) {
-  const rest = /^(export|declare|local|readonly|typeset)$/.test(words[0]) ? words.slice(1) : words;
+  const rest = /^(export|declare|local|readonly|typeset)$/.test(words[0]) ? words.slice(1).filter((w) => !/^[-+][A-Za-z]+$/.test(w)) : words;
   if (!rest.length || !rest.every((w) => ASSIGN.test(w))) return;
   rest.forEach((w, k) => {
     const [, name, plus, text] = /^([A-Za-z_]\w*)(\+?)=(.*)$/s.exec(w);
-    let v = mktempValue(text) ?? (tmp && k === rest.length - 1 && /^\$?$/.test(text) ? mktempFolder([]) : expand(text, vars, env));
+    let v = mktempValue(text) ?? (tmp && k === rest.length - 1 && /^\$?$/.test(text) ? tmp : expand(text, vars, env));
     if (plus) { const old = vars.has(name) ? vars.get(name) : env[name]; v = old == null || v == null ? null : old + v; }
     vars.set(name, v);
   });
@@ -283,6 +309,7 @@ export const PREFIX_WORDS = /^(sudo|command|exec|time|env|nohup|builtin|if|then|
 const LAUNCHERS = {
   timeout: [/^-[ks]$|^--(kill-after|signal)$/, 1], nice: [/^-n$|^--adjustment$/, 0], ionice: [/^-[cnpPu]$/, 0],
   setsid: [/^$/, 0], stdbuf: [/^-[ioe]$/, 0], watch: [/^-n$|^--interval$/, 0], start: [/^$/, 0, /^\//],
+  busybox: [/^$/, 0], wsl: [/^(-d|--distribution|-u|--user|--cd)$/, 0], doas: [/^-[Cu]$/, 0],
 };
 function nameIndex(words) {
   for (let i = 0; i < words.length; i++) {
@@ -307,7 +334,7 @@ function nameIndex(words) {
 const NESTED = "commands nested this deep cannot be read";
 // Commands that print or search text: the words they are given are data, not commands.
 const PRINTS = /^(grep|egrep|fgrep|rg|findstr|select-string|sls|echo|printf|write-output|write-host|cat|type|head|tail|jq|wc)$/;
-const SHELL_NAME = /^(bash|sh|zsh|dash|pwsh|powershell|cmd)$/;
+const SHELL_NAME = /^(bash|sh|zsh|dash|ksh|mksh|ash|fish|pwsh|powershell|cmd)$/;
 const base = (w) => w.replace(/^.*[\\/]/, "").replace(/\.exe$/i, "").toLowerCase();
 const txt = unmark;
 const isPipe = (sep) => /\|&?$/.test(sep) && !/\|\|$/.test(sep);
@@ -322,11 +349,14 @@ const scriptText = (s, vars, env) => expand(s, vars, env) ?? txt(s);
 function gitGlobals(args) {
   let i = 0;
   const keys = [], dirs = [];
+  // [key, value] of a -c: the value is true when none is given, and null for --config-env (it is in a variable).
+  const set = (w, known) => { const k = w.indexOf("="); keys.push([k < 0 ? w : w.slice(0, k), !known ? null : k < 0 ? "true" : w.slice(k + 1)]); };
   for (; i < args.length && args[i].startsWith("-"); i++) {
     const a = args[i];
     if (a === "-C") dirs.push(args[++i]);
-    else if (a === "-c" || a === "--config-env") keys.push((args[++i] ?? "").split("=")[0]);
-    else if (a.startsWith("--config-env=")) keys.push(a.slice(13).split("=")[0]);
+    else if (a === "-c") set(args[++i] ?? "", true);
+    else if (a === "--config-env") set(args[++i] ?? "", false);
+    else if (a.startsWith("--config-env=")) set(a.slice(13), false);
     else if (/^--(git-dir|work-tree|namespace|super-prefix|attr-source)$/.test(a)) i++;
   }
   return { sub: i, keys, dirs };
@@ -336,6 +366,11 @@ function gitGlobals(args) {
 const CONFIG_ALIAS = /^(alias|include|includeif)\./i;
 const CONFIG_RUNS = /^(core\.(fsmonitor|sshcommand|hookspath|editor|pager|askpass|gitproxy|alternaterefscommand)|sequence\.editor|credential\.(.+\.)?helper|diff\.external|diff\..+\.(textconv|command)|filter\..+\.(clean|smudge|process)|merge\..+\.driver|gpg\.(.+\.)?program|help\.autocorrect|pager\..+|uploadpack\.packobjectshook|remote\..+\.(uploadpack|receivepack)|(difftool|mergetool)\..+\.cmd|trailer\..+\.command|protocol\.(.+\.)?allow)$/i;
 const configReason = (key) => CONFIG_ALIAS.test(key) ? "git aliases are not read during a night run" : CONFIG_RUNS.test(key) ? "git settings that run commands are not changed during a night run" : null;
+// Of those, the keys whose value is a command line: given for one command with -c, the value is read as
+// the command it is (`-c core.pager=cat`), the way GIT_PAGER and GIT_EDITOR are.
+const CONFIG_COMMAND = /^(core\.(editor|pager|sshcommand)|sequence\.editor|pager\..+)$/i;
+// Sections whose keys make git run something: a section renamed into one of them brings its keys along.
+const CONFIG_SECTION = /^(alias|include|includeif|core|sequence|credential|diff|filter|merge|gpg|help|pager|uploadpack|remote|difftool|mergetool|trailer|protocol)(\.|$)/i;
 // Options stop at a bare `--`. A long option may be cut short as long as it stays unambiguous
 // (`--forc`, even `--f` for clean), so any prefix of the name counts; short ones may be clustered (-uf).
 const upToDashes = (a) => { const k = a.indexOf("--"); return k < 0 ? a : a.slice(0, k); };
@@ -347,7 +382,25 @@ const anyShort = (a, letters) => [...letters].some((l) => short(a, l));
 const wholeTree = (a) => a.some((w) => /^(\.\/?|:\/\.?|(\.\/|:\/)?\*)$/.test(w));
 const firstArg = (a) => a.find((w) => !w.startsWith("-"));
 // The remote's program (--upload-pack, --receive-pack, --exec; clone's -u is --upload-pack) runs as a command line.
-const transport = (a, shortToo) => (anyLong(a, "upload-pack", "receive-pack", "exec") || (shortToo && short(a, "u"))) && "git options that name a program to run are not used during a night run";
+// In a cluster the letters after one that takes a value (clone's -b name, -o name, -c key=value, -j n) are that value.
+const cloneU = (a) => upToDashes(a).some((w) => {
+  if (!/^-[A-Za-z]/.test(w)) return false;
+  for (const l of w.slice(1)) { if (l === "u") return true; if ("bocj".includes(l)) return false; }
+  return false;
+});
+const transport = (a, clone) => (anyLong(a, "upload-pack", "receive-pack", "exec") || (clone && cloneU(a))) && "git options that name a program to run are not used during a night run";
+// git config: reading a value changes nothing (--get, --list, get, or a key alone). A write is refused when it
+// goes to the user's own config, sets a key that makes git run something, or renames a section into one that does.
+function configRule(a) {
+  const pos = upToDashes(a).filter((w) => !w.startsWith("-"));
+  const writes = anyLong(a, "add", "unset", "unset-all", "replace-all", "rename-section", "remove-section", "edit") || short(a, "e");
+  const reads = anyLong(a, "get", "get-all", "get-regexp", "get-urlmatch", "get-color", "get-colorbool", "list") || short(a, "l") || /^(get|list)$/.test(pos[0] ?? "") || pos.length === 1;
+  if (reads && !writes) return null;
+  if (anyLong(a, "global", "system")) return "global git config is the user's";
+  const renames = long(a, "rename-section") || pos[0] === "rename-section";
+  if (renames && pos.some((w) => CONFIG_SECTION.test(w))) return "git settings that run commands are not changed during a night run";
+  return a.map((w, i) => i + 1 < a.length && configReason(w)).find(Boolean) || null;
+}
 const GIT_RULES = {
   push: (a) => transport(a) || ((anyLong(a, "force", "force-with-lease", "force-if-includes", "delete", "mirror", "prune") || anyShort(a, "fd") || a.some((w) => /^[+:]/.test(w))) && "force or deleting pushes rewrite shared history"),
   fetch: (a) => transport(a),
@@ -372,20 +425,30 @@ const GIT_RULES = {
   stash: (a) => /^(drop|clear)$/.test(a[0]) && "dropping stashes discards work",
   // `git remote -v add x url` works: the options come first.
   remote: (a) => /^(add|remove|rm|set-url|rename)$/.test(firstArg(a)) && "changing remotes needs the user",
-  config: (a) => (anyLong(a, "global", "system") && "global git config is the user's") || a.map((w, i) => i + 1 < a.length && configReason(w)).find(Boolean) || null,
+  config: configRule,
+  tag: (a) => (long(a, "delete") || short(a, "d")) && "deleting tags needs the user",
+  worktree: (a) => firstArg(a) === "remove" && (long(a, "force") || short(a, "f")) && "removing a worktree by force discards the work in it",
+  // --prune=<date> drops the unreachable objects younger than git's two weeks: the way back from a mistake.
+  gc: (a) => upToDashes(a).some((w) => { const m = /^--([a-z]+)=/.exec(w); return m && "prune".startsWith(m[1]); }) && "pruning objects by date discards the way back",
+  prune: () => "pruning objects discards the way back",
+  replay: () => "history rewrites need the user",
+  history: () => "history rewrites need the user",
 };
 // Git's own commands the guard has no rule for: an alias cannot replace them, so nothing is looked up.
 const GIT_PLAIN = new Set(`status add log diff show rev-parse ls-files describe blame grep tag mv rm init worktree cherry-pick revert apply
   bisect shortlog cat-file ls-tree rev-list for-each-ref show-ref symbolic-ref check-ignore merge-base name-rev submodule notes format-patch am gc help version`.split(/\s+/));
 // Variables that point git at other config or another repository, as prefix words or an earlier assignment.
-const GIT_ENV_VAR = /^(\$env:|set:)?(GIT_CONFIG_(COUNT|PARAMETERS|KEY_\d+|VALUE_\d+|GLOBAL|SYSTEM)|HOME|XDG_CONFIG_HOME|GIT_DIR|GIT_COMMON_DIR)(=|$)/i;
+// Outside Git Bash, git finds the user's config through USERPROFILE or HOMEDRIVE and HOMEPATH.
+const GIT_ENV_VAR = /^(\$env:|set:)?(GIT_CONFIG_(COUNT|PARAMETERS|KEY_\d+|VALUE_\d+|GLOBAL|SYSTEM)|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|XDG_CONFIG_HOME|GIT_DIR|GIT_COMMON_DIR)(=|$)/i;
 // The twins of the config keys that run a command: git takes these from the environment as a command line,
 // and these name a program outright (the exec path holds git's own helpers, GIT_SSH is run as the transport).
 const GIT_ENV_RUNS = /^(?:\$env:|set:)?GIT_(?:SSH_COMMAND|PAGER|EDITOR|ASKPASS|EXTERNAL_DIFF|PROXY_COMMAND)$/i;
 const GIT_ENV_PROG = /^(?:\$env:|set:)?GIT_(?:EXEC_PATH|SSH)$/i;
 // prefix: the words before git's name (`GIT_PAGER=x git log`); vars: what the command line set before it.
+// A prefix value is read as written where a variable in it is not known (`ssh -i $KEY`): the shell git
+// starts fills it in, and a command that is itself a variable is refused there.
 function gitEnvReason(prefix, vars, env, where, opts, depth) {
-  const given = prefix.map((w) => /^([A-Za-z_]\w*)\+?=(.*)$/s.exec(w)).filter(Boolean).map(([, k, v]) => [k, expand(v, vars, env)]);
+  const given = prefix.map((w) => /^([A-Za-z_]\w*)\+?=(.*)$/s.exec(w)).filter(Boolean).map(([, k, v]) => [k, scriptText(v, vars, env)]);
   for (const [k, v] of [...given, ...vars]) {
     if (GIT_ENV_PROG.test(k)) return "git is not pointed at another program during a night run";
     if (!GIT_ENV_RUNS.test(k)) continue;
@@ -396,10 +459,10 @@ function gitEnvReason(prefix, vars, env, where, opts, depth) {
   return null;
 }
 // git's words with the $NAMEs the walker knows filled in, so `F=--force; git push $F` is read as the push it is.
-// A word that is only a variable is as many words as its value has.
-const gitWords = (words, vars, env) => words.flatMap((w) => {
+// An unquoted word that is only a variable is as many words as its value has; a quoted one ("$M") stays one word.
+const gitWords = (words, vars, env, bare = []) => words.flatMap((w, i) => {
   const v = w.includes("$") ? expand(w, vars, env) : null;
-  return v === null ? [w] : /^\$\{?\w+\}?$/.test(w) ? v.split(/\s+/).filter(Boolean) : [v];
+  return v === null ? [w] : bare[i] !== false && /^\$\{?\w+\}?$/.test(w) ? v.split(/\s+/).filter(Boolean) : [v];
 });
 const quoteArg = (w) => `"${w.replace(/(["\\$`])/g, "\\$1")}"`;
 const configuredAlias = (name, cwd) => {
@@ -448,7 +511,13 @@ export function gitRule(args, ctx) {
   if (depth > 4) return NESTED;
   args = args.map(unmark);
   const { sub, keys, dirs } = gitGlobals(args);
-  for (const k of keys) { const why = configReason(k); if (why) return why; }
+  for (const [k, v] of keys) {
+    const why = configReason(k);
+    if (!why) continue;
+    if (v === null || !CONFIG_COMMAND.test(k)) return why;
+    const run = v.trim() ? checkCommand(v, env, { ...where }, { ...opts, vars: new Map(), ps: false }, depth + 1) : null;
+    if (run) return run;
+  }
   if (sub >= args.length) return null;
   const name = args[sub], a = args.slice(sub + 1), cmd = name.toLowerCase();
   if (Object.hasOwn(GIT_RULES, cmd)) return GIT_RULES[cmd](a) || null;
@@ -502,7 +571,7 @@ function checkEchoed(s, env, where, opts, depth) {
 
 // Redirections are files written or read, not arguments: `> f`, `>>f`, `2>f`, `< f`, `<<EOF`, `<<< text`.
 function splitRedirects(c) {
-  const args = [], writes = [], here = [];
+  const args = [], argBare = [], writes = [], here = [];
   let input = false;
   for (let i = 0; i < c.words.length; i++) {
     const w = c.words[i];
@@ -517,9 +586,9 @@ function splitRedirects(c) {
     } else if (c.bare[i] && (m = /^<<-?(.*)$/s.exec(w) || /^\d*<(.*)$/s.exec(w))) {
       input = true;
       if (!m[1]) i++;
-    } else args.push(w);
+    } else { args.push(w); argBare.push(c.bare[i]); }
   }
-  return { args, writes, here, input };
+  return { args, argBare, writes, here, input };
 }
 
 // What a shell is asked to run: { script } after -c, -Command or /c; { file } for a script file;
@@ -556,19 +625,82 @@ function shellArgs(sh, a) {
 
 // Paths a command writes (a redirection's target is handled apart). cp-like commands write their
 // destination, mv-like ones also take their sources away; a PowerShell -Path:x names its value.
-const WRITERS = /^(tee|cp|copy|copy-item|ln|mklink|mv|move|move-item|set-content|add-content|out-file)$/;
+const WRITE_ALL = /^(tee|mv|move|move-item|mi|truncate|touch)$/;
+const WRITE_LAST = /^(cp|copy|copy-item|cpi|ln|install|rsync|scp)$/;
+// PowerShell commands whose -Path, or else first word, is the file they write, make, empty or rename;
+// the words after it are content, a new name or a type.
+const WRITE_FIRST = /^(set-content|sc|add-content|ac|out-file|new-item|ni|clear-content|clc|rename-item|rni|ren)$/;
+// Options of these that take a value, which is no file they write.
+const WRITE_SKIP = { touch: /^(-[dtr]|--date|--reference)$/, truncate: /^(-[sr]|--size|--reference)$/, install: /^(-[mogS]|--mode|--owner|--group|--suffix)$/ };
+// sed and perl write the files they are given only with -i (sed -i.bak, perl -pi -e); the value of -e or -f,
+// or else the first word, is their script.
+const IN_PLACE = { sed: [/^(-[nErszu]*i|--in-place(=|$))/, /^(-[nrszuE]*[ef]|--expression|--file)$/], perl: [/^-[0acdlnpsStTuUwWxX]*i/, /^-[0-9A-Za-z]*[eE]$/] };
+const FILE_PARAM = (n) => PATH_PARAM(n) || (n.length > 1 && "filepath".startsWith(n.toLowerCase()));
 function writeTargets(nm, a) {
-  if (!WRITERS.test(nm)) return [];
+  if (nm === "dd") return a.map((w) => /^of=(.+)$/s.exec(w)?.[1]).filter(Boolean);
+  if (nm === "curl" || nm === "wget") {
+    const [opt, eq] = nm === "curl" ? [/^(-[A-Za-z#]*o|--output)$/, /^--output=(.+)$/s] : [/^(-[A-Za-z]*O|--output-document)$/, /^--output-document=(.+)$/s];
+    return a.flatMap((w, i) => (opt.test(w) ? [a[i + 1]] : [eq.exec(w)?.[1]])).filter((t) => t != null);
+  }
+  if (Object.hasOwn(IN_PLACE, nm)) {
+    const [inPlace, takes] = IN_PLACE[nm];
+    if (!a.some((w) => inPlace.test(w))) return [];
+    const files = [];
+    let script = false;
+    for (let i = 0; i < a.length; i++) {
+      if (takes.test(a[i])) { script = true; i++; }
+      else if (/^--(expression|file)=/.test(a[i])) script = true;
+      else if (a[i] && !/^-/.test(a[i])) files.push(a[i]);
+    }
+    return script ? files : files.slice(1);
+  }
+  // xcopy and robocopy: source, destination, then file names and /options.
+  if (nm === "xcopy" || nm === "robocopy") return a.filter((w) => !/^\/[A-Za-z]/.test(w) || /^\/[a-z]\//i.test(w)).slice(1, 2);
+  const first = WRITE_FIRST.test(nm);
+  if (!first && !WRITE_ALL.test(nm) && !WRITE_LAST.test(nm) && nm !== "mklink") return [];
   const pos = [], named = [];
+  let name = null;
   for (let i = 0; i < a.length; i++) {
-    const w = a[i], pv = /^--?[A-Za-z][\w-]*[:=](.+)$/s.exec(w);
-    if (pv) named.push(pv[1]);
+    const w = a[i];
+    if (first) {
+      const p = /^-([A-Za-z]+)(?:[:=](.+))?$/s.exec(w);
+      if (!p) pos.push(w);
+      else if (FILE_PARAM(p[1])) { const v = p[2] ?? a[++i]; if (v != null) named.push(v); }
+      else if (/^na/i.test(p[1]) && "name".startsWith(p[1].toLowerCase())) name = p[2] ?? a[++i] ?? null;
+      else if (p[2] == null && (valueParam(w) || /^-(it|ty|va|ne|en|inp)/i.test(w))) i++;
+      continue;
+    }
+    if (WRITE_SKIP[nm]?.test(w)) { i++; continue; }
+    const pv = /^--?[A-Za-z][\w-]*[:=](.+)$/s.exec(w);
+    if (pv) { if (!Object.hasOwn(WRITE_SKIP, nm)) named.push(pv[1]); }
     else if (/^(-t|--target-directory|-des\w*)$/i.test(w)) { if (a[i + 1] != null) named.push(a[++i]); }
     else if (!/^-/.test(w) && !/^\/[a-z]$/i.test(w)) pos.push(w);
   }
-  if (/^(cp|copy|copy-item|ln)$/.test(nm)) return [...named, ...pos.slice(-1)];
+  if (first) {
+    // New-Item -Path dir -Name file makes dir/file.
+    if (name != null && /^(new-item|ni)$/.test(nm)) return [`${named[0] ?? pos[0] ?? "."}/${name}`];
+    return named.length ? named : pos.slice(0, 1);
+  }
+  // host:path is on another machine.
+  if (nm === "rsync" || nm === "scp") return [...named, ...pos.slice(-1)].filter((t) => !/^[^\\/:]{2,}:/.test(t));
+  if (WRITE_LAST.test(nm)) return [...named, ...pos.slice(-1)];
   if (nm === "mklink") return pos.slice(0, 1);
   return [...named, ...pos];
+}
+// A move takes its sources away: every word but the last, or every word when the destination is named
+// (-t dir, -Destination dir); PowerShell's -Path names them outright.
+const MOVERS = /^(mv|move|move-item|mi)$/;
+function moveSources(a) {
+  const pos = [], named = [];
+  let dest = false;
+  for (let i = 0; i < a.length; i++) {
+    const w = a[i], p = /^-([A-Za-z]+)(?:[:=](.+))?$/s.exec(w);
+    if (/^--target-directory=/.test(w)) dest = true;
+    else if (/^(-t|--target-directory)$/.test(w) || (p && /^d/i.test(p[1]) && "destination".startsWith(p[1].toLowerCase()))) { dest = true; if (p?.[2] == null) i++; }
+    else if (p && p[1].length > 1 && PATH_PARAM(p[1])) { const v = p[2] ?? a[++i]; if (v != null) named.push(v); }
+    else if (!/^-/.test(w) && !/^\/[a-z]$/i.test(w)) pos.push(w);
+  }
+  return named.length ? named : dest ? pos : pos.slice(0, -1);
 }
 function writeDenial(t, env, where, vars, r) {
   const v = expand(t, vars, env);
@@ -583,11 +715,15 @@ function writeDenial(t, env, where, vars, r) {
   return prot ? `writing ${prot} is not allowed during a night run` : null;
 }
 
-// {a,b} lists, which the shell expands before the command runs (${x} is a variable, not a list).
+// {a,b} lists, which the shell expands before the command runs (${x} is a variable, not a list). Each
+// round opens one list in every word; a word that still holds a list after the last round is refused.
 const BRACE = /(?<!\$)\{([^{}]*,[^{}]*)\}/;
-const braces = (w, depth = 0) => {
-  const m = BRACE.exec(w);
-  return m && depth < 6 ? m[1].split(",").flatMap((a) => braces(w.slice(0, m.index) + a + w.slice(m.index + m[0].length), depth + 1)) : [w];
+const braces = (w) => {
+  let out = [w];
+  for (let round = 0; round < 6 && out.length <= 64 && out.some((x) => BRACE.test(x)); round++) {
+    out = out.flatMap((x) => { const m = BRACE.exec(x); return m ? m[1].split(",").map((a) => x.slice(0, m.index) + a + x.slice(m.index + m[0].length)) : [x]; });
+  }
+  return out;
 };
 // PowerShell parameters whose value is not a path. Names match case-insensitively by unique prefix, so at
 // least two letters (bash's `rm -r -f x` must keep x as a target).
@@ -596,6 +732,9 @@ const VALUE_ALIASES = /^(ea|wa|infa|ev|wv|iv|ov|ob|pv)$/;
 const valueParam = (t) => { const n = /^-([a-z]{2,})$/i.exec(t)?.[1].toLowerCase(); return Boolean(n) && (VALUE_ALIASES.test(n) || VALUE_PARAMS.some((p) => p.startsWith(n))); };
 const PATH_PARAM = (n) => { n = n.toLowerCase(); return "path".startsWith(n) || "literalpath".startsWith(n) || n === "pspath" || n === "lp"; };
 const XARGS_VALUE = /^(-[aEdILnPs]|--(arg-file|delimiter|max-lines|max-args|max-procs|max-chars|process-slot-var))$/;
+// git commands xargs may feed names to: those that only read, and those that take paths after a closing `--`.
+const XARGS_GIT_READS = /^(add|diff|log|show|blame|grep|ls-files|check-ignore|cat-file|rev-parse)$/;
+const XARGS_GIT_PATHS = /^(checkout|restore|reset|status|commit)$/;
 
 // The commands a find runs (-exec ... ; or +), one word list each.
 const FIND_EXEC = /^-(exec|execdir|ok|okdir)$/;
@@ -613,57 +752,198 @@ function execGroups(words) {
 // A find whose -exec deletes makes find a delete, so its paths are checked: the command itself, or
 // a shell or cmd it starts (bash -c 'rm "$0"'), whose script holds a delete word.
 const DELETING = /^(rm|unlink|del|erase|remove-item|ri|rd|rmdir|shred|rimraf)$/;
-const findExecDeletes = (words) => execGroups(words).some((g) => {
+const execDeletes = (g) => {
   const k = nameIndex(g);
   if (k < 0) return false;
   const cmd = base(g[k]);
   return DELETING.test(cmd) || (SHELL_NAME.test(cmd) && g.slice(k + 1).join(" ").split(/[\s;&|()`"'{}]+/).some((w) => DELETING.test(base(w))));
-});
-// find . -delete takes .git with it. A find from the repository (or its .claude folder) up is safe
-// only with a name, path or regex test that cannot match .git, or one that leaves .git out
-// (-not -path '*/.git/*', -path ./.git -prune).
+};
+const findExecDeletes = (words) => execGroups(words).some(execDeletes);
+// Names found inside .git and the project's .claude folder, in lower case. A name test that can match one
+// of them does not keep a find, or a PowerShell listing, out of those folders. Of branches only main and
+// master are known.
+const INSIDE = `.git .claude night-shift.json settings.json settings.local.json head orig_head fetch_head merge_head config description index
+  packed-refs commit_editmsg hooks info exclude objects pack refs heads tags remotes origin main master logs pre-commit.sample 0a
+  0123456789abcdef0123456789abcdef012345 pack-0123456789abcdef0123456789abcdef01234567.pack pack-0123456789abcdef0123456789abcdef01234567.idx
+  pack-0123456789abcdef0123456789abcdef01234567.rev`.split(/\s+/);
+const meetsInside = (pat) => INSIDE.some((n) => segMatch(pat, n));
+// A -path test keeps a find out of .git when it stays below one folder of the start path (./dist/*), or
+// needs a folder on the way that .git and .claude do not hold (*/node_modules/*). start: the start path's own folders.
+function pathNarrows(pat, start) {
+  if (/\.git|\.claude/.test(pat)) return false;
+  if (!/[\\/]/.test(pat)) return !meetsInside(pat);
+  const segs = pat.split(/[\\/]/).filter(Boolean);
+  if (segs[0] === "." && segs[1] && !GLOB.test(segs[1])) return true;
+  const fixed = segs.filter((s) => s !== "." && !GLOB.test(s) && !start.includes(s));
+  return fixed.length > 0 && !fixed.some((s) => INSIDE.includes(s));
+}
+// find . -delete takes .git with it. A find from the repository (or its .claude folder) up is safe only
+// when every delete in it (-delete, an -exec that deletes) stands behind a name, path or regex test that
+// cannot match inside .git, or behind one that leaves .git out (-not -path '*/.git/*', -path ./.git -prune).
+// The expression is read as find reads it: -o starts a new alternative with no test yet, ( ) groups.
 const NAME_TEST = /^-(i?name|i?lname|i?path|i?wholename|i?regex)$/;
-function findNarrowed(words) {
-  const w = words.map(unmark).map((x) => x.toLowerCase());
-  const prune = w.includes("-prune");
-  return w.some((x, k) => {
-    if (!NAME_TEST.test(x) || w[k + 1] == null) return false;
-    const pat = w[k + 1], isName = /name$/.test(x) && !/path|whole/.test(x);
-    const names = pat.includes(".git") || (isName ? segMatch(pat, ".git") : /^[*?./\\]*$/.test(pat));
-    if (/^(-not|!)$/.test(w[k - 1] ?? "")) return pat.includes(".git");
-    return pat.includes(".git") ? prune : !names;
-  });
+const FIND_END = /^(\\?;|\\|\+)$/;
+function findNarrowed(words, q = "") {
+  const w = words.map(unmark).map((x) => x.toLowerCase()), start = q.split("/");
+  let k = 0, acted = false, pruned = false, any = false;
+  const narrows = (test, pat, not) => {
+    const path = /path|whole/.test(test), regex = /regex/.test(test);
+    // A negated test narrows only when it leaves out what is inside .git: -not -name .git still walks into it.
+    if (not) return (path || regex) && pat.includes(".git") && /\*$/.test(pat);
+    if (regex) return !pat.includes(".git") && !/^[*?./\\]*$/.test(pat);
+    return path ? pathNarrows(pat, start) : !meetsInside(pat);
+  };
+  // One ( ) group, or the whole expression. given: a test before it already narrowed. Returns whether every
+  // delete in it stands behind a test, and whether every alternative of it narrows.
+  const group = (given) => {
+    let safe = true, all = true, alt = given || pruned, prunes = false, names = false, not = false;
+    const close = () => { all &&= alt; if (prunes && names) pruned = true; alt = given || pruned; prunes = names = false; };
+    for (; k < w.length && !/^\\?\)$/.test(w[k]); k++) {
+      const x = w[k];
+      if (/^(-o|-or|,)$/.test(x)) { close(); continue; }
+      if (/^(-not|\\?!)$/.test(x)) { not = true; continue; }
+      if (/^\\?\($/.test(x)) { k++; const [s, a] = group(alt); safe &&= s; if (a && !not) alt = true; }
+      else if (NAME_TEST.test(x) && w[k + 1] != null) {
+        const pat = w[++k];
+        if (!not && (pat.includes(".git") || segMatch(pat, ".git"))) names = true;
+        if (narrows(x, pat, not)) alt = any = true;
+      } else if (x === "-prune") prunes = true;
+      else if (x === "-delete") { acted = true; safe &&= alt; }
+      else if (FIND_EXEC.test(x)) {
+        let e = k + 1;
+        while (e < w.length && !FIND_END.test(w[e])) e++;
+        if (execDeletes(w.slice(k + 1, e))) { acted = true; safe &&= alt; }
+        k = e;
+      }
+      not = false;
+    }
+    close();
+    return [safe, all];
+  };
+  const [safe] = group(false);
+  return acted ? safe : any;
 }
 
 const wideFind = (q, r) => Boolean(r.repo) && (under(r.repo, q) || under(`${r.repo}/.claude`, q));
 const wideFindReason = (t) => `refusing a find delete from the repository or its .claude folder (${t}) without a name, path or regex test that leaves .git out: it would take .git with it`;
 
+// One target of a delete or a move, as the shell hands it over (variables filled in). o.recursive: it takes
+// a whole tree; o.noun: what the reason calls it ("move"); o.find: the target is a find's word ({ expr: its
+// tests have begun, narrowed(q): they keep it out of .git }).
+function targetReason(t, o, where, r) {
+  const { recursive = false, find = null } = o;
+  const noun = o.noun ?? (recursive ? "recursive delete" : "delete"), act = o.noun ?? "delete";
+  // ~name is that user's home folder.
+  if (/^~[\w.-]*([\\/]|$)/.test(t)) return `refusing a ${noun} in the home folder ("${t}")`;
+  // A .* can match .. and the dot folders (.git).
+  if (recursive && (/^(\.|\.\/|\*|\.\/\*|\/|\.git|\.git\/.*)$/.test(t) || /(^|[\\/])\.\.([\\/]|$)/.test(t) || /(^|[\\/])\.\*$/.test(t))) return `refusing a recursive delete of "${t}"`;
+  // A {a,b} list left after the rounds of braces() is any paths the shell makes of it.
+  if (BRACE.test(t)) return `refusing a ${noun} of "${t}"`;
+  const abs = isAbsolute(t);
+  if (!abs && where.lost) return o.noun ? null : `refusing a delete after a cd the guard cannot follow: it cannot tell which folder "${t}" is in`;
+  if (!abs && !where.at) return oddReason(norm(t), t);
+  const p = norm(abs ? t : `${where.at}/${t}`);
+  const odd = oddReason(p, t);
+  if (odd) return odd;
+  // dir/* empties dir: the folders and roots are compared as dir (the wildcard check below keeps p).
+  const q = p.replace(/\/\*$/, "");
+  if (r.repo && under(q, `${r.repo}/.git`)) return `refusing a ${act} inside .git (${t})`;
+  if ((recursive || o.noun) && r.repo && q === r.repo) return `refusing a ${noun} of the repository (${t})`;
+  const prot = protectedPath(q, r);
+  if (prot) return `refusing a ${act} of ${prot} (${t})`;
+  // The state folder itself, or a folder above it, takes the runner's files and the handover with it.
+  if (r.state && under(r.state, q)) return `refusing a ${act} of the run's state folder (${t})`;
+  if (!find?.expr && GLOB.test(p)) {
+    const hit = protectedTargets(r).find(([c]) => overlaps(p, c));
+    if (hit) return `refusing a ${act} of ${hit[1]} through a wildcard (${t})`;
+  }
+  if (find && !find.expr && wideFind(q, r) && !find.narrowed(q)) return wideFindReason(t);
+  // A find from a temp root itself empties the folder every program shares.
+  if (find && !find.expr && q !== r.repo && r.writable.includes(q) && !find.narrowed(q)) return `refusing a find delete from the temp folder itself (${t}) without a name, path or regex test`;
+  if (!r.writable.some((root) => under(q, root) && !(recursive && q === root))) return `${noun}s are limited to the repository and temp folders (got ${t})`;
+  return null;
+}
+
+// PowerShell hands a delete its targets through the pipeline: `gci x | Remove-Item`, `gci x | % { Remove-Item $_.FullName }`.
+// The listing at the head of the line says which they are: the paths it names, whether it goes down the tree,
+// and the name patterns it keeps. Any other head (a variable, Get-Content) is not known: null.
+const LISTER = /^(get-childitem|gci|ls|dir|get-item|gi|resolve-path|rvpa)$/;
+const PS_FILTER = /^(where-object|where|\?|sort-object|sort|select-object|select|get-unique|gu)$/;
+function listed(line, vars, env) {
+  const head = line[0]?.words ?? [], k = nameIndex(head);
+  if (k < 0 || !LISTER.test(base(head[k])) || !line.slice(1).every((c) => PS_FILTER.test(base(c.words[0] ?? "")))) return null;
+  // `a, b` and `a,b` are one list.
+  const a = [];
+  for (const w of head.slice(k + 1)) { if (a.length && (/,$/.test(a.at(-1)) || /^,/.test(w))) a[a.length - 1] += w; else a.push(w); }
+  const paths = [], pats = [], items = (v) => String(v ?? "").split(",").filter(Boolean);
+  let recurse = false, pos = 0;
+  for (let i = 0; i < a.length; i++) {
+    const m = /^-([A-Za-z]+)(?:[:=](.*))?$/s.exec(a[i]);
+    if (!m) { (pos++ === 0 ? paths : pats).push(...items(a[i])); continue; }
+    const n = m[1].toLowerCase(), value = () => m[2] ?? a[++i];
+    if (PATH_PARAM(n)) paths.push(...items(value()));
+    else if ((n.length > 3 && "filter".startsWith(n)) || (n.length > 2 && "include".startsWith(n))) pats.push(...items(value()));
+    else if ("recurse".startsWith(n) || n === "s") recurse = true;
+    else if (n.length > 1 && "depth".startsWith(n)) { recurse = true; if (m[2] == null) i++; }
+    else if (m[2] == null && (valueParam(a[i]) || (n.length > 1 && "attributes".startsWith(n)))) i++;
+  }
+  const real = (paths.length ? paths : ["."]).map((p) => expand(p, vars, env));
+  if (real.includes(null)) return null;
+  return {
+    paths: real, pats: pats.map(unmark), recurse,
+    where: line.slice(1).some((c) => /^(where-object|where|\?)$/.test(base(c.words[0]))),
+    item: /^(get-item|gi|resolve-path|rvpa)$/.test(base(head[k])),
+  };
+}
+// The delete at the end of such a line, judged by what the listing can hand it. A Where-Object is a test the
+// guard does not read: it counts as narrowing, like a -Filter that cannot match inside .git.
+function listedReason(src, recursive, where, r) {
+  const narrowed = src.where || (src.pats.length > 0 && src.pats.every((p) => !/[$`]/.test(p) && !meetsInside(p.toLowerCase())));
+  for (const p of src.paths) {
+    let targets = [p], rec = recursive;
+    if (src.item) targets = [p];
+    else if (src.recurse && !narrowed) {
+      // Everything below the path, like `find path -delete`.
+      const q = isAbsolute(p) ? norm(p) : where.at && !where.lost ? norm(`${where.at}/${p}`) : null;
+      if (q && wideFind(q, r)) return `refusing a delete of everything listed below the repository or its .claude folder (${p}) without a -Filter or -Include that leaves .git out: it would take .git with it`;
+      rec = true;
+    } else if (src.pats.length) { targets = src.pats.map((x) => `${p}/${x}`); if (src.recurse) rec = false; }
+    else if (src.where || src.recurse) rec = false;
+    else targets = [`${p}/*`];
+    for (const t of targets) { const why = targetReason(t, { recursive: rec }, where, r); if (why) return why; }
+  }
+  return null;
+}
+
 // Deletes: a recursive one anywhere in a simple command, and a plain one (rm, del, Remove-Item,
 // unlink, find -delete) where it is the command. where.at is the folder the command stands in
 // (the hook's cwd, moved by each cd before it), so a relative target is read from where the delete
 // stands (`cd /c/Users/u && rm -rf Documents` passed until 2026-11-15).
-function checkDelete(words, ni, env, where, vars, r) {
+function checkDelete(words, ni, env, where, vars, r, line) {
   const text = words.join(" ");
   if (!RECURSIVE_DELETE.test(text) && !ANY_DELETE.test(text)) return null;
   const name = words[ni];
-  const recursive = RECURSIVE_DELETE.test(text);
-  const plain = !recursive && DELETE_WORD.test(name) && (!/find(\.exe)?$/i.test(name) || words.includes("-delete") || findExecDeletes(words));
-  if (!recursive && !plain) return null;
-  const kind = recursive ? "recursive deletes" : "deletes";
   // find's own tests (-name "*.tmp") follow its first -option: patterns, not targets.
   const isFind = /find(\.exe)?$/i.test(name);
+  // What a find -exec runs is read as a command of its own: its `rm -rf {}` takes what the find matched,
+  // so the find's start paths are held to its tests and not counted as trees deleted whole.
+  const cut = isFind ? words.findIndex((w) => FIND_EXEC.test(w)) : -1;
+  const recursive = RECURSIVE_DELETE.test(cut < 0 ? text : words.slice(0, cut).join(" "));
+  const plain = !recursive && DELETE_WORD.test(name) && (!isFind || words.includes("-delete") || findExecDeletes(words));
+  if (!recursive && !plain) return null;
+  const find = () => ({ expr, narrowed: (q) => findNarrowed(words, q) });
   let expr = false, dNext = false, seen = 0, skip = false, starts = 0, prev = "";
-  // Its targets come after the delete's own word. A plain delete's {a,b} is expanded here, one target
-  // for each alternative; a recursive one with a list is refused below.
+  // Its targets come after the delete's own word, a {a,b} list as the paths it stands for.
   const list = words.slice(words.findIndex((w) => DELETE_WORD.test(w)) + 1);
-  for (let raw of recursive ? list : list.flatMap((w) => braces(w))) {
-    // What a find -exec runs is read as a command of its own; its words are not find's targets.
-    if (isFind && /^-(exec|execdir|ok|okdir)$/.test(raw)) break;
+  for (let raw of list.flatMap((w) => braces(w))) {
+    if (isFind && FIND_EXEC.test(raw)) break;
     const before = prev;
     prev = raw;
-    // PowerShell's -Path:x and -LiteralPath=x name their target in the same word.
+    // PowerShell's -Path:x and -LiteralPath=x name their target in the same word; any other -Name:value
+    // (-Confirm:$false) is a switch with its value, no target.
     const pv = /^-(\w+)[:=](.+)$/s.exec(raw);
-    if (pv && PATH_PARAM(pv[1])) raw = pv[2];
+    if (pv && !PATH_PARAM(pv[1])) continue;
+    if (pv) raw = pv[2];
     const t = expand(raw, vars, env);
     if (t === null) {
       // `for f in *.tmp; do rm "$f"; done` is everyday work; a tree deleted through an unknown path is not.
@@ -674,8 +954,10 @@ function checkDelete(words, ni, env, where, vars, r) {
       // find's leading options (-H -L -P -Olevel -D opts) come before its paths: the paths are still targets.
       if (dNext) { dNext = false; continue; }
       if (t === "-D") dNext = true;
-      else if (!/^-([HLP]|O\d*|D\S+)$/.test(t) && /^[-(!]/.test(t)) expr = true;
+      else if (!/^-([HLP]|O\d*|D\S+)$/.test(t) && /^([-(!]|\\[(!])/.test(t)) expr = true;
     }
+    // find's own ( ) and ! are no paths, written bare or with the backslash bash needs.
+    if (isFind && expr && /^\\?[()!]$/.test(t)) continue;
     if (/^-/.test(t) || /^\/[sqfa]$/i.test(t) || /^(\/dev\/null|nul)$/i.test(t)) { skip = valueParam(t); continue; }
     // The pattern of a name, path or regex test is no target (-not -path './.git/*').
     if (isFind && expr && NAME_TEST.test(before)) continue;
@@ -683,42 +965,25 @@ function checkDelete(words, ni, env, where, vars, r) {
     if (!skip) seen++;
     skip = false;
     if (isFind && !expr) starts++;
-    if (/^~([\\/]|$)/.test(t)) return `refusing a ${recursive ? "recursive delete" : "delete"} in the home folder ("${t}")`;
-    // A .* can match .. and the dot folders (.git), a {a,b} list is any paths the shell makes of it.
-    if (recursive && (/^(\.|\.\/|\*|\.\/\*|\/|\.git|\.git\/.*)$/.test(t) || /(^|[\\/])\.\.([\\/]|$)/.test(t) || /(^|[\\/])\.\*$/.test(t))) return `refusing a recursive delete of "${t}"`;
-    if (BRACE.test(t)) return `refusing a ${recursive ? "recursive delete" : "delete"} of "${t}"`;
-    const abs = isAbsolute(t);
-    if (!abs && where.lost) return `refusing a delete after a cd the guard cannot follow: it cannot tell which folder "${t}" is in`;
-    if (!abs && !where.at) { const odd = oddReason(norm(t), t); if (odd) return odd; continue; }
-    const p = norm(abs ? t : `${where.at}/${t}`);
-    const odd = oddReason(p, t);
-    if (odd) return odd;
-    // dir/* empties dir: the folders and roots are compared as dir (the wildcard check below keeps p).
-    const q = p.replace(/\/\*$/, "");
-    if (r.repo && under(q, `${r.repo}/.git`)) return `refusing a delete inside .git (${t})`;
-    if (recursive && r.repo && q === r.repo) return `refusing a recursive delete of the repository (${t})`;
-    const prot = protectedPath(q, r);
-    if (prot) return `refusing a delete of ${prot} (${t})`;
-    // The state folder itself, or a folder above it, takes the runner's files and the handover with it.
-    if (r.state && under(r.state, q)) return `refusing a delete of the run's state folder (${t})`;
-    if (!(isFind && expr) && GLOB.test(p)) {
-      const hit = protectedTargets(r).find(([c]) => overlaps(p, c));
-      if (hit) return `refusing a delete of ${hit[1]} through a wildcard (${t})`;
-    }
-    if (isFind && !expr && wideFind(q, r) && !findNarrowed(words)) return wideFindReason(t);
-    if (!r.writable.some((root) => under(q, root) && !(recursive && q === root))) return `${kind} are limited to the repository and temp folders (got ${t})`;
+    const why = targetReason(t, { recursive, find: isFind ? find() : null }, where, r);
+    if (why) return why;
   }
   // find's start path defaults to the folder it stands in.
-  if (isFind && !starts && where.at && !where.lost && wideFind(where.at, r) && !findNarrowed(words)) return wideFindReason(".");
-  // `gci x | ri -Recurse` and a backtick substitution take their targets from where the command does not show them.
-  if (recursive && !isFind && !seen) return "refusing a recursive delete whose target the guard cannot see";
+  if (isFind && !starts) return targetReason(".", { recursive, find: { expr: false, narrowed: find().narrowed } }, where, r);
+  if (!isFind && !seen) {
+    // `gci x | ri -Recurse` takes its targets from the listing before it; a backtick substitution, or a
+    // variable at the head of the line, from where the command does not show them.
+    const src = line ? listed(line, vars, env) : null;
+    if (src) return listedReason(src, recursive, where, r);
+    if (recursive) return "refusing a recursive delete whose target the guard cannot see";
+  }
   return null;
 }
 
 // Every Bash/PowerShell rule for one simple command. A wrapper (bash -c, powershell -c, cmd /c,
 // eval, find -exec) hands its inner command to checkCommand again, so the rules read what is run
 // and not the wrapper's words.
-function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r, tmp) {
+function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r, tmp, line) {
   const { vars } = opts;
   // The splitter cannot see "$(...)" inside quotes; each one is a command of its own.
   for (const w of c.words) for (const body of substitutions(w)) {
@@ -734,7 +999,7 @@ function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r, tmp) {
     const set = /^set$/i.test(c.words[0]), w0 = c.words[0];
     vars.set(`${set ? "set:" : "$env:"}${pe[1]}`, set ? c.words.slice(1).join(" ").replace(/^\w+=/, "") : w0.includes("=") ? w0.replace(/^[^=]*=/, "") : c.words[1] === "=" ? c.words.slice(2).join(" ") : "");
   }
-  const { args, writes, here, input } = splitRedirects(c);
+  const { args, argBare, writes, here, input } = splitRedirects(c);
   for (const t of writes) { const why = writeDenial(t, env, where, vars, r); if (why) return why; }
   let ni = nameIndex(args);
   if (ni < 0) return null;
@@ -744,11 +1009,13 @@ function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r, tmp) {
     const v = expand(args[ni], vars, env);
     if (v === null) { if (base(args[ni]).includes("$")) return "a command named by a variable cannot be read"; }
     else {
-      args.splice(ni, 1, ...v.split(/\s+/).filter(Boolean));
+      const parts = v.split(/\s+/).filter(Boolean);
+      args.splice(ni, 1, ...parts);
+      argBare.splice(ni, 1, ...parts.map(() => true));
       if (ni >= args.length) return null;
     }
   }
-  const nm = base(args[ni]), rest = args.slice(ni + 1);
+  const nm = base(args[ni]), rest = args.slice(ni + 1), restBare = argBare.slice(ni + 1);
   if (POP_WORD.test(nm)) { where.lost = true; return null; }
   if (CD_WORD.test(nm)) {
     const arg = rest.find((w) => !/^-/.test(w) && !/^\/d$/i.test(w));
@@ -774,6 +1041,13 @@ function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r, tmp) {
       if (fed) return "a shell fed through a pipe cannot be read";
     }
   }
+  // su and runuser hand their -c word to the user's shell.
+  if (/^(su|runuser)$/.test(nm)) {
+    const k = rest.findIndex((w) => /^(-c|--command|--session-command)$/.test(w));
+    const sc = k >= 0 ? rest[k + 1] : rest.map((w) => /^--(?:session-)?command=(.*)$/s.exec(w)?.[1]).find((v) => v != null);
+    const why = sc == null ? null : checkCommand(scriptText(sc, vars, env), env, { ...where }, { ...opts, vars: new Map(), ps: false }, depth + 1);
+    if (why) return why;
+  }
   // eval runs its words in this shell, so what it cd's and sets carries on.
   if (/^(eval|iex|invoke-expression)$/.test(nm)) {
     const script = rest.join(" ").trim();
@@ -798,7 +1072,14 @@ function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r, tmp) {
     if (rest[j] === "--") j++;
     const k = nameIndex(rest.slice(j));
     const cmd = k < 0 ? "" : rest[j + k];
-    if (cmd && (DELETE_WORD.test(cmd) || /^(git|xargs)$/.test(base(cmd)) || SHELL_NAME.test(base(cmd)))) return "xargs builds a command the guard cannot read";
+    if (cmd && base(cmd) === "git") {
+      // xargs puts the names it reads after the words it is given. That is fine for a git command that only
+      // reads, and for one that takes them as paths after a closing `--`; with -I they go anywhere.
+      const gw = rest.slice(j + k + 1), sub = gw[gitGlobals(gw).sub] ?? "";
+      const anywhere = rest.slice(0, j).some((w) => /^(-[iI]|--replace)/.test(w));
+      const fits = XARGS_GIT_READS.test(sub) || (!anywhere && gw.at(-1) === "--" && XARGS_GIT_PATHS.test(sub));
+      if (k > 0 || !fits || gitRule(gitWords(gw, vars, env), { env, where, opts, depth })) return "xargs builds a command the guard cannot read";
+    } else if (cmd && (DELETE_WORD.test(cmd) || base(cmd) === "xargs" || SHELL_NAME.test(base(cmd)))) return "xargs builds a command the guard cannot read";
   }
   // Git reads GIT_CONFIG_* the way it reads -c: a variable can define an alias too. `git-push` and the
   // like are the same commands under their dashed names.
@@ -806,7 +1087,7 @@ function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r, tmp) {
     if (args.slice(0, ni).some((w) => GIT_ENV_VAR.test(w)) || [...vars.keys()].some((k) => GIT_ENV_VAR.test(k))) return "git is not pointed at other config or another repository during a night run";
     const env2 = gitEnvReason(args.slice(0, ni), vars, env, where, opts, depth);
     if (env2) return env2;
-    const why = gitRule(gitWords(nm === "git" ? rest : [nm.slice(4), ...rest], vars, env), { env, where, opts, depth });
+    const why = gitRule(gitWords(nm === "git" ? rest : [nm.slice(4), ...rest], vars, env, nm === "git" ? restBare : [true, ...restBare]), { env, where, opts, depth });
     if (why) return why;
   }
   if (nm !== "git" && !PRINTS.test(nm)) {
@@ -814,21 +1095,36 @@ function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r, tmp) {
     for (const [re, reason] of GENERIC) if (re.test(joined)) return reason;
   }
   for (const t of writeTargets(nm, rest)) { const why = writeDenial(t, env, where, vars, r); if (why) return why; }
+  if (MOVERS.test(nm)) {
+    // A source that is a variable is not known until the shell fills it in (`mv "$f" "$f.bak"` in a loop).
+    for (const s of moveSources(rest).flatMap((w) => braces(w))) {
+      const t = expand(s, vars, env);
+      const why = t === null ? null : targetReason(t, { noun: "move" }, where, r);
+      if (why) return why;
+    }
+  }
   if (PRINTS.test(nm)) return null;
   // A launcher the walker does not read (wsl, ssh, docker exec, call, flock, a PowerShell block):
   // wherever a word is git, the words after it are git's.
   if (nm !== "git" && !nm.startsWith("git-")) {
     for (let k = ni + 1; k < args.length; k++) {
       if (base(args[k]) !== "git") continue;
-      const why = gitRule(gitWords(args.slice(k + 1), vars, env), { env, where, opts, depth });
+      if (args.slice(ni + 1, k).some((w) => w.includes("=") && GIT_ENV_VAR.test(w))) return "git is not pointed at other config or another repository during a night run";
+      const why = gitRule(gitWords(args.slice(k + 1), vars, env, argBare.slice(k + 1)), { env, where, opts, depth });
       if (why) return why;
     }
+  }
+  // `gci x | % { Remove-Item $_.FullName }`: the block deletes what the listing hands it.
+  if (line?.length && /^(%|foreach|foreach-object)$/.test(nm) && rest.some((w) => DELETING.test(base(w)) || /^\$(_|psitem)\.delete$/i.test(w))) {
+    const src = listed(line, vars, env);
+    const why = src && listedReason(src, RECURSIVE_DELETE.test(args.join(" ")), where, r);
+    if (why) return why;
   }
   // Of git only `git rm` deletes; a commit message that mentions `rm -rf` is text.
   if (nm === "git") {
     if (rest[gitGlobals(rest).sub] !== "rm") return null;
   }
-  return checkDelete(args, ni, env, where, vars, r);
+  return checkDelete(args, ni, env, where, vars, r, line);
 }
 
 // where is put back to a copy of it (keys a later cd added are dropped too).
@@ -837,11 +1133,23 @@ const setWhere = (where, to) => { for (const k of Object.keys(where)) delete whe
 // a cd there does not move the commands after it. PowerShell's & is the call operator and its pipeline shares the session.
 const background = (sep) => /(^|[^&|])&$/.test(sep);
 const continues = (sep) => /(&&|\|\|)$/.test(sep) || isPipe(sep);
+// A { } group, an if, a loop or a case is one command for the & or the pipeline around it. How many of them a
+// simple command opens: the keywords before its own name (`else if x`, `then {`).
+const GROUP_OPEN = /^(\{|if|while|until|for|case|select)$/, GROUP_CLOSE = /^(\}|fi|done|esac)$/;
+function opens(c) {
+  let n = 0;
+  for (let k = 0; k < c.words.length && c.bare[k]; k++) {
+    if (GROUP_OPEN.test(c.words[k])) { n++; if (/^(for|case|select)$/.test(c.words[k])) break; }
+    else if (!/^(then|else|elif|do|!|time)$/.test(c.words[k])) break;
+  }
+  return n;
+}
 
 function walk(cmds, env, where, opts, depth) {
   if (depth > 4) return NESTED;
-  const r = roots(env), saved = [];
-  let lvl = 0, sawPipe = false, prev = null, listStart = { ...where };
+  const r = roots(env), saved = [], groups = [];
+  // line: the commands of the pipeline so far (PowerShell hands a delete its targets through it).
+  let lvl = 0, sawPipe = false, prev = null, listStart = { ...where }, line = [];
   for (const [i, c] of cmds.entries()) {
     // A cd inside ( ) lasts until the ), so the folder it left is put back there.
     while (lvl < c.lvl) { saved.push({ ...where }); lvl++; }
@@ -850,14 +1158,25 @@ function walk(cmds, env, where, opts, depth) {
     if (!opts.ps && background(c.sep)) setWhere(where, listStart);
     if (!continues(c.sep)) listStart = { ...where };
     const pipe = isPipe(c.sep);
+    if (!pipe) line = [];
     // The splitter cuts `(Get-Item x).Delete($true)` at its (: a .Delete method given $true removes a folder and what it holds.
     const nx = cmds[i + 1];
     if (/\.Delete$/i.test(c.words.at(-1)) && !PRINTS.test(base(c.words[0])) && nx?.pre === "(" && /^\$true$/i.test(nx.words[0])) return "deletes through .NET cannot be checked";
     const before = { ...where };
-    const why = readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r, mktempAfter(cmds, i));
+    // What a group cd's lasts for the commands inside it, whatever feeds it. At its end the folder goes back
+    // when the group was a part of a pipeline (a subshell), and the list around it starts where it did before
+    // the group (a lone & after it puts the whole of it in the background).
+    const opened = opts.ps ? 0 : opens(c);
+    for (let n = 0; n < opened; n++) groups.push({ at: before, list: { ...listStart }, sub: pipe });
+    const why = readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r, mktempAfter(cmds, i), opts.ps ? line : null);
     if (why) return why;
-    if (!opts.ps && (pipe || isPipe(nx?.sep ?? ""))) setWhere(where, before);
-    sawPipe ||= pipe; prev = c;
+    if (!opts.ps && ((pipe && !opened) || isPipe(nx?.sep ?? ""))) setWhere(where, before);
+    if (!opts.ps && c.bare[0] && GROUP_CLOSE.test(c.words[0]) && groups.length) {
+      const g = groups.pop();
+      listStart = g.list;
+      if (g.sub || isPipe(nx?.sep ?? "")) setWhere(where, g.at);
+    }
+    sawPipe ||= pipe; prev = c; line.push(c);
   }
   return null;
 }
@@ -869,7 +1188,12 @@ export function checkCommand(cmd, env, where, opts = {}, depth = 0) {
   // A line continued on the next (a trailing backslash, or PowerShell's backtick) is one line. This runs
   // after the here-documents are cut, so a body line ending in a backslash cannot swallow its delimiter.
   const text = dropHeredocs(String(cmd)).replace(/[\\`]\r?\n/g, " ");
-  return walk(simpleCommands(text, opts.ps), env, where, { ...opts, vars: opts.vars ?? new Map() }, depth);
+  const cmds = simpleCommands(text, opts.ps);
+  // A line with a backslash before an ordinary character is read twice: as written, and as bash reads it.
+  const again = cmds.soft ? [{ ...where }, new Map(opts.vars ?? [])] : null;
+  const why = walk(cmds, env, where, { ...opts, vars: opts.vars ?? new Map() }, depth);
+  if (why || !again) return why;
+  return walk(simpleCommands(text, opts.ps, true), env, again[0], { ...opts, vars: again[1] }, depth);
 }
 
 // The project's deny rules. A file that does not validate yields an error instead: a rule that
@@ -913,6 +1237,7 @@ export function decide(input, env = process.env, opts = {}) {
 function selfTest() {
   const env = { NIGHT_SHIFT_REPO: "C:/work/repo", NIGHT_SHIFT_STATE: "C:/temp/x-night", USERPROFILE: "C:\\Users\\u" };
   const bash = (command) => decide({ tool_name: "Bash", tool_input: { command } }, env);
+  const ps = (command) => decide({ tool_name: "PowerShell", tool_input: { command } }, env);
   const write = (file_path) => decide({ tool_name: "Write", tool_input: { file_path } }, env);
   const mcp = (tool_name) => decide({ tool_name, tool_input: {} }, env);
   const cases = [
@@ -981,6 +1306,25 @@ function selfTest() {
     [bash(`git fetch --upload-pack='rm -rf /c/Users/u/Documents;' origin`), true], [bash("git clone -u x url"), true], [bash("git fetch origin"), false],
     [bash("git checkout -- '*'"), true], [bash("git restore ':/*'"), true], [bash("git checkout -- src/*.ts"), false],
     [bash("F=--force; git push $F origin main"), true], [bash("B=night; git push origin $B"), false],
+    // The deferred findings: find alternatives and names, a cd in a group, pipeline deletes, in-place writes, moves, more shells, an escaped letter, git's quieter deletes.
+    [bash("find . -name x -o -delete"), true], [bash("find . -name HEAD -delete"), true], [bash("find /tmp -delete"), true],
+    [bash(String.raw`find . \( -name '*.pyc' -o -name __pycache__ \) -exec rm -rf {} +`), false], [bash("find . -name node_modules -prune -exec rm -rf {} +"), false],
+    [decide({ tool_name: "Bash", cwd: "C:\\Users\\u", tool_input: { command: "{ cd C:/temp; } & rm -rf Documents" } }, env), true],
+    [decide({ tool_name: "Bash", cwd: "C:\\Users\\u", tool_input: { command: "if true; then cd C:/temp; fi | cat; rm -rf Documents" } }, env), true],
+    [ps("gci C:\\Users\\u -Recurse | Remove-Item -Force"), true], [ps("gci C:\\Users\\u\\Documents | % { Remove-Item $_.FullName }"), true],
+    [ps("Get-ChildItem dist | Remove-Item -Recurse -Force"), false], [ps("Remove-Item dist -Recurse -Force -Confirm:$false"), false],
+    [bash("sed -i s/a/b/ C:/temp/x-night/run.json"), true], [bash("sed -i s/a:b/c/ src/a.txt"), false], [bash("truncate -s 0 C:/temp/x-night/chain.log"), true],
+    [bash("dd if=a of=C:/temp/x-night/run.json"), true], [ps("Clear-Content .claude\\night-shift.json"), true], [ps(`Set-Content notes.txt "time: 12:30"`), false],
+    [bash("mv C:/Users/u/Documents C:/temp/gone"), true], [bash("mv dist/a.js dist/b.js"), false], [bash("shred -u C:/Users/u/Documents/a.txt"), true],
+    [bash("ksh -c 'rm -rf ~/Documents'"), true], [bash("busybox sh -c 'rm -rf ~/Documents'"), true], [bash("su -c 'git push -f'"), true], [bash("fish -c 'npm test'"), false],
+    [bash(String.raw`r\m -rf ~/Documents`), true], [bash(String.raw`git push --for\ce origin main`), true], [bash(String.raw`git commit -m fix\ typo`), false],
+    [bash("rm -rf ~u/Documents"), true], [bash("rm -rf dist/{a,b}"), false], [bash("D=$(mktemp -d /tmp/x.XXXXXX); rm -rf $D"), false],
+    [bash("git tag -d v1"), true], [bash("git tag -l"), false], [bash("git worktree remove --force ../wt"), true], [bash("git worktree list"), false],
+    [bash("git gc --prune=now"), true], [bash("git gc --quiet"), false], [bash("git prune"), true], [bash("git replay --onto main a..b"), true],
+    [bash("git config --rename-section zz core"), true], [bash("git config --get core.editor --local"), false], [bash("git -c core.pager=cat log"), false],
+    [bash("USERPROFILE=C:/temp/x git status"), true], [bash("declare -x HOME=C:/temp/x; git status"), true],
+    [bash(`M='fix --amend docs'; git commit -m "$M"`), false], [bash("git clone -bfeature https://github.com/a/b dir"), false],
+    [bash(`GIT_SSH_COMMAND="ssh -i $KEY" git fetch`), false], [bash("git ls-files -m | xargs git add"), false], [bash("git ls-files | xargs git push -f"), true],
   ];
   let failed = 0;
   cases.forEach(([got, deny], i) => {

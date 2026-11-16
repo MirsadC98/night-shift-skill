@@ -460,7 +460,7 @@ test("config the night session writes itself cannot define a command git runs", 
     `git config core.editor 'rm -rf /c/Users/u/Documents'`, `git config core.sshCommand x`, `git config core.hooksPath /c/temp/h`, `git config --local core.fsmonitor x`,
     `git config core.pager x`, `git config sequence.editor x`, `git config credential.helper x`, `git config credential.https://h.helper x`, `git config diff.external x`,
     `git config diff.a.textconv x`, `git config filter.a.clean x`, `git config filter.a.smudge x`, `git config filter.a.process x`, `git config merge.a.driver x`,
-    `git config gpg.program x`, `git config help.autocorrect immediate`, `git -c core.editor=x commit`, `git -c core.sshCommand=x fetch`, `git --config-env=core.pager=V log`,
+    `git config gpg.program x`, `git config help.autocorrect immediate`, `git -c core.pager='rm -rf /c/Users/u/Documents' log`, `git -c core.sshCommand='rm -rf /c/Users/u/Documents' fetch`, `git --config-env=core.pager=V log`,
     `git --config-env core.hooksPath=V status`, `git -c core.fsmonitor=x status`])
     assert.ok(git(c), c);
   for (const c of [`git config core.editor`, `git config --get core.pager`, `git config --unset core.editor`, `git config user.email a@b.c`, `git config core.autocrlf false`, `git -c user.name=x status`])
@@ -662,7 +662,8 @@ test("more config keys that make git run a command or open a protocol cannot be 
   for (const k of ["pager.log", "gpg.ssh.program", "gpg.x509.program", "gpg.openpgp.program", "core.askpass", "core.gitProxy", "core.alternateRefsCommand", "uploadpack.packObjectsHook",
     "remote.origin.uploadpack", "remote.origin.receivepack", "diff.a.command", "difftool.a.cmd", "mergetool.a.cmd", "trailer.a.command", "protocol.ext.allow", "protocol.allow", "Core.GitProxy"]) {
     assert.ok(git(`git config ${k} x`), k);
-    assert.ok(git(`git -c ${k}=x log`), k);
+    // given with -c, a key whose value is a command line is read as that command; the rest are refused outright
+    assert.ok(git(`git -c ${k}='rm -rf /c/Users/u/Documents' log`), k);
   }
   for (const c of [`git config --get pager.log`, `git config protocol.version 2`, `git config uploadpack.allowFilter true`, `git config diff.tool vimdiff`, `git config diff.algorithm patience`,
     `git config remote.origin.fetch +refs/heads/*:refs/remotes/origin/*`, `git config gpg.format ssh`, `git config trailer.sign.key Signed-off-by`, `git config --get-all remote.origin.uploadpack`])
@@ -692,4 +693,171 @@ test("git's options given through a variable the walker knows are read as the va
     assert.ok(git(c), c);
   for (const c of [`F=--no-verify; git commit $F -m x`, `M=--force; git commit -m "$M"`, `B=night; git push origin $B`, `git push origin $UNSET`, `F=--force; git status $F`, `git commit -m 'cost $5 and $X'`])
     assert.equal(git(c), null, c);
+});
+
+// The findings the 2026-11-16 reviews deferred: forms the walker did not read, and everyday commands it refused.
+const atHome = (command) => decide({ tool_name: "Bash", cwd: "C:\\Users\\u", tool_input: { command } }, env);
+
+test("a find delete from the repository is refused when an -o branch deletes without a test of its own", () => {
+  for (const c of ["find . -name x -o -delete", "find . -name '*.tmp' -o -type f -delete", "find . -delete -o -delete", String.raw`find . \( -name '*.tmp' -o -true \) -delete`,
+    String.raw`find . -name '*.tmp' -o -exec rm {} \;`])
+    assert.match(bash(c) ?? "", /find delete/, c);
+  for (const c of ["find . -name '*.tmp' -o -name '*.bak' -delete", String.raw`find . \( -name '*.tmp' -o -name '*.bak' \) -delete`, "find . -path ./.git -prune -o -type f -delete",
+    "find . -name '*.tmp' -delete -o -name '*.bak' -delete", "find . -name '*.tmp' -delete -o -print"])
+    assert.equal(bash(c), null, c);
+});
+
+test("a find delete from the repository whose test can match a file inside .git or .claude is refused", () => {
+  for (const c of ["find . -name HEAD -delete", "find . -name config -delete", "find . -iname 'head' -delete", "find . -name 'pack-*.pack' -delete", "find . -name '*.sample' -delete",
+    "find . -name logs -exec rm -rf {} +", "find . -name night-shift.json -delete", "find . -name '*.json' -delete", "find . -name 'settings*.json' -delete", "find . -path '*/hooks/*' -delete",
+    "find . -name .claude -exec rm -rf {} +", "find . -path './.claude/*' -delete", "find . -not -name .git -delete"])
+    assert.match(bash(c) ?? "", /find delete/, c);
+  for (const c of ["find . -name '*.pyc' -delete", "find . -name '*.log' -delete", "find . -name HEAD -not -path './.git/*' -delete", "find src -name config -delete",
+    "find . -name '*.json' -path './dist/*' -delete", "find . -path './src/*' -name index -delete", "find . -path '*/node_modules/*' -name '*.map' -delete", "find . ! -path './.git/*' -type f -delete"])
+    assert.equal(bash(c), null, c);
+});
+
+test("a cd inside a group or a compound command does not move what follows its & or its pipeline", () => {
+  for (const c of ["{ cd C:/temp; } & rm -rf Documents", "{ cd C:/temp; } | cat; rm -rf Documents", "if true; then cd C:/temp; fi & rm -rf Documents",
+    "for i in 1; do cd C:/temp; done | cat; rm -rf Documents", "while true; do cd C:/temp; break; done & rm -rf Documents", "true && { cd C:/temp; } & rm -rf Documents",
+    "cat x | { cd C:/temp; cat; }; rm -rf Documents", "if a; then b; else if c; then cd C:/temp; fi; fi & rm -rf Documents"])
+    assert.match(atHome(c) ?? "", /limited to the repository and temp/, c);
+  // a group fed by a pipe keeps its own cd for the commands inside it
+  for (const c of ["cat x | { cd /c/Users/u; rm -rf Documents; }", "cat x | if cd /c/Users/u; then rm -rf Documents; fi", "cat x | while read f; do cd /c/Users/u; rm -rf Documents; done"])
+    assert.match(bash(c) ?? "", /limited to the repository and temp/, c);
+  for (const c of ["{ cd C:/temp; rm -rf old; }", "{ cd C:/temp; }; rm -rf old", "if cd C:/temp; then rm -rf old; fi", "{ cd C:/temp; } && rm -rf old", "cat x | { cd C:/temp; rm -rf old; }",
+    "cd C:/temp; for i in 1 2; do echo $i; done | cat; rm -rf old", "cd C:/temp; { echo a; echo b; } | cat; rm -rf old"])
+    assert.equal(atHome(c), null, c);
+});
+
+test("a PowerShell delete at the end of a pipeline is judged by the folder its listing names", () => {
+  for (const c of [String.raw`gci C:\Users\u -Recurse | Remove-Item -Force`, String.raw`Get-ChildItem C:\Users\u\Documents | del`, String.raw`gci C:\Users\u\Documents | % { Remove-Item $_.FullName }`,
+    String.raw`gci C:\Users\u\Documents | ForEach-Object { Remove-Item $_.FullName -Force }`, String.raw`Get-ChildItem -Path C:\Users\u\Documents -File | Where-Object { $_.Length -gt 0 } | Remove-Item`,
+    String.raw`ls ~\Documents | rm`, String.raw`gci C:\work\repo\.git -Recurse | Remove-Item -Force`, String.raw`gci C:\temp\x-night | ri -Force`, "Get-ChildItem . -Recurse | Remove-Item -Force",
+    "Get-ChildItem -Recurse -Force | Remove-Item -Force", "gci . | Remove-Item -Recurse -Force", "gci . -Recurse -Filter HEAD | Remove-Item -Force", String.raw`dir C:\Users\u\Documents,dist | Remove-Item`,
+    String.raw`gci C:\Users\u\Documents | % { Remove-Item $_.FullName -Recurse }`, String.raw`Get-Item C:\Users\u\Documents | Remove-Item -Recurse -Force`, "gci . -Filter .g* | ri -Recurse -Force",
+    String.raw`Get-ChildItem -Path C:\Users\u\Documents -File | ForEach-Object { $_.Delete() }`, String.raw`gci C:\temp\x-night\shots | ri -Force`])
+    assert.ok(ps(c), c);
+  assert.ok(bash(String.raw`powershell -c "gci C:\Users\u\Documents | Remove-Item -Force"`));
+  for (const c of ["gci dist -Filter *.map | Remove-Item -Force", "Get-ChildItem . -Filter *.tmp | Remove-Item", "Get-ChildItem -Recurse -Filter *.log | Remove-Item -Force",
+    "Get-ChildItem dist | Remove-Item -Recurse -Force", "Get-ChildItem -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force", "Get-ChildItem . -Recurse -Include *.pyc | Remove-Item -Force",
+    "gci dist -Recurse | Remove-Item -Force", String.raw`gci C:\temp\x\shots | ri -Force`, "$files | Remove-Item", "Get-Content list.txt | Remove-Item", "gci dist | % { Remove-Item $_.FullName }",
+    "ls | ? Name -like '*.tmp' | rm", "Get-Item dist | Remove-Item -Recurse -Force"])
+    assert.equal(ps(c), null, c);
+});
+
+test("a file edited in place, or written through a tool's own option, is a write", () => {
+  for (const c of ["sed -i s/a/b/ C:/temp/x-night/run.json", "sed -i.bak -e s/a/b/ .git/config", "sed -ni /x/p .claude/night-shift.json", "sed --in-place s/a/b/ .claude/settings.json",
+    "perl -pi -e s/a/b/ C:/temp/x-night/night-settings.json", "dd if=/dev/zero of=C:/temp/x-night/run.json", "truncate -s 0 C:/temp/x-night/chain.log", "install -m 644 x .git/hooks/pre-commit",
+    "curl -o C:/temp/x-night/run.json https://example.com/x", "curl -sL https://example.com/x --output .git/config", "wget -O .claude/night-shift.json https://example.com/x",
+    "touch C:/temp/x-night/reload-request", "rsync -a x/ .git/hooks/"])
+    assert.match(bash(c) ?? "", /not allowed during a night run/, c);
+  for (const c of ["New-Item -ItemType File -Path .claude/night-shift.json -Force", "ni .claude/night-shift.json -Force", "Clear-Content C:/temp/x-night/chain.log", "Rename-Item .claude/night-shift.json x.json",
+    "New-Item -Path C:/temp/x-night -Name run.json"])
+    assert.match(ps(c) ?? "", /not allowed during a night run/, c);
+  for (const c of ["sed -i s/a/b/ src/a.js", "sed -i.bak -e 's/a/b/' package.json", "sed -i 's/a: b/c/' src/a.yml", "sed -n /x/p C:/temp/x-night/run.json", "perl -ne 'print if /x/' .git/config",
+    "dd if=.git/config of=C:/temp/x/config.bak", "truncate -s 0 C:/temp/x-night/notes.log", "curl -o C:/temp/x/a.zip https://example.com/a.zip", "touch src/new.js", "cat C:/temp/x-night/run.json"])
+    assert.equal(bash(c), null, c);
+  for (const c of ["New-Item -ItemType Directory dist -Force", "Clear-Content build.log", "Rename-Item a.txt b.txt", "New-Item notes.txt -Value 'at 12:30'"]) assert.equal(ps(c), null, c);
+});
+
+test("a move takes its source away, so it is held to the folders a delete is; shred is a delete", () => {
+  for (const c of ["mv C:/Users/u/Documents C:/temp/gone", "mv ~/Documents/a.txt .", "mv -t C:/temp/gone C:/Users/u/Documents C:/Users/u/Desktop", "mv C:/work/repo C:/temp/gone", "mv C:/temp/x-night C:/temp/y",
+    "shred -u C:/Users/u/Documents/a.txt", "shred C:/temp/x-night/run.json"])
+    assert.ok(bash(c), c);
+  for (const c of [String.raw`Move-Item C:\Users\u\Documents C:\temp\gone`, String.raw`Move-Item -Path C:\Users\u\Documents -Destination C:\temp\gone`, String.raw`mi C:\Users\u\Documents C:\temp\gone`])
+    assert.match(ps(c) ?? "", /moves are limited/, c);
+  for (const c of ["mv src/a.js src/b.js", "mv dist C:/temp/x/dist", "mv C:/temp/x/a.zip .", "git mv a b", "shred -u C:/temp/x/secret.txt", `for f in *.txt; do mv "$f" "$f.bak"; done`]) assert.equal(bash(c), null, c);
+  assert.equal(ps("Move-Item a.txt b.txt"), null);
+});
+
+test("ksh, fish, busybox, wsl and su run the command they are given, and it is read", () => {
+  for (const c of ["ksh -c 'rm -rf ~/Documents'", "fish -c 'rm -rf ~/Documents'", "busybox sh -c 'rm -rf ~/Documents'", "su -c 'rm -rf /c/Users/u/Documents'", "su - u -c 'git push -f'",
+    "wsl bash -c 'rm -rf ~/Documents'", "wsl -d Ubuntu -e bash -c 'git push -f'", "wsl env HOME=/tmp/x git status", "ksh <<'EOF'\nrm -rf ~/Documents\nEOF", "ssh host HOME=/x git status"])
+    assert.ok(git(c), c);
+  for (const c of ["ksh -c 'npm test'", "busybox ls", "wsl ls -la", "wsl bash -c 'rm -rf dist'", "su -c 'npm test'", "wsl --shutdown", "ssh host git status"]) assert.equal(git(c), null, c);
+});
+
+test("a backslash before an ordinary character hides neither a command's name nor an option", () => {
+  for (const c of [String.raw`r\m -rf ~/Documents`, String.raw`git push --for\ce origin main`, String.raw`g\it push -f`, String.raw`\rm -rf /c/Users/u/Documents`, String.raw`rm -r\f /c/Users/u/Documents`,
+    String.raw`rm -rf C:/temp/x\-night`])
+    assert.ok(git(c), c);
+  for (const c of [String.raw`\rm -rf dist`, String.raw`\ls -la`, String.raw`rm -rf C:\temp\x\old`, String.raw`echo a\ b`]) assert.equal(git(c), null, c);
+});
+
+test("a ~user path is a home folder too", () => {
+  for (const c of ["rm -rf ~u/Documents", "rm -f ~u/a.txt", "rm -rf ~root"]) assert.match(bash(c) ?? "", /home folder/, c);
+  assert.equal(bash(`rm -f '~$report.docx'`), null);
+});
+
+test("deleting a tag, forcing a worktree away, pruning objects and replaying history need the user", () => {
+  for (const c of ["git tag -d v1", "git tag --delete v1", "git worktree remove --force ../wt", "git worktree remove -f ../wt", "git gc --prune=now", "git gc --aggressive --prune=all", "git prune",
+    "git replay --onto main a..b", "git history reword HEAD~2"])
+    assert.ok(git(c), c);
+  for (const c of ["git tag v1.0", "git tag -l 'v*'", "git tag -a v1 -m 'x -d y'", "git worktree remove ../wt", "git worktree add ../wt -b night", "git worktree prune", "git gc", "git gc --auto", "git gc --prune"])
+    assert.equal(git(c), null, c);
+});
+
+test("a config section renamed into one whose keys git runs, and a home pointed elsewhere, are refused", () => {
+  for (const c of ["git config --rename-section zz core", "git config --rename-section zz alias", "git config rename-section zz core", "USERPROFILE=C:/temp/x git status",
+    "declare -x HOME=C:/temp/x; git status", "local -r HOME=C:/temp/x; git status"])
+    assert.ok(git(c), c);
+  for (const c of ["git config --rename-section branch.old branch.new", "declare -x FOO=1; git status", "USERPROFILE_BACKUP=x git status"]) assert.equal(git(c), null, c);
+});
+
+test("a quoted variable is one word for git: a message that names an option stays a message", () => {
+  for (const c of [`M='fix --amend docs'; git commit -m "$M"`, `MSG='reset --hard was wrong'; git commit -am "$MSG"`, `T='notes --force'; git tag -a v1 -m "$T"`]) assert.equal(git(c), null, c);
+  for (const c of [`F='--force origin'; git push $F main`, `F=--force; git push "$F" origin main`, `OPT=--amend; git commit "$OPT"`]) assert.ok(git(c), c);
+});
+
+test("git clone's attached -b value is not read as -u", () => {
+  for (const c of ["git clone -bfeature https://github.com/a/b dir", "git clone -bu url", "git clone -qbupdate url", "git clone -oupstream url"]) assert.equal(git(c), null, c);
+  for (const c of ["git clone -ub url", "git clone -qu x url", "git clone -u x url", "git clone -lu x url"]) assert.ok(git(c), c);
+});
+
+test("a command git takes from the environment is read with the variables it cannot resolve left in place", () => {
+  assert.equal(git(`GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes" git fetch`), null);
+  for (const c of ["GIT_SSH_COMMAND=$MYSSH git fetch", `GIT_SSH_COMMAND="$TOOL -rf /c/Users/u/Documents" git fetch`, `GIT_SSH_COMMAND="rm -rf $SOMEWHERE" git fetch`]) assert.ok(git(c), c);
+});
+
+test("what a find -exec deletes recursively is judged by the find's own start path and tests", () => {
+  for (const c of ["find . -type d -name __pycache__ -exec rm -rf {} +", "find . -name node_modules -prune -exec rm -rf {} +", "find dist -mindepth 1 -exec rm -rf {} +",
+    String.raw`find C:/temp/x -name 'old-*' -exec rm -rf {} \;`, "find /tmp -name 'x-*' -delete"])
+    assert.equal(bash(c), null, c);
+  for (const c of ["find . -exec rm -rf {} +", "find . -name .git -exec rm -rf {} +", "find /c/Users/u -name cache -exec rm -rf {} +", "find C:/temp -maxdepth 1 -exec rm -rf {} +",
+    "find /tmp -delete", "find /tmp -mindepth 1 -exec rm -rf {} +", "find C:/temp/x-night -exec rm -rf {} +"])
+    assert.ok(bash(c), c);
+});
+
+test("a PowerShell switch written with a value (-Confirm:$false) is no delete target", () => {
+  for (const c of ["Remove-Item dist -Recurse -Force -Confirm:$false", "Remove-Item -Path dist -Recurse -Confirm:$false", "Remove-Item old.txt -Confirm:$false"]) assert.equal(ps(c), null, c);
+  for (const c of [String.raw`Remove-Item C:\Users\u\Documents -Recurse -Force -Confirm:$false`, "Remove-Item -Recurse -Confirm:$false", "Remove-Item -Recurse -Path:$x"]) assert.ok(ps(c), c);
+});
+
+test("a brace list in a recursive delete is read as the paths it stands for", () => {
+  for (const c of ["rm -rf dist/{a,b}", "rm -rf {dist,build}", "rm -rf build/{cache,tmp} dist", "rm -rf C:/temp/x/{a,b}/{c,d}"]) assert.equal(bash(c), null, c);
+  for (const c of ["rm -rf {/c/Users/u/Documents,x}", "rm -rf {.,x}", "rm -rf {~,x}", "rm -rf .{git,x}", "rm -rf ./{a,b}/../..", "rm -rf x{,/../../Users/u}", `rm -rf ${"{a,b}".repeat(8)}`])
+    assert.ok(bash(c), c);
+});
+
+test("a mktemp template under the temp folder names a folder there", () => {
+  for (const c of ["D=$(mktemp -d /tmp/x.XXXXXX); rm -rf $D", `D="$(mktemp -d /tmp/build.XXXXXX)" && rm -rf "$D"`]) assert.equal(bash(c), null, c);
+  for (const c of ["D=$(mktemp -d /tmp/foo); rm -rf $D/*", `D="$(mktemp -d /c/Users/u/Documents/x.XXXXXX)"; rm -rf "$D"`, "D=$(mktemp -d /c/Users/u/Documents/x.XXXXXX); rm -rf $D"]) assert.ok(bash(c), c);
+});
+
+test("reading git config is no change; a pager or editor given with -c is read as the command it is", () => {
+  for (const c of ["git config --get core.editor --local", "git config core.pager --get", "git config --global --get user.name", "git config --global user.email", "git config get core.editor",
+    "git config --list --show-origin", "git -c core.editor=true cherry-pick --continue", "git -c core.pager=cat log", "git -c pager.log=false log", "git -c core.pager= log"])
+    assert.equal(git(c), null, c);
+  for (const c of ["git config --global user.name x", "git config core.editor vim", "git config --add core.pager cat", "git -c core.editor='rm -rf /c/Users/u/Documents' commit",
+    `git -c core.pager="$X" log`, "git -c core.fsmonitor=x status", "git config --global --unset user.name", "git config --global -e", "git config set core.editor vim", "git config --get core.editor --unset"])
+    assert.ok(git(c), c);
+});
+
+test("xargs may hand file names to a git command that only takes them as paths", () => {
+  for (const c of ["git ls-files -m | xargs git add", "git ls-files -z -o --exclude-standard | xargs -0 git add --", "git diff --name-only | xargs git checkout --", "git ls-files '*.js' | xargs git diff --stat"])
+    assert.equal(git(c), null, c);
+  for (const c of ["cat list | xargs git rm", "cat list | xargs git push", "cat list | xargs git checkout", "cat list | xargs git clean --", "cat list | xargs git push --force --", "cat list | xargs git rm --",
+    "cat list | xargs git push origin --", "cat list | xargs -I{} git checkout {} --"])
+    assert.ok(git(c), c);
 });
