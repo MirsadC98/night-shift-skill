@@ -311,7 +311,7 @@ function runnerNote(text, T, fableMode = false) {
   if (/^session \d+: Fable's allowance is used up/.test(text)) return fableMode ? T.note.mainCut : T.note.fableCut;
   if ((m = /^session \d+ was to run on Fable, but (.*)$/.exec(text))) return T.note.fableNot(m[1]);
   if ((m = /^session \d+ wrote a next-prompt\.md of (\d+) KB/.exec(text))) return T.note.bigPrompt(m[1]);
-  if ((m = /^session \d+: MODEL: (\S+) is not a model/.exec(text))) return T.note.badModel(m[1]);
+  if ((m = /^session \d+: MODEL: (\S+) is not a model/.exec(text))) return (fableMode ? T.note.badModelFable : T.note.badModel)(m[1]);
   return null;
 }
 

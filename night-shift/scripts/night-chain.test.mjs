@@ -148,6 +148,28 @@ test("cutOffSession: only a session that started (or resumed) and never ended co
   assert.deepEqual(cutOffSession(state), { nn: "35", sessionId: "cb61ff92-x", model: "claude-opus-5-5", effort: "max" });
 });
 
+test("a resumed session's header is English throughout, for every reason it resumes", async () => {
+  for (const why of ["stopped", "limit", "error"]) {
+    const { state, env, root } = setup();
+    const fake = path.join(root, "fake-resume-header.mjs");
+    fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path";
+const st = process.env.NIGHT_SHIFT_STATE; let input = "";
+for await (const c of process.stdin) input += c;
+fs.writeFileSync(path.join(st, "seen.json"), JSON.stringify({ input }));
+fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done");
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "cb61ff92-x", result: "ok" }));
+`);
+    const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+    fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake, maxSessions: null }));
+    fs.writeFileSync(path.join(state, "resume.json"), JSON.stringify({ nn: "35", sessionId: "cb61ff92-x", why }));
+    const { code } = await runOnce(["--state", state, "--headless"], env, root);
+    assert.equal(code, 0, fs.readFileSync(path.join(state, "chain.log"), "utf8"));
+    const { input } = JSON.parse(fs.readFileSync(path.join(state, "seen.json"), "utf8"));
+    assert.match(input, /\(commit, night report, .*next-prompt\.md\)\./, why);
+    assert.doesNotMatch(input, /gece|vardiya/i, why);   // the run is in Turkish; what the model reads is not
+  }
+});
+
 test("a stopped session resumes with its own header, and settings added by hand survive run", async () => {
   const { state, env, root } = setup();
   const fake = path.join(root, "fake-resume.mjs");
@@ -790,6 +812,26 @@ test("a session its prompt put at max is not flagged for running at max; one at 
   assert.match(sessionMessage(state, "02", process.pid).text, /düzey high \(xhigh olmalı\)/);
 });
 
+test("an unknown MODEL's card says which model the session ran on: Opus in opus mode, Fable in fable mode", async () => {
+  const { sessionMessage } = await import("./night-report.mjs");
+  const cardFor = (patch) => {
+    const { state } = setup();
+    const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+    fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, ...patch }));
+    fs.writeFileSync(path.join(state, "chain.log"), [
+      "[2026-11-15 22:00:00] chain starts in x, until the work is done, from session 1",
+      "[2026-11-15 22:00:00] session 01 starts: hard piece",
+      "[2026-11-15 22:00:00] session 01: MODEL: sonnet is not a model the runner runs (opus, fable); it runs on x",
+      "[2026-11-15 22:30:00] session 01 ends: success, 2 turns, $1.00",
+    ].join("\n") + "\n");
+    return sessionMessage(state, "01", process.pid).text;
+  };
+  assert.match(cardFor({ lang: "tr" }), /MODEL: sonnet tanınmadı, Opus'ta çalıştı/);
+  assert.match(cardFor({ lang: "en" }), /MODEL: sonnet not recognised, ran on Opus/);
+  assert.match(cardFor({ ...FM, lang: "tr" }), /MODEL: sonnet tanınmadı, Fable'da çalıştı/);
+  assert.match(cardFor({ ...FM, lang: "en" }), /MODEL: sonnet not recognised, ran on Fable/);
+});
+
 test("a Fable session at high is not flagged, an Opus one at high is, and the cards show Fable's share", async () => {
   const { sessionMessage, buildReport } = await import("./night-report.mjs");
   const { state } = setup();
@@ -1306,6 +1348,26 @@ test("start refuses a language it has no table for, on the command line or in a 
   const p = langOf({ project: { lang: "Türkçe" } });
   assert.equal(p.status, 1);
   assert.match(p.stderr, /night-shift.json: "lang" must be one of en, tr/);
+});
+
+// Which file a mode/model conflict came from: the layers can disagree, and the message names each.
+test("start names where a conflicting mode and model came from", () => {
+  const conflict = ({ global, project }, extra = []) => {
+    const c = pointerCase();
+    const write = (file, cfg) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(cfg)); };
+    if (global) write(path.join(c.home, ".claude", "night-shift", "config.json"), global);
+    if (project) write(path.join(c.repo, ".claude", "night-shift.json"), project);
+    return { ...c.run("start", ["--state", c.state, "--prompt", "x", "--allow-dirty", ...extra]), c };
+  };
+  const a = conflict({ global: { mode: "opus" }, project: { model: "fable" } });
+  assert.equal(a.status, 1);
+  assert.match(a.stderr, /mode "opus" cannot run on the Fable model "fable"; use mode "fable" or another model \(mode from .*night-shift[\\/]config\.json, model from .*night-shift\.json\)/);
+  const b = conflict({ project: { mode: "fable", model: "sonnet" } });
+  assert.match(b.stderr, /mode "fable" cannot use the model "sonnet"; .* \(mode from .*night-shift\.json, model from .*night-shift\.json\)/);
+  const f = conflict({ project: { model: "fable" } }, ["--mode", "opus", "--model", "claude-fable-1"]);
+  assert.match(f.stderr, /\(mode from --mode, model from --model\)/);
+  const m = conflict({ global: { mode: "opus" } }, ["--model", "fable"]);
+  assert.match(m.stderr, /\(mode from .*config\.json, model from --model\)/);
 });
 
 // C8a: the hours in the chain's own messages are short to read, and never 0 for a positive value.

@@ -120,6 +120,11 @@ test("mergedConfig names the file each error is in", () => {
     `${globalConfigFile(home)}: "lang" must be one of en, tr`,
     `${path.join(repo, ".claude", "night-shift.json")}: "mode" must be one of opus, fable`]);
 });
+test("mergedConfig keeps which file each value came from, the project winning", () => {
+  const home = tmpHome({ mode: "opus", lang: "tr" }), repo = repoWith({ model: "fable", lang: "en" });
+  assert.deepEqual(mergedConfig(repo, home).from, {
+    mode: globalConfigFile(home), lang: path.join(repo, ".claude", "night-shift.json"), model: path.join(repo, ".claude", "night-shift.json") });
+});
 test("lang takes only its listed values", () => {
   for (const v of ["TR", "tr-TR", "Türkçe", "", 5]) assert.equal(CONFIG_KEYS.lang(v), "must be one of en, tr");
   for (const v of ["en", "tr"]) assert.equal(CONFIG_KEYS.lang(v), null);

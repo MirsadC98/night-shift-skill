@@ -73,6 +73,7 @@ export default {
     fableNot: (why) => `did not run on Fable: ${why}`,
     bigPrompt: (kb) => `continuation prompt is ${kb} KB (over 30 KB; every call reads it again)`,
     badModel: (m) => `MODEL: ${m} not recognised, ran on Opus`,
+    badModelFable: (m) => `MODEL: ${m} not recognised, ran on Fable`,
   },
 
   // the full report (`show`, `status`, /report's source)

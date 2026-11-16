@@ -107,9 +107,9 @@ function repoRoot(dir) {
   } catch { fail(`not a git repository: ${dir}`); }
 }
 const projectConfig = (repo) => {
-  const { config, errors } = mergedConfig(repo);
+  const { config, from, errors } = mergedConfig(repo);
   if (errors.length) fail(errors.join("; "));
-  return config;
+  return { config, from };
 };
 // start and status: what each rule file is to the user, in order (a file with no text is left out). A file
 // that cannot be used is named, not dropped, so the user is never left thinking rules apply that do not.
@@ -219,7 +219,7 @@ function start(opt) {
     if (!ptr.pid && age < HANDOVER_MS) fail(`a run was scheduled ${Math.round(age / 1000)} s ago and its runner has not come up yet; wait, or run stop`);
   }
 
-  const cfg = projectConfig(repo);
+  const { config: cfg, from } = projectConfig(repo);
   // Unlike the other numbers, a wrong one here is not quietly replaced: a wait of 1 h or 6 h is not what was typed.
   const waitArg = opt["max-wait-hours"];
   if (waitArg !== undefined && !(typeof waitArg === "string" && Number.isFinite(Number(waitArg)) && Number(waitArg) > 0)) {
@@ -229,7 +229,12 @@ function start(opt) {
   if (opt.lang !== undefined && !LANGS.includes(opt.lang)) fail(`--lang must be one of ${LANGS.join(", ")} (got ${opt.lang === true ? "no value" : opt.lang})`);
   if (opt.mode !== undefined && !MODES.includes(opt.mode)) fail(`--mode must be one of ${MODES.join(", ")} (got ${opt.mode === true ? "no value" : opt.mode})`);
   const picked = resolveMode({ mode: opt.mode ?? cfg.mode, model: typeof opt.model === "string" ? opt.model : cfg.model });
-  if (picked.error) fail(picked.error);
+  if (picked.error) {
+    // mode and model may come from different layers (or a flag); the user has to know which one to change.
+    const src = [["mode", opt.mode !== undefined ? "--mode" : from.mode], ["model", typeof opt.model === "string" ? "--model" : from.model]]
+      .filter(([, s]) => s).map(([k, s]) => `${k} from ${s}`);
+    fail(src.length ? `${picked.error} (${src.join(", ")})` : picked.error);
+  }
   // A file the runner would have to leave out is refused here, while the user is at the keyboard.
   const badRules = ruleStatus(repo).filter((f) => f.error);
   if (badRules.length) fail(badRules.map((f) => `${f.file} ${f.error}`).join("; "));
@@ -624,7 +629,7 @@ function runSession(run, session, plan, nn, resume, rules = "") {
       `Running subagents and tools died; inspect half-written files with git status and git diff and redo that step if needed.`,
     ] : [resume.why === "error" ? `A connection or API error has passed (night shift, ${now()}).` : `The usage limit has reset (night shift, ${now()}).`]),
     `Go on where you stopped: check the unfinished step with git status and do not redo finished work. End the session with the night-shift skill's three steps`,
-    `(commit, gece raporu, ${path.join(run.state, "next-prompt.md")}).`,
+    `(commit, night report, ${path.join(run.state, "next-prompt.md")}).`,
     ...(rules ? ["", rules] : []),
   ].join("\n") : [
     `Night shift (night-shift), session ${session}${run.maxSessions ? `/${run.maxSessions}` : ""}, ${now()}.`,

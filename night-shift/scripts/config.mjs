@@ -3,7 +3,7 @@
 // so that a state folder too wide to be a state folder is refused by both. Imports only node.
 //   readProjectConfig(repo) -> { config, errors }   never throws; config holds only the valid keys
 //   readGlobalConfig(home)  -> { config, errors }   the same for ~/.claude/night-shift/config.json (run-wide keys only)
-//   mergedConfig(repo, home) -> { config, errors }  the global file overlaid key by key with the project's
+//   mergedConfig(repo, home) -> { config, from, errors }  the global file overlaid key by key with the project's (from: key -> file)
 //   stateDirProblem(dir, { home, repo, temp })      null, or why dir may not be the state folder
 
 import fs from "node:fs";
@@ -108,8 +108,10 @@ export const readGlobalConfig = (home = os.homedir()) => readConfigFile(globalCo
 
 export function mergedConfig(repo, home = os.homedir()) {
   const files = [[globalConfigFile(home), readGlobalConfig(home)], [projectConfigFile(repo), readProjectConfig(repo)]];
+  // from: the file that gave each key, for a message about two keys that may come from different layers.
   return {
     config: Object.assign({}, ...files.map(([, r]) => r.config)),
+    from: Object.assign({}, ...files.map(([file, r]) => Object.fromEntries(Object.keys(r.config).map((k) => [k, file])))),
     errors: files.flatMap(([file, r]) => r.errors.map((e) => `${file}: ${e}`)),
   };
 }

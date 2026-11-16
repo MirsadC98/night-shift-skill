@@ -71,6 +71,7 @@ export default {
     fableNot: (why) => `Fable'da çalışmadı: ${why}`,
     bigPrompt: (kb) => `devam promptu ${kb} KB (30 KB üstü; her çağrıda baştan okunur)`,
     badModel: (m) => `MODEL: ${m} tanınmadı, Opus'ta çalıştı`,
+    badModelFable: (m) => `MODEL: ${m} tanınmadı, Fable'da çalıştı`,
   },
 
   // the full report (`show`, `status`, /rapor's source)
