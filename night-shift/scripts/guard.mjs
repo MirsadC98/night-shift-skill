@@ -780,6 +780,8 @@ function pathNarrows(pat, start, extra = []) {
   if (/\.git|\.claude/.test(pat)) return false;
   if (!/[\\/]/.test(pat)) return !meetsInside(pat, extra);
   const segs = pat.split(/[\\/]/).filter(Boolean);
+  // Before the one-folder shortcut: ./night-shift/* stays inside the folder the extra names guard (a segment like night-* can be it).
+  if (segs.some((s) => extra.some((n) => s === n || (GLOB.test(s) && !/^\*+$/.test(s) && segMatch(s, n))))) return false;
   if (segs[0] === "." && segs[1] && !GLOB.test(segs[1])) return true;
   const fixed = segs.filter((s) => s !== "." && !GLOB.test(s) && !start.includes(s));
   return fixed.length > 0 && !fixed.some((s) => INSIDE.includes(s) || extra.includes(s));
@@ -1344,6 +1346,8 @@ function selfTest() {
     [bash("find . -name rules.md -delete", inHome), true], [bash("find . -name config.json -delete", inHome), true],
     [bash("find . -path '*/night-shift/*' -delete", inHome), true], [bash("find . -name rules.md -exec rm {} +", inHome), true],
     [ps("Get-ChildItem . -Recurse -Filter config.json | Remove-Item", inHome), true], [bash("find . -name notes.md -delete", inHome), false],
+    [bash("find . -path './night-shift/*' -delete", inHome), true], [bash("find . -path './night-shift/rules.md' -delete", inHome), true],
+    [bash("find . -path './skills/*' -delete", inHome), false],
   ];
   let failed = 0;
   cases.forEach(([got, deny], i) => {
