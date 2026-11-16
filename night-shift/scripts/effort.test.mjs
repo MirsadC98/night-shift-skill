@@ -1,7 +1,7 @@
 // node --test effort.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { promptEffort, promptDirectives, sessionPlan, directiveLines, fableGate, nightModelSettings, familyOf } from "./effort.mjs";
+import { promptEffort, promptDirectives, sessionPlan, directiveLines, fableGate, nightModelSettings, familyOf, resolveMode, mainGate, fallbackNote } from "./effort.mjs";
 
 test("promptEffort reads a first-line EFFORT line and keeps the rest of the prompt", () => {
   assert.deepEqual(promptEffort("EFFORT: max\n\nFix the drift."), { effort: "max", body: "Fix the drift." });
@@ -32,7 +32,7 @@ test("promptDirectives takes MODEL and EFFORT in either order, on one line or tw
 
 test("sessionPlan: Opus at the run's level, Fable at high, any other model on Opus with a note", () => {
   const run = { model: "opus", effort: "xhigh" };
-  assert.deepEqual(sessionPlan("Go on.", run), { model: "opus", family: "opus", effort: "xhigh", body: "Go on.", asked: null, note: null });
+  assert.deepEqual(sessionPlan("Go on.", run), { model: "opus", family: "opus", effort: "xhigh", body: "Go on.", asked: null, askedEffort: null, note: null });
   const fable = sessionPlan("MODEL: fable\nHard piece.", run);
   assert.equal(fable.model, "fable");
   assert.equal(fable.effort, "high");
@@ -85,4 +85,45 @@ test("nightModelSettings levels every Opus, Fable, Sonnet and Haiku key, the low
   // Settings refuse max: the layer keeps xhigh and the session gets --effort max.
   assert.equal(nightModelSettings({}, [], "max").opus.effortLevel, "xhigh");
   assert.equal(nightModelSettings({}, [], { fable: "max" }).fable.effortLevel, "xhigh");
+});
+
+const pick = (p) => ({ model: p.model, family: p.family, effort: p.effort, askedEffort: p.askedEffort });
+test("resolveMode: the mode, the main model and the Opus that stands in", () => {
+  assert.deepEqual(resolveMode({}), { mode: "opus", model: "opus", opusModel: "opus" });
+  assert.deepEqual(resolveMode({ model: "claude-opus-5-5" }), { mode: "opus", model: "claude-opus-5-5", opusModel: "claude-opus-5-5" });
+  assert.deepEqual(resolveMode({ model: "sonnet" }), { mode: "opus", model: "sonnet", opusModel: "opus" });
+  assert.deepEqual(resolveMode({ model: "fable" }), { mode: "fable", model: "fable", opusModel: "opus" });
+  assert.deepEqual(resolveMode({ mode: "fable" }), { mode: "fable", model: "fable", opusModel: "opus" });
+  assert.deepEqual(resolveMode({ mode: "fable", model: "claude-fable-5-2" }), { mode: "fable", model: "claude-fable-5-2", opusModel: "opus" });
+  assert.deepEqual(resolveMode({ mode: "fable", model: "claude-opus-5-5" }), { mode: "fable", model: "fable", opusModel: "claude-opus-5-5" });
+  assert.match(resolveMode({ mode: "opus", model: "fable" }).error, /mode "opus".*"fable"/);
+  assert.match(resolveMode({ mode: "fable", model: "sonnet" }).error, /"sonnet"/);
+});
+test("sessionPlan in fable mode: Fable at the run's level, MODEL: opus on the stand-in at xhigh, a prompt's EFFORT wins", () => {
+  const run = { mode: "fable", model: "fable", opusModel: "claude-opus-5-5", effort: "high" };
+  assert.deepEqual(pick(sessionPlan("piece", run)), { model: "fable", family: "fable", effort: "high", askedEffort: null });
+  assert.deepEqual(pick(sessionPlan("MODEL: fable\npiece", run)), { model: "fable", family: "fable", effort: "high", askedEffort: null });
+  assert.deepEqual(pick(sessionPlan("MODEL: opus\npiece", run)), { model: "claude-opus-5-5", family: "opus", effort: "xhigh", askedEffort: null });
+  assert.deepEqual(pick(sessionPlan("EFFORT: max\npiece", run)), { model: "fable", family: "fable", effort: "max", askedEffort: "max" });
+});
+test("sessionPlan in fable mode: a MODEL the runner does not run stays on Fable and says so", () => {
+  const p = sessionPlan("MODEL: sonnet\nX", { mode: "fable", model: "fable", opusModel: "opus", effort: "high" });
+  assert.equal(p.model, "fable");
+  assert.match(p.note, /MODEL: sonnet is not a model the runner runs.*it runs on fable/);
+});
+test("sessionPlan without a mode (a run.json from before modes) is today's", () => {
+  assert.deepEqual(pick(sessionPlan("piece", { model: "fable", effort: "xhigh" })), { model: "fable", family: "fable", effort: "high", askedEffort: null });
+  assert.deepEqual(pick(sessionPlan("MODEL: fable\npiece", { model: "opus", effort: "xhigh" })), { model: "fable", family: "fable", effort: "high", askedEffort: null });
+});
+test("mainGate: out until the reset, the ceiling, and never the count", () => {
+  const now = 1_000_000;
+  assert.deepEqual(mainGate({ outUntil: now + 1 }, { now }), { ok: false, why: "out", until: now + 1 });
+  assert.equal(mainGate({ outUntil: now - 1 }, { now }).ok, true);
+  assert.deepEqual(mainGate({ ratio: 0.6 }, { ceiling: 0.6, now }), { ok: false, why: "ceiling", ratio: 0.6, ceiling: 0.6 });
+  assert.equal(mainGate({ ratio: 0.9, ratioResetsAt: (now - 1) / 1000 }, { now }).ok, true);   // the share is stale after its reset
+  assert.equal(mainGate({ sessions: 99 }, { now }).ok, true);
+});
+test("fallbackNote says why and never names max", () => {
+  const n = fallbackNote("its allowance is at 65%, at or over the 60% ceiling");
+  assert.match(n, /main model is Fable/); assert.match(n, /65%/); assert.doesNotMatch(n, /\bmax\b/);
 });

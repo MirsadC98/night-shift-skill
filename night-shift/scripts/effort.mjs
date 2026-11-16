@@ -57,15 +57,37 @@ export function promptEffort(text, fallback = "xhigh") {
 
 // What a prompt asks the runner for: its model (only opus and fable; any other name runs on Opus
 // and says so in `note`), the level (the prompt's EFFORT, else the model's own: the run's --effort
-// for Opus, MAIN_EFFORT for Fable) and the text the session gets.
+// for Opus, MAIN_EFFORT for Fable) and the text the session gets. In fable mode (run.mode) Fable is
+// the main model at the run's level, Opus is the stand-in at its own xhigh, and a MODEL the runner
+// does not run stays on Fable; a run.json from before modes has no mode and gets the rules above.
 export function sessionPlan(text, run = {}) {
   const d = promptDirectives(text);
+  const fableMode = run.mode === "fable";
   let model = run.model || MAIN_MODEL, note = null;
-  if (d.model && MODELS.includes(d.model)) model = d.model;
+  if (fableMode) {
+    const opus = run.opusModel || MAIN_MODEL;
+    model = d.model === "opus" ? opus : run.model || "fable";
+    if (d.model && !MODELS.includes(d.model)) note = `MODEL: ${d.model} is not a model the runner runs (${MODELS.join(", ")}); it runs on ${model}`;
+  } else if (d.model && MODELS.includes(d.model)) model = d.model;
   else if (d.model) { model = MAIN_MODEL; note = `MODEL: ${d.model} is not a model the runner runs (${MODELS.join(", ")}); it runs on ${MAIN_MODEL}`; }
   const family = familyOf(model);
-  const own = family === "fable" ? MAIN_EFFORT.fable : run.effort || MAIN_EFFORT.opus;
-  return { model, family, effort: d.effort || own, body: d.body, asked: d.model, note };
+  const own = family === "fable" ? (fableMode && run.effort) || MAIN_EFFORT.fable : fableMode ? MAIN_EFFORT.opus : run.effort || MAIN_EFFORT.opus;
+  return { model, family, effort: d.effort || own, body: d.body, asked: d.model, askedEffort: d.effort, note };
+}
+
+// The mode, the main model and the Opus that stands in for it, from the config's mode and model.
+// An unset mode follows the model (a Fable model means fable mode); in opus mode any non-Fable model
+// runs the chain; in fable mode the model is Fable's id, or an Opus id that becomes the stand-in.
+export function resolveMode({ mode, model } = {}) {
+  const fam = model == null ? null : familyOf(model);
+  if (!mode) mode = fam === "fable" ? "fable" : "opus";
+  if (mode === "opus") {
+    if (fam === "fable") return { error: `mode "opus" cannot run on the Fable model "${model}"; use mode "fable" or another model` };
+    return { mode, model: model ?? MAIN_MODEL, opusModel: fam === "opus" ? model : MAIN_MODEL };
+  }
+  if (!model || fam === "fable") return { mode, model: model || "fable", opusModel: MAIN_MODEL };
+  if (fam === "opus") return { mode, model: "fable", opusModel: model };
+  return { error: `mode "fable" cannot use the model "${model}"; it takes a Fable model (the main) or an Opus model (the stand-in)` };
 }
 
 // The directive lines that give a plan back, for a prompt the runner writes anew (a retry).
@@ -78,10 +100,21 @@ export const directiveLines = (d) => `${d.model ? `MODEL: ${d.model}\n` : ""}${d
 // Fable session it is unknown, and then at most `maxSessions` Fable sessions run in a chain.
 // f: the run's fable.json { sessions, outUntil (ms), ratio (0–1), ratioResetsAt (s) }; start clears
 // the ratio, so it is never older than the chain, and a reset since it was read makes it unknown.
-export function fableGate(f = {}, { ceiling = 0.6, maxSessions = 2, now = Date.now() } = {}) {
+const knownShare = (f, now) => f.ratio != null && (!f.ratioResetsAt || now < f.ratioResetsAt * 1000);
+// Out until the reset, or the known share at the ceiling; null when neither stops a Fable session.
+function shareStop(f, ceiling, now) {
   if (f.outUntil && now < f.outUntil) return { ok: false, why: "out", until: f.outUntil };
-  const known = f.ratio != null && (!f.ratioResetsAt || now < f.ratioResetsAt * 1000);
-  if (known && f.ratio >= ceiling) return { ok: false, why: "ceiling", ratio: f.ratio, ceiling };
+  if (knownShare(f, now) && f.ratio >= ceiling) return { ok: false, why: "ceiling", ratio: f.ratio, ceiling };
+  return null;
+}
+// In fable mode Fable is every session's main model, so no count rule applies: only out and the ceiling.
+export function mainGate(f = {}, { ceiling = 0.6, now = Date.now() } = {}) {
+  return shareStop(f, ceiling, now) || { ok: true, ratio: knownShare(f, now) ? f.ratio : null };
+}
+export function fableGate(f = {}, { ceiling = 0.6, maxSessions = 2, now = Date.now() } = {}) {
+  const stop = shareStop(f, ceiling, now);
+  if (stop) return stop;
+  const known = knownShare(f, now);
   if (!known && (f.sessions || 0) >= maxSessions) return { ok: false, why: "count", sessions: f.sessions, maxSessions };
   return { ok: true, ratio: known ? f.ratio : null };
 }
@@ -111,3 +144,6 @@ export const MAX_NOTE = [
 // The same for a Fable session: Fable is for the hard piece its prompt names, and its allowance is
 // the user's for the day.
 export const FABLE_NOTE = "This session runs on Fable, only for this piece: the hard piece the prompt names. Fable's weekly allowance is the user's for daytime work; when that piece is finished or blocked, take no other work on Fable: save the state, write the next prompt (other work without a MODEL line; a blocked piece that will go on keeps MODEL: fable) and finish.";
+// The header of a session that runs on Opus in fable mode because Fable is out or over the ceiling.
+// It never names the max level: the runner does not run it in this mode.
+export const fallbackNote = (why) => `This run's main model is Fable, but it cannot run this session: ${why}. This session runs on Opus at xhigh. Do your piece as usual, and write the next prompt without a MODEL or EFFORT line, so the next session goes back to Fable when it can.`;
