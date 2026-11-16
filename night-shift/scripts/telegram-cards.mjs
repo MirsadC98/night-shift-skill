@@ -1,6 +1,9 @@
 // Telegram messages for the night shift: a short card per event, with the details
-// in one collapsed quote. The full report stays behind /rapor and `status`.
-// Each function takes plain facts and returns { text, silent } (silent: no sound).
+// in one collapsed quote. The full report stays behind /rapor (/report) and `status`.
+// Each function takes plain facts and the language table (lang/index.mjs; English when
+// none is given) and returns { text, silent } (silent: no sound).
+
+import { strings } from "./lang/index.mjs";
 
 const LIMIT = 4096;
 const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -98,7 +101,7 @@ function card(head, blocks, silent = false) {
 }
 
 // Fable's share shows only once a Fable call of the night reported it.
-const numbers = (f) => [f.took, f.cost, f.five && `5s ${f.five}`, f.seven && `7g ${f.seven}`, f.fable && `Fable ${f.fable}`].filter(Boolean).join(" · ");
+const numbers = (f, T) => [f.took, f.cost, f.five && `${T.five} ${f.five}`, f.seven && `${T.seven} ${f.seven}`, f.fable && `Fable ${f.fable}`].filter(Boolean).join(" · ");
 
 // How far the chain is and when it should end. jobs: this run's jobs in order, each
 // { ok, ended, workMs, remaining }, where remaining is its report's "**Remaining:**" count
@@ -123,72 +126,64 @@ export function chainProgress(jobs, { now = new Date(), waitUntil = null } = {})
 }
 
 const FIVE_MIN = 5 * 60_000;
-export function progressText(p, now = new Date()) {
+export function progressText(p, now = new Date(), T = strings()) {
   if (!p) return null;
-  const head = p.total == null ? `${p.done} iş bitti` : `${p.done}/${p.total} iş bitti`;
+  const head = T.jobsDone(p.done, p.total);
   if (!p.eta) return head;
   const eta = new Date(Math.round(p.eta.getTime() / FIVE_MIN) * FIVE_MIN);
   const day = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
   const days = Math.round((day(eta) - day(now)) / 86_400_000);
-  const clock = `~${eta.toLocaleTimeString("sv-SE").slice(0, 5)}`;
-  const label = days === 0 ? clock : days === 1 ? `yarın ${clock}` : `${eta.toLocaleDateString("tr-TR").slice(0, 5)} ${clock}`;
-  return `${head} · tahmini bitiş ${label}`;
+  const clock = T.approxClock(eta.toLocaleTimeString("sv-SE").slice(0, 5));
+  const label = days === 0 ? clock : days === 1 ? T.tomorrow(clock) : `${T.dayMonth(eta)} ${clock}`;
+  return T.endsAt(head, label);
 }
 
-export function sessionCard(f) {
+export function sessionCard(f, T = strings()) {
   const title = f.title || f.commits?.[0]?.replace(/^\S+\s/, "");
   return card([
     `${mark(f.ok)} <b>#${f.nn}${title ? ` · ${esc(title)}` : ""}</b>`,
-    numbers(f),
+    numbers(f, T),
     f.progress && `📊 ${esc(f.progress)}`,
     f.next && `➡️ ${esc(f.next)}`,
     ...(f.problems || []).map((p) => `⚠️ ${esc(p)}`),
   ], [
-    { name: "Seni bekleyen", count: true, lines: (f.waits || []).map((w) => `• ${w}`), extra: f.older ? `+ ${f.older} eski madde` : null },
+    { name: T.waitsHead, count: true, lines: (f.waits || []).map((w) => `• ${w}`), extra: f.older ? T.olderMore(f.older) : null },
   ]);
 }
 
-export function eventLine(kind, d = {}) {
-  const lines = {
-    start: [`🌙 Gece vardiyası başladı · ${esc(d.project)}`, true],
-    limit: [`⏳ Limit doldu · ${esc(d.until)}'de sürer${d.progress ? ` · ${esc(d.progress)}` : ""}`, true],
-    resume: [`▶️ #${d.nn} kaldığı yerden sürüyor`, true],
-    error: [`🔌 #${d.nn} bağlantı ya da API hatası · ${esc(d.until)}'de yeniden denenecek`, true],
-    retry: [`🔁 #${d.nn} devam istemi bırakmadı, yeniden deneniyor`, false],
-    quiet: [`⚠️ #${d.nn} ${d.minutes} dakikadır sessiz · son adım: ${esc(d.step || "?")}`, false],
-    died: ["🛑 Zincir beklenmedik şekilde durdu (runner kapandı)", false],
-    effort: [`⚠️ #${d.nn} ${esc(d.got)} düzeyde çalışıyor (${esc(d.want)} olmalı)`, false],
-  };
-  const [text, silent] = lines[kind];
-  return { text, silent };
+// Which events make no sound; the text of each is the table's.
+const SILENT = { start: true, limit: true, resume: true, error: true, retry: false, quiet: false, died: false, effort: false };
+export function eventLine(kind, d = {}, T = strings()) {
+  const e = { ...d, project: esc(d.project), until: esc(d.until), progress: d.progress ? esc(d.progress) : "", step: esc(d.step || "?"), got: esc(d.got), want: esc(d.want) };
+  return { text: T.ev[kind](e), silent: SILENT[kind] };
 }
 
-export function chainCard(f) {
+export function chainCard(f, T = strings()) {
   return card([
-    `🏁 <b>Zincir bitti · ${esc(f.project)}</b>`,
+    `🏁 <b>${T.chainEnded} · ${esc(f.project)}</b>`,
     esc(String(f.reason ?? "").replace(/^STOP:\s*/i, "")),
-    [`${f.jobs.length} iş`, f.took, f.cost, f.seven && `7g ${f.seven}`, f.fable && `Fable ${f.fable}`].filter(Boolean).join(" · "),
-    f.waits ? `🙋 Seni bekleyen ${f.waits} madde` : null,
+    [T.jobCount(f.jobs.length), f.took, f.cost, f.seven && `${T.seven} ${f.seven}`, f.fable && `Fable ${f.fable}`].filter(Boolean).join(" · "),
+    f.waits ? `🙋 ${T.waitsLine(f.waits)}` : null,
   ], [
-    { name: "Seni bekleyen", count: true, lines: (f.waitList || []).map((w) => `• ${w}`) },
-    { name: "İşler", lines: f.jobs.map((j) => `${mark(j.ok)} #${j.nn}${j.title ? ` ${j.title}` : ""}${j.took ? ` · ${j.took}` : ""}`) },
-    { name: "Sorunlar", count: true, lines: f.problems || [] },
+    { name: T.waitsHead, count: true, lines: (f.waitList || []).map((w) => `• ${w}`) },
+    { name: T.jobsHead, lines: f.jobs.map((j) => `${mark(j.ok)} #${j.nn}${j.title ? ` ${j.title}` : ""}${j.took ? ` · ${j.took}` : ""}`) },
+    { name: T.problemsHead, count: true, lines: f.problems || [] },
   ]);
 }
 
-// /rapor: the run at a glance, shown open (the user asked for it). Problems arrive HTML-safe.
+// /rapor (/report): the run at a glance, shown open (the user asked for it). Problems arrive HTML-safe.
 const REPORT_JOBS = 12;
-export function reportCard(f) {
+export function reportCard(f, T = strings()) {
   const jobs = f.jobs || [];
   const line = (j) => (j.running
-    ? `⏳ #${j.nn} sürüyor · ${j.took}${j.step ? ` · son adım: ${esc(j.step)}` : ""}`
+    ? `⏳ #${j.nn} ${T.jobRunning} · ${j.took}${j.step ? ` · ${T.lastStep}: ${esc(j.step)}` : ""}`
     : `${mark(j.ok)} #${j.nn}${j.title ? ` ${esc(j.title)}` : ""} · ${j.took}`);
   const parts = [
     [`🌙 <b>${esc(f.project)}</b> · ${esc(f.state)} · ${f.at}`, f.progress && `📊 ${esc(f.progress)}`,
-      [f.five && `5s ${f.five}`, f.seven && `7g ${f.seven}`, f.fable && `Fable ${f.fable}`, f.cost].filter(Boolean).join(" · ")].filter(Boolean).join("\n"),
-    jobs.length && ["<b>İşler</b>", ...(jobs.length > REPORT_JOBS ? [`… ${jobs.length - REPORT_JOBS} iş daha`] : []), ...jobs.slice(-REPORT_JOBS).map(line)].join("\n"),
-    f.problems?.length && ["<b>Sorunlar</b>", ...f.problems].join("\n"),
-    f.waits?.length && [`<b>Seni bekleyen</b> · ${f.waits.length}`, ...f.waits.map((w) => `• ${esc(w)}`)].join("\n"),
+      [f.five && `${T.five} ${f.five}`, f.seven && `${T.seven} ${f.seven}`, f.fable && `Fable ${f.fable}`, f.cost].filter(Boolean).join(" · ")].filter(Boolean).join("\n"),
+    jobs.length && [`<b>${T.jobsHead}</b>`, ...(jobs.length > REPORT_JOBS ? [T.moreJobs(jobs.length - REPORT_JOBS)] : []), ...jobs.slice(-REPORT_JOBS).map(line)].join("\n"),
+    f.problems?.length && [`<b>${T.problemsHead}</b>`, ...f.problems].join("\n"),
+    f.waits?.length && [`<b>${T.waitsHead}</b> · ${f.waits.length}`, ...f.waits.map((w) => `• ${esc(w)}`)].join("\n"),
   ].filter(Boolean);
   let text = parts.join("\n\n");
   if (text.length > LIMIT) text = `${text.slice(0, text.lastIndexOf("\n", LIMIT - 2))}\n…`;
@@ -205,13 +200,13 @@ function shortNext(s) {
   return t;
 }
 
-export function statusCard(f) {
+export function statusCard(f, T = strings()) {
   return card([
-    `🌙 <b>${esc(f.project)}</b> · ${f.running ? "çalışıyor" : esc(f.state || "durdu")}`,
-    f.running && f.nn && `#${f.nn} · ${f.took}${f.effort ? ` · ${esc(f.effort)}` : ""}${f.step ? ` · son adım: ${esc(f.step)}` : ""}`,
+    `🌙 <b>${esc(f.project)}</b> · ${f.running ? T.stateRunning : esc(f.state || T.stateStopped)}`,
+    f.running && f.nn && `#${f.nn} · ${f.took}${f.effort ? ` · ${esc(f.effort)}` : ""}${f.step ? ` · ${T.lastStep}: ${esc(f.step)}` : ""}`,
     f.progress && `📊 ${esc(f.progress)}`,
-    f.five && `5s ${f.five}${f.fiveReset ? ` (${f.fiveReset}'de sıfırlanır)` : ""} · 7g ${f.seven}${f.fable ? ` · Fable ${f.fable}` : ""}`,
-    f.last &&`Son biten: ${mark(f.last.ok)} #${f.last.nn}${f.last.title ? ` ${esc(f.last.title)}` : ""}`,
+    f.five && `${T.five} ${f.five}${f.fiveReset ? ` (${T.resetsAt(f.fiveReset)})` : ""} · ${T.seven} ${f.seven}${f.fable ? ` · Fable ${f.fable}` : ""}`,
+    f.last && `${T.lastDone}: ${mark(f.last.ok)} #${f.last.nn}${f.last.title ? ` ${esc(f.last.title)}` : ""}`,
     f.next && `➡️ ${esc(f.next)}`,
   ], [], true);
 }

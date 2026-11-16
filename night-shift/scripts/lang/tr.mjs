@@ -1,0 +1,131 @@
+// What the user reads, in Turkish: the Telegram cards, the report that `show` and /rapor print, and
+// the lines of `status` and `wait`. The text is exactly what these said before the language became
+// a setting. The English table (en.mjs) has the same keys; the code around them (HTML tags, emoji,
+// separators) is the same in both languages. A function takes already-escaped values.
+export default {
+  // units and number formats
+  five: "5s", seven: "7g",
+  pct: (n) => `%${n}`,
+  minutes: (m) => (m >= 60 ? `${Math.floor(m / 60)} sa ${m % 60} dk` : `${m} dk`),
+  ago: (t) => `${t} önce`,
+  dayMonth: (d) => d.toLocaleDateString("tr-TR").slice(0, 5),
+  approxClock: (hhmm) => `~${hhmm}`,
+  tomorrow: (clock) => `yarın ${clock}`,
+
+  // progress line
+  jobsDone: (done, total) => (total == null ? `${done} iş bitti` : `${done}/${total} iş bitti`),
+  endsAt: (head, label) => `${head} · tahmini bitiş ${label}`,
+
+  // headings and labels shared by the cards and the report
+  waitsHead: "Seni bekleyen",
+  jobsHead: "İşler",
+  problemsHead: "Sorunlar",
+  noProblems: "Sorun yok",
+  noJobs: "henüz iş yok",
+  olderMore: (n) => `+ ${n} eski madde`,
+  jobCount: (n) => `${n} iş`,
+  waitsLine: (n) => `Seni bekleyen ${n} madde`,
+  moreJobs: (n) => `… ${n} iş daha`,
+  chainEnded: "Zincir bitti",
+  jobRunning: "sürüyor",
+  lastStep: "son adım",
+  lastDone: "Son biten",
+  resetsAt: (t) => `${t}'de sıfırlanır`,
+  stopped: "Durdu",
+  stateRunning: "çalışıyor",
+  stateStopped: "durdu",
+  stateEnded: (why) => `bitti: ${why}`,
+
+  // one-line events
+  ev: {
+    start: (e) => `🌙 Gece vardiyası başladı · ${e.project}`,
+    limit: (e) => `⏳ Limit doldu · ${e.until}'de sürer${e.progress ? ` · ${e.progress}` : ""}`,
+    resume: (e) => `▶️ #${e.nn} kaldığı yerden sürüyor`,
+    error: (e) => `🔌 #${e.nn} bağlantı ya da API hatası · ${e.until}'de yeniden denenecek`,
+    retry: (e) => `🔁 #${e.nn} devam istemi bırakmadı, yeniden deneniyor`,
+    quiet: (e) => `⚠️ #${e.nn} ${e.minutes} dakikadır sessiz · son adım: ${e.step}`,
+    died: () => "🛑 Zincir beklenmedik şekilde durdu (runner kapandı)",
+    effort: (e) => `⚠️ #${e.nn} ${e.got} düzeyde çalışıyor (${e.want} olmalı)`,
+  },
+
+  // problems, in the report and on the cards
+  failed: "hata ile bitti",
+  noResult: "sonuç satırı olmadan bitti",
+  denied: (n) => `guard ${n} kez reddetti`,
+  quietFor: (t) => `${t}'dır sessiz`,
+  limitWaited: (until) => `limit doldu, ${until}'e kadar bekledi`,
+  retriedTransient: (nn) => `#${nn} bağlantı ya da API hatası, yeniden denendi`,
+  retriedNoPrompt: (nn) => `#${nn} devam promptu yazmadı, yeniden denendi`,
+  runnerGone: "Runner çalışmıyor ve zincir bitti demedi (pencere kapanmış ya da yeniden başlatılmış olabilir)",
+  effortOff: (got, want) => `düzey ${got} (${want} olmalı)`,
+  // what the runner said about a session's model or handover
+  note: {
+    fableAsked: (why) => `Fable istedi, Opus max'te çalıştı (${why})`,
+    fableUntil: (t) => `Fable payı ${t}'e kadar bitti`,
+    fableAt: (share, ceiling) => `Fable payı ${share}, ${ceiling} tavanında`,
+    fableCount: (n) => `zincir ${n} Fable oturumu çalıştırdı, pay bilinmiyor`,
+    fableCut: "Fable payı bittiği için kesildi; parçası Opus max'te sürer",
+    fableNot: (why) => `Fable'da çalışmadı: ${why}`,
+    bigPrompt: (kb) => `devam promptu ${kb} KB (30 KB üstü; her çağrıda baştan okunur)`,
+    badModel: (m) => `MODEL: ${m} tanınmadı, Opus'ta çalıştı`,
+  },
+
+  // the full report (`show`, `status`, /rapor's source)
+  reportTitle: "Gece vardiyası",
+  ended: (what) => `Bitti: ${what}`,
+  runningLine: (r) => `Çalışıyor · iş ${r.nn}${r.max ? `/${r.max}` : ""}${r.until ? ` · bitiş ${r.until}` : ""}${r.progress ? ` · ${r.progress}` : ""}`,
+  gap: (t) => `+${t} ara`,
+  nextUp: (next) => `Sıradaki: ${next}`,
+  calls: (n) => `${n} çağrı`,
+  agents: (n) => `${n} ajan`,
+  tokenRow: (i, r, w, o) => `gir ${i} oku ${r} yaz ${w} çık ${o}`,
+  tokenHead: "Token",
+  kinds: { ana: "ana", alt: "alt", wf: "wf" }, // a row's kind: the main thread, subagents, workflow agents
+  costWhenDone: "iş bitince",
+  compactions: (n) => `sıkıştırma ${n}`,
+  thinking: (t) => `düşünme ${t}`,
+  toolErrors: (n) => `araç hatası ${n}`,
+  workflows: (list) => `workflow: ${list}`,
+  agentLater: "ajan çıktısı iş bitince tamamlanır",
+  otherLabel: "diğer",
+  totalLabel: "toplam",
+  limitLabel: "limit",
+  nightTotal: (n) => `Gece toplamı · ${n} iş`,
+  atStart: "başı ",
+  atEnd: "sonu ",
+  atNow: "şimdi",
+  resets: "sıfırlanma",
+  timelineHead: "Limit çizelgesi",
+  timelineNote: "(hesabın tamamı)",
+  commitsHead: "Commit'ler",
+  unpushed: (n) => `push bekleyen ${n}`,
+  moreCommits: (n) => `… ${n} daha`,
+  reportLabel: "Rapor",
+  olderInReport: (n, nn) => `ve ${n} eski madde (#${nn}'in raporunda)`,
+
+  // Telegram commands: the name shown in the bot's menu and what it does
+  cmdStatus: "durum", cmdStatusDesc: "Şu an ne çalışıyor",
+  cmdReport: "rapor", cmdReportDesc: "Tam rapor",
+  preview: "önizleme",
+  silent: "sessiz",
+
+  // `status` and `wait`
+  cli: {
+    noRun: "no night-shift run recorded for this repository",
+    statusRunning: (pid, since) => `running (pid ${pid}) since ${since}`,
+    statusFinished: (at, reason) => `finished ${at}: ${reason}`,
+    statusScheduled: (at) => `scheduled ${at}, not running`,
+    statusState: (state) => `state: ${state}`,
+    notStartedYet: "runner henüz başlamadı; bekleniyor",
+    waiting: (pid, state) => `bekliyor: runner pid ${pid} (${state})`,
+    handedOver: (from, to) => `runner devretti: pid ${from} → ${to}`,
+    userWaits: (lines) => (lines.length ? `Kullanıcıyı bekleyenler:\n${lines.join("\n")}` : "Kullanıcıyı bekleyenler: listede madde yok"),
+    reportLine: (report, cmd) => `Rapor: ${report} · tam durum: ${cmd}`,
+    crashed: (why) => `zincir çöktü: ${why}`,
+    logTail: "chain.log'un sonu:",
+    resumeHint: (cmd) => `Kullanıcı isterse devam (promptsuz; yarım kalan oturum kendi konuşmasında sürer): ${cmd}`,
+    neverStarted: (min) => `${min} dakikada runner başlamadı (Task Scheduler görevi çalışmadı)`,
+    handoverLost: (pid, min) => `runner ${pid} devretti ama ${min} dakikada yeni runner başlamadı`,
+    diedNoEnd: (pid) => `runner (pid ${pid}) bitiş satırı yazmadan kapandı`,
+  },
+};

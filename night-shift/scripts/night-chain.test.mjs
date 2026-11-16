@@ -46,7 +46,7 @@ function setup() {
   fs.writeFileSync(fake, FAKE);
   fs.writeFileSync(path.join(state, "next-prompt.md"), "first");
   fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ repo, state, until: null, deadline: null, maxSessions: 4,
-    sessionHours: 1, model: null, effort: "xhigh", claude: fake, report: "NIGHT_RUNS.md", path: process.env.PATH, startedAt: "test" }));
+    sessionHours: 1, model: null, effort: "xhigh", lang: "tr", claude: fake, report: "NIGHT_RUNS.md", path: process.env.PATH, startedAt: "test" }));
   const env = { ...process.env, USERPROFILE: home, HOME: home, TEST_CHAIN: CHAIN, NIGHT_SHIFT_LAUNCH: "direct" };
   delete env.NIGHT_SHIFT_RELOADED;
   return { root, home, repo, state, env };
@@ -491,7 +491,7 @@ test("report: a job resumed after a restart shows its working time and the gap a
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const lit = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const startChain = (repo, state, env, cwd) =>
-  execFileSync(process.execPath, [CHAIN, "start", "--repo", repo, "--state", state, "--prompt", "first"], { env, cwd, encoding: "utf8" });
+  execFileSync(process.execPath, [CHAIN, "start", "--repo", repo, "--state", state, "--prompt", "first", "--lang", "tr"], { env, cwd, encoding: "utf8" });
 const waitFor = (repo, env, cwd) => {
   const proc = spawn(process.execPath, [CHAIN, "wait", "--repo", repo], { env, cwd, stdio: ["ignore", "pipe", "pipe"] });
   let out = "";
@@ -1177,4 +1177,50 @@ test("the chain's two wait messages print the hours short", async () => {
   assert.match(far.log, /more than 1\.5 h away \(--max-wait-hours\)/);
   const tiny = await limitRun(`limit(Math.floor(Date.now() / 1000) + 3 * 86400);`, { maxWaitHours: 0.0001 });
   assert.match(tiny.log, /more than <0\.01 h away/);
+});
+
+// ---------------------------------------------------------------- the language of status and wait
+// A finished run whose pointer and chain.log say so, in the language the run.json names (or none).
+const finishedRun = (lang) => {
+  const c = pointerCase();
+  const f = path.join(c.state, "run.json");
+  const { lang: _gone, ...run } = JSON.parse(fs.readFileSync(f, "utf8"));
+  fs.writeFileSync(f, JSON.stringify(lang ? { ...run, lang } : run));
+  fs.writeFileSync(path.join(c.state, "chain.log"), "[2026-11-16 03:00:00] chain starts\n[2026-11-16 03:30:00] chain ends: STOP: done\n");
+  c.write({ finished: true, finishedAt: "2026-11-16 03:30:00", reason: "STOP: done" });
+  return c;
+};
+
+test("status on a run.json from before the language was a setting exits 0 and prints its usual first line", () => {
+  const r = finishedRun(null).run("status");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^finished 2026-11-16 03:30:00: STOP: done\nstate: /);
+  assert.match(r.stdout, /Problems\n/, "no lang and no config file: English");
+});
+
+test("status and wait print the run's language: Turkish under lang tr, English under lang en", () => {
+  const tr = finishedRun("tr"), en = finishedRun("en");
+  const trStatus = tr.run("status").stdout, enStatus = en.run("status").stdout;
+  assert.match(trStatus, /^finished 2026-11-16 03:30:00: STOP: done\n/);
+  assert.match(trStatus, /Gece vardiyası · /);
+  assert.match(trStatus, /Bitti: STOP: done/);
+  assert.match(enStatus, /^finished 2026-11-16 03:30:00: STOP: done\n/);
+  assert.match(enStatus, /Night shift · /);
+  assert.match(enStatus, /Ended: STOP: done/);
+  assert.doesNotMatch(enStatus, /Gece|Sorun|Bitti/);
+  const trWait = tr.run("wait"), enWait = en.run("wait");
+  assert.equal(trWait.status, 0, trWait.stderr);
+  assert.equal(enWait.status, 0, enWait.stderr);
+  assert.match(trWait.stdout, /Kullanıcıyı bekleyenler: listede madde yok/);
+  assert.match(trWait.stdout, /^Rapor: /m);
+  assert.match(enWait.stdout, /Waiting for the user: no items listed/);
+  assert.match(enWait.stdout, /^Report: .* · full status: node /m);
+  assert.doesNotMatch(enWait.stdout, /Kullanıcı|Rapor|bekleyen/);
+});
+
+test("a global config's lang picks the language of a run.json that names none", () => {
+  const c = finishedRun(null);
+  fs.mkdirSync(path.join(c.home, ".claude", "night-shift"), { recursive: true });
+  fs.writeFileSync(path.join(c.home, ".claude", "night-shift", "config.json"), JSON.stringify({ lang: "tr" }));
+  assert.match(c.run("status").stdout, /Gece vardiyası · /);
 });

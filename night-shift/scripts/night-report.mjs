@@ -5,15 +5,16 @@
 //
 //   node night-report.mjs show   --state <dir>
 //   node night-report.mjs notify --state <dir> [--headline <text>] [--dry]
-//   node night-report.mjs card   --state <dir> [--nn <n> | --chain [reason]] [--send]   (default: the /durum card)
+//   node night-report.mjs card   --state <dir> [--nn <n> | --chain [reason]] [--send]   (default: the /durum (/status) card)
 //   node night-report.mjs watch  --state <dir> --pid <runner pid> [--announce] [--dry]
 //   node night-report.mjs telegram-setup [--chat <id>]   (after pressing Start in the bot's chat)
 //
 // watch follows chain.log and sends a short card (telegram-cards.mjs) when a
 // session ends, a line when the chain waits for a usage limit, resumes or
 // retries a session, or a session goes quiet for 30 minutes, and a summary
-// when the chain ends or its runner dies. In the bot's chat, /durum answers
-// with what runs now and /rapor with the full report that `show` prints.
+// when the chain ends or its runner dies. In the bot's chat, /durum (/status) answers
+// with what runs now and /rapor (/report) with the full report that `show` prints; the
+// cards and the report are in the run's language (run.json "lang", lang/index.mjs).
 
 import fs from "node:fs";
 import path from "node:path";
@@ -22,6 +23,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { sessionCard, eventLine, chainCard, statusCard, reportCard, reportSection, chainProgress, progressText, splitHtml } from "./telegram-cards.mjs";
 import { sessionPlan } from "./effort.mjs";
+import { strings, langOf } from "./lang/index.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const TELEGRAM = path.join(os.homedir(), ".claude", "night-shift", "telegram.json");
@@ -41,8 +43,8 @@ const hm = (d) => d.toLocaleTimeString("sv-SE").slice(0, 5);
 const when = (at) => new Date(at.replace(" ", "T"));
 const tokens = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
 const usd = (n) => `$${n.toFixed(2)}`;
-const pct = (u) => (u == null ? "—" : `%${Math.round(u > 1 ? u : u * 100)}`);
-const minutes = (ms) => { const m = Math.round(ms / 60_000); return m >= 60 ? `${Math.floor(m / 60)} sa ${m % 60} dk` : `${m} dk`; };
+const pct = (u, T) => (u == null ? "—" : T.pct(Math.round(u > 1 ? u : u * 100)));
+const minutes = (ms, T) => T.minutes(Math.round(ms / 60_000));
 const modelName = (m) => m.replace(/^claude-/, "").replace(/\[.*\]$/, "").replace(/-(\d+)-(\d+).*$/, " $1.$2");
 
 // ---------------------------------------------------------------- tokens
@@ -225,6 +227,7 @@ const git = (repo, args) => { try { return execFileSync("git", args, { cwd: repo
 function collect(state, pid = null) {
   state = path.resolve(state);
   const run = JSON.parse(read(path.join(state, "run.json")) || "{}");
+  const T = strings(langOf(run));
   const events = chainEvents(state);
   const sessions = [];
   for (const e of events) {
@@ -242,7 +245,7 @@ function collect(state, pid = null) {
     // What the runner said about a session's model and handover (night-chain.mjs, 2026-11-15 on).
     else if ((m = /^session (\d+)(?::| )/.exec(e.text))) {
       const s = sessions.findLast((x) => x.nn === m[1]);
-      const note = runnerNote(e.text);
+      const note = runnerNote(e.text, T);
       if (s && note) s.notes = [...(s.notes || []), note];
     }
   }
@@ -268,41 +271,47 @@ function collect(state, pid = null) {
 
   const issues = [];
   for (const s of parsed) {
-    if (s.result?.is_error || (s.result && s.result.subtype !== "success")) issues.push(`❌ #${s.nn} hata ile bitti (${esc(s.result.subtype)})`);
-    if (s.end && !s.result) issues.push(`❌ #${s.nn} sonuç satırı olmadan bitti (${esc(s.summary || "")})`);
-    if (s.denials.length) issues.push(`⚠️ #${s.nn} guard ${s.denials.length} kez reddetti: ${esc(s.denials.slice(0, 2).join("; "))}`);
+    if (s.result?.is_error || (s.result && s.result.subtype !== "success")) issues.push(`❌ #${s.nn} ${T.failed} (${esc(s.result.subtype)})`);
+    if (s.end && !s.result) issues.push(`❌ #${s.nn} ${T.noResult} (${esc(s.summary || "")})`);
+    if (s.denials.length) issues.push(`⚠️ #${s.nn} ${T.denied(s.denials.length)}: ${esc(s.denials.slice(0, 2).join("; "))}`);
     for (const n of s.notes || []) issues.push(`⚠️ #${s.nn} ${esc(n)}`);
     if (!s.end && running && Date.now() - s.mtime > QUIET_MINUTES * 60_000) {
-      issues.push(`⚠️ #${s.nn} ${minutes(Date.now() - s.mtime)}'dır sessiz (son adım: ${esc(s.lastStep || "?")})`);
+      issues.push(`⚠️ #${s.nn} ${T.quietFor(minutes(Date.now() - s.mtime, T))} (${T.lastStep}: ${esc(s.lastStep || "?")})`);
     }
   }
   const since = when(String(run.startedAt || ""));
   for (const e of events.filter((x) => Number.isNaN(since.getTime()) || when(x.at) >= since)) {
-    if (e.text.startsWith("usage limit: ")) issues.push(`⏳ ${hm(when(e.at))} limit doldu, ${esc(e.text.replace(/^usage limit: waiting until \S+ /, ""))}'e kadar bekledi`);
-    if (/^session \d+: transient error .*; try 1,/.test(e.text)) issues.push(`🔌 ${hm(when(e.at))} ${esc(e.text.replace(/^session (\d+).*$/, "#$1 bağlantı ya da API hatası, yeniden denendi"))}`);
-    if (/left no continuation prompt/.test(e.text)) issues.push(`🔁 ${hm(when(e.at))} ${esc(e.text.replace(/^session (\d+).*$/, "#$1 devam promptu yazmadı, yeniden denendi"))}`);
+    if (e.text.startsWith("usage limit: ")) issues.push(`⏳ ${hm(when(e.at))} ${T.limitWaited(esc(e.text.replace(/^usage limit: waiting until \S+ /, "")))}`);
+    // A line that does not open with "session N" (none today) is shown as it is.
+    const nn = /^session (\d+)/.exec(e.text)?.[1];
+    const said = (make) => esc(nn ? make(nn) : e.text);
+    if (/^session \d+: transient error .*; try 1,/.test(e.text)) issues.push(`🔌 ${hm(when(e.at))} ${said(T.retriedTransient)}`);
+    if (/left no continuation prompt/.test(e.text)) issues.push(`🔁 ${hm(when(e.at))} ${said(T.retriedNoPrompt)}`);
   }
-  if (!ended && !running) issues.push("🛑 Runner çalışmıyor ve zincir bitti demedi (pencere kapanmış ya da yeniden başlatılmış olabilir)");
+  if (!ended && !running) issues.push(`🛑 ${T.runnerGone}`);
   const nextPrompt = read(path.join(state, "next-prompt.md")).trim();
-  return { state, run, events, parsed, ended, running, issues, nextPrompt, sections: new Map() };
+  return { state, run, T, events, parsed, ended, running, issues, nextPrompt, sections: new Map() };
 }
 
 // A chain.log line about a session's model or handover, as a problem of that job (null for others).
-const FABLE_WHY = [[/used up until (\S+ \S+)/, (m) => `Fable payı ${m[1]}'e kadar bitti`],
-  [/is at (\S+), at or over the (\S+) ceiling/, (m) => `Fable payı ${m[1]}, ${m[2]} tavanında`],
-  [/(\d+) Fable sessions already ran/, (m) => `zincir ${m[1]} Fable oturumu çalıştırdı, pay bilinmiyor`]];
-function runnerNote(text) {
+const FABLE_WHY = [[/used up until (\S+ \S+)/, (m, T) => T.note.fableUntil(m[1])],
+  [/is at (\S+), at or over the (\S+) ceiling/, (m, T) => T.note.fableAt(m[1], m[2])],
+  [/(\d+) Fable sessions already ran/, (m, T) => T.note.fableCount(m[1])]];
+function runnerNote(text, T) {
   let m;
   if ((m = /^session \d+ asked for Fable, but (.*); it runs on Opus at max$/.exec(text))) {
-    const why = FABLE_WHY.map(([re, say]) => { const w = re.exec(m[1]); return w && say(w); }).find(Boolean) || m[1];
-    return `Fable istedi, Opus max'te çalıştı (${why})`;
+    const why = FABLE_WHY.map(([re, say]) => { const w = re.exec(m[1]); return w && say(w, T); }).find(Boolean) || m[1];
+    return T.note.fableAsked(why);
   }
-  if (/^session \d+: Fable's allowance is used up/.test(text)) return "Fable payı bittiği için kesildi; parçası Opus max'te sürer";
-  if ((m = /^session \d+ was to run on Fable, but (.*)$/.exec(text))) return `Fable'da çalışmadı: ${m[1]}`;
-  if ((m = /^session \d+ wrote a next-prompt\.md of (\d+) KB/.exec(text))) return `devam promptu ${m[1]} KB (30 KB üstü; her çağrıda baştan okunur)`;
-  if ((m = /^session \d+: MODEL: (\S+) is not a model/.exec(text))) return `MODEL: ${m[1]} tanınmadı, Opus'ta çalıştı`;
+  if (/^session \d+: Fable's allowance is used up/.test(text)) return T.note.fableCut;
+  if ((m = /^session \d+ was to run on Fable, but (.*)$/.exec(text))) return T.note.fableNot(m[1]);
+  if ((m = /^session \d+ wrote a next-prompt\.md of (\d+) KB/.exec(text))) return T.note.bigPrompt(m[1]);
+  if ((m = /^session \d+: MODEL: (\S+) is not a model/.exec(text))) return T.note.badModel(m[1]);
   return null;
 }
+
+// The table of a state folder's run, for what has no collect(): the watcher, the card command, `status`.
+export const stateStrings = (state, repo) => strings(langOf({ repo, ...readJson(path.join(state, "run.json")) }));
 
 // A job's night-report section, read once per collect (the report runs to thousands of lines).
 function sectionOf(c, s) {
@@ -334,29 +343,29 @@ function progressOf(c, upto = null) {
   const now = upto?.end ? when(upto.end) : new Date();
   const p = chainProgress(jobs.map((s) => ({ ok: okOf(s), ended: Boolean(s.end), workMs: workMs(s), remaining: s.end ? sectionOf(c, s)?.remaining ?? null : null })),
     { now, waitUntil: upto ? null : limitWait(c) });
-  return progressText(p, now);
+  return progressText(p, now, c.T);
 }
 
 export function buildReport(state, { headline = "", focus = null, pid = null } = {}) {
   const c = collect(state, pid);
-  const { run, parsed, ended, running, issues, nextPrompt } = c;
+  const { run, parsed, ended, running, issues, nextPrompt, T } = c;
   state = path.resolve(state);
 
   const out = [];
   const progress = running ? progressOf(c) : null;
-  const status = ended ? `Bitti: ${esc(ended.text.slice(12))}` : running ? `Çalışıyor · iş ${parsed.at(-1)?.nn || "—"}${run.maxSessions ? `/${run.maxSessions}` : ""}${run.until ? ` · bitiş ${run.until}` : ""}${progress ? ` · ${esc(progress)}` : ""}` : "Durdu";
-  out.push(`🌙 <b>Gece vardiyası · ${esc(path.basename(run.repo || state))}</b>\n${headline ? `${esc(headline)}\n` : ""}${status} · ${hm(new Date())}`);
-  out.push(`<b>Sorunlar</b>\n${issues.length ? issues.join("\n") : "✅ Sorun yok"}`);
+  const status = ended ? T.ended(esc(ended.text.slice(12))) : running ? T.runningLine({ nn: parsed.at(-1)?.nn || "—", max: run.maxSessions, until: run.until, progress: progress ? esc(progress) : "" }) : T.stopped;
+  out.push(`🌙 <b>${T.reportTitle} · ${esc(path.basename(run.repo || state))}</b>\n${headline ? `${esc(headline)}\n` : ""}${status} · ${hm(new Date())}`);
+  out.push(`<b>${T.problemsHead}</b>\n${issues.length ? issues.join("\n") : `✅ ${T.noProblems}`}`);
 
   const jobs = parsed.map((s) => {
     const at = spanMs(s) > 12 * 3_600_000 ? (d) => `${d.toLocaleDateString("sv-SE").slice(5)} ${hm(d)}` : hm;
     const span = `${at(when(s.start))}–${s.end ? at(when(s.end)) : ""}`;
     const idle = idleMs(s);
-    const took = minutes(spanMs(s) - idle) + (idle >= 60_000 ? ` (+${minutes(idle)} ara)` : "");
-    const mark = !s.end ? "sürüyor" : s.result && !s.result.is_error && s.result.subtype === "success" ? "✅" : "❌";
+    const took = minutes(spanMs(s) - idle, T) + (idle >= 60_000 ? ` (${T.gap(minutes(idle, T))})` : "");
+    const mark = !s.end ? T.jobRunning : s.result && !s.result.is_error && s.result.subtype === "success" ? "✅" : "❌";
     // Its report title; a prompt's first sentence is the same boilerplate for every job.
     const title = sectionOf(c, s)?.title;
-    const extra = !s.end && s.lastStep ? `\n  son adım: ${esc(String(s.lastStep).slice(0, 60))} (${minutes(Date.now() - s.mtime)} önce)` : "";
+    const extra = !s.end && s.lastStep ? `\n  ${T.lastStep}: ${esc(String(s.lastStep).slice(0, 60))} (${T.ago(minutes(Date.now() - s.mtime, T))})` : "";
     return `#${s.nn} ${span} · ${took} · ${mark}${title ? `\n  ${esc(title)}` : ""}${extra}`;
   });
   // next-prompt.md still holds the running session's own prompt until that session hands over.
@@ -364,31 +373,31 @@ export function buildReport(state, { headline = "", focus = null, pid = null } =
   const lastDone = parsed.findLast((s) => s.end);
   const next = lastDone && sectionOf(c, lastDone)?.next;
   if (/^STOP\b/i.test(nextPrompt) && nextPrompt !== current) jobs.push(`🛑 ${esc(nextPrompt.split("\n").slice(0, 8).join("\n"))}`);
-  else if (next && !ended) jobs.push(`Sıradaki: ${esc(next)}`);
-  out.push(`<b>İşler</b>\n${jobs.join("\n") || "henüz iş yok"}`);
+  else if (next && !ended) jobs.push(T.nextUp(esc(next)));
+  out.push(`<b>${T.jobsHead}</b>\n${jobs.join("\n") || T.noJobs}`);
 
   const order = { ana: 0, alt: 1, wf: 2 };
   const rowLines = (rows) => rows.sort((a, b) => order[a.kind] - order[b.kind] || b.usage.units - a.usage.units).map((r) => {
-    const count = r.kind === "ana" ? `${r.usage.calls} çağrı` : `${r.agents} ajan`;
+    const count = r.kind === "ana" ? T.calls(r.usage.calls) : T.agents(r.agents);
     const cost = r.cost != null ? `${r.estimated ? "≈" : ""}${usd(r.cost)}` : "";
     const u = r.usage;
-    return `${`${r.kind} ${modelName(r.model)}`.padEnd(15)} ${count.padEnd(10)} ${cost}\n  gir ${tokens(u.input)} oku ${tokens(u.read)} yaz ${tokens(u.write)} çık ${tokens(u.output)}`;
+    return `${`${T.kinds[r.kind]} ${modelName(r.model)}`.padEnd(15)} ${count.padEnd(10)} ${cost}\n  ${T.tokenRow(tokens(u.input), tokens(u.read), tokens(u.write), tokens(u.output))}`;
   }).join("\n");
   // Fable's share comes only with Fable calls, so it spans the events that carry it.
   const fableSpan = (ls) => {
     const f = ls.map(fableOf).filter(Boolean);
-    return f.length ? ` · Fable ${pct(f[0].utilization)}→${pct(f.at(-1).utilization)}` : "";
+    return f.length ? ` · Fable ${pct(f[0].utilization, T)}→${pct(f.at(-1).utilization, T)}` : "";
   };
-  const limitSpan = (ls) => (ls.length ? `5s ${pct(ls[0].unifiedWindows?.five_hour?.utilization)}→${pct(ls.at(-1).unifiedWindows?.five_hour?.utilization)} · 7g ${pct(ls[0].unifiedWindows?.seven_day?.utilization)}→${pct(ls.at(-1).unifiedWindows?.seven_day?.utilization)}${fableSpan(ls)}` : "—");
+  const limitSpan = (ls) => (ls.length ? `${T.five} ${pct(ls[0].unifiedWindows?.five_hour?.utilization, T)}→${pct(ls.at(-1).unifiedWindows?.five_hour?.utilization, T)} · ${T.seven} ${pct(ls[0].unifiedWindows?.seven_day?.utilization, T)}→${pct(ls.at(-1).unifiedWindows?.seven_day?.utilization, T)}${fableSpan(ls)}` : "—");
   const sessionCost = (s) => (s.result ? usd(s.result.total_cost_usd || 0)
-    : s.rows.some((r) => r.cost != null) ? `≈${usd(s.rows.reduce((a, r) => a + (r.cost || 0), 0))} (sürüyor)` : "iş bitince");
+    : s.rows.some((r) => r.cost != null) ? `≈${usd(s.rows.reduce((a, r) => a + (r.cost || 0), 0))} (${T.jobRunning})` : T.costWhenDone);
 
   const shown = focus === "all" ? parsed : parsed.filter((s) => s.nn === (focus || parsed.at(-1)?.nn));
   for (const s of shown) {
-    const other = [`sıkıştırma ${s.compactions}`, `düşünme ${tokens(s.rows.reduce((a, r) => a + r.usage.thinking, 0))}`, `araç hatası ${s.toolErrors}`];
-    if (s.workflows.length) other.push(`workflow: ${s.workflows.join(", ")}`);
-    if (!s.result && s.rows.some((r) => r.kind !== "ana")) other.push("ajan çıktısı iş bitince tamamlanır");
-    out.push(`<b>Token · #${s.nn}</b>\n<pre>${esc(rowLines([...s.rows]))}\ndiğer: ${esc(other.join(" · "))}\ntoplam ${sessionCost(s)}\nlimit ${limitSpan(s.limits)}</pre>`);
+    const other = [T.compactions(s.compactions), T.thinking(tokens(s.rows.reduce((a, r) => a + r.usage.thinking, 0))), T.toolErrors(s.toolErrors)];
+    if (s.workflows.length) other.push(T.workflows(s.workflows.join(", ")));
+    if (!s.result && s.rows.some((r) => r.kind !== "ana")) other.push(T.agentLater);
+    out.push(`<b>${T.tokenHead} · #${s.nn}</b>\n<pre>${esc(rowLines([...s.rows]))}\n${T.otherLabel}: ${esc(other.join(" · "))}\n${T.totalLabel} ${sessionCost(s)}\n${T.limitLabel} ${limitSpan(s.limits)}</pre>`);
   }
 
   if (parsed.length > 1 || focus === "all") {
@@ -401,7 +410,7 @@ export function buildReport(state, { headline = "", focus = null, pid = null } =
       t.estimated ||= r.estimated;
     }
     const sum = Object.values(total).reduce((a, r) => a + r.cost, 0);
-    out.push(`<b>Gece toplamı · ${parsed.length} iş</b>\n<pre>${esc(rowLines(Object.values(total)))}\ntoplam ${parsed.some((s) => !s.result) ? "≈" : ""}${usd(sum)}\nlimit ${limitSpan(parsed.flatMap((s) => s.limits))}</pre>`);
+    out.push(`<b>${T.nightTotal(parsed.length)}</b>\n<pre>${esc(rowLines(Object.values(total)))}\n${T.totalLabel} ${parsed.some((s) => !s.result) ? "≈" : ""}${usd(sum)}\n${T.limitLabel} ${limitSpan(parsed.flatMap((s) => s.limits))}</pre>`);
   }
 
   const timeline = [];
@@ -409,24 +418,24 @@ export function buildReport(state, { headline = "", focus = null, pid = null } =
     if (!s.limits.length) continue;
     const w = (l) => l.unifiedWindows || {};
     const fs0 = s.limits.map(fableOf).filter(Boolean);
-    const f = (x) => (fs0.length ? ` F ${pct(x?.utilization)}` : "");
-    timeline.push(`${hm(when(s.start))} #${s.nn} başı  5s ${pct(w(s.limits[0]).five_hour?.utilization).padEnd(4)} 7g ${pct(w(s.limits[0]).seven_day?.utilization).padEnd(4)}${f(fs0[0])}`.trimEnd());
-    timeline.push(`${s.end ? hm(when(s.end)) : hm(new Date())} #${s.nn} ${s.end ? "sonu " : "şimdi"} 5s ${pct(w(s.limits.at(-1)).five_hour?.utilization).padEnd(4)} 7g ${pct(w(s.limits.at(-1)).seven_day?.utilization).padEnd(4)}${f(fs0.at(-1))}`.trimEnd());
+    const f = (x) => (fs0.length ? ` F ${pct(x?.utilization, T)}` : "");
+    timeline.push(`${hm(when(s.start))} #${s.nn} ${T.atStart} ${T.five} ${pct(w(s.limits[0]).five_hour?.utilization, T).padEnd(4)} ${T.seven} ${pct(w(s.limits[0]).seven_day?.utilization, T).padEnd(4)}${f(fs0[0])}`.trimEnd());
+    timeline.push(`${s.end ? hm(when(s.end)) : hm(new Date())} #${s.nn} ${s.end ? T.atEnd : T.atNow} ${T.five} ${pct(w(s.limits.at(-1)).five_hour?.utilization, T).padEnd(4)} ${T.seven} ${pct(w(s.limits.at(-1)).seven_day?.utilization, T).padEnd(4)}${f(fs0.at(-1))}`.trimEnd());
   }
   const all = parsed.flatMap((s) => s.limits);
   const latest = all.at(-1)?.unifiedWindows;
   if (latest) {
-    const reset = (t, long) => { const d = new Date(t * 1000); return long ? `${d.toLocaleDateString("tr-TR").slice(0, 5)} ${hm(d)}` : hm(d); };
+    const reset = (t, long) => { const d = new Date(t * 1000); return long ? `${T.dayMonth(d)} ${hm(d)}` : hm(d); };
     const fable = all.map(fableOf).filter(Boolean).at(-1);
-    timeline.push(`sıfırlanma: 5s ${reset(latest.five_hour?.resetsAt)} · 7g ${reset(latest.seven_day?.resetsAt, true)}${fable?.resetsAt ? ` · Fable ${reset(fable.resetsAt, true)}` : ""}`);
+    timeline.push(`${T.resets}: ${T.five} ${reset(latest.five_hour?.resetsAt)} · ${T.seven} ${reset(latest.seven_day?.resetsAt, true)}${fable?.resetsAt ? ` · Fable ${reset(fable.resetsAt, true)}` : ""}`);
   }
-  if (timeline.length) out.push(`<b>Limit çizelgesi</b> (hesabın tamamı)\n<pre>${esc(timeline.join("\n"))}</pre>`);
+  if (timeline.length) out.push(`<b>${T.timelineHead}</b> ${T.timelineNote}\n<pre>${esc(timeline.join("\n"))}</pre>`);
 
   if (run.repo && run.startedAt) {
     const commits = git(run.repo, ["log", `--since=${run.startedAt}`, "--format=%h %s"]).split("\n").filter(Boolean);
     const ahead = git(run.repo, ["rev-list", "--count", "@{u}..HEAD"]);
-    const head = `<b>Commit'ler</b> · ${commits.length}${ahead ? ` · push bekleyen ${ahead}` : ""}`;
-    out.push(`${head}${commits.length ? `\n${commits.slice(0, 8).map((c) => esc(c.slice(0, 72))).join("\n")}${commits.length > 8 ? `\n… ${commits.length - 8} daha` : ""}` : ""}\nRapor: ${esc(run.report || "NIGHT_RUNS.md")}`);
+    const head = `<b>${T.commitsHead}</b> · ${commits.length}${ahead ? ` · ${T.unpushed(ahead)}` : ""}`;
+    out.push(`${head}${commits.length ? `\n${commits.slice(0, 8).map((c) => esc(c.slice(0, 72))).join("\n")}${commits.length > 8 ? `\n${T.moreCommits(commits.length - 8)}` : ""}` : ""}\n${T.reportLabel}: ${esc(run.report || "NIGHT_RUNS.md")}`);
   }
 
   const html = out.join("\n\n");
@@ -440,33 +449,34 @@ export function buildReport(state, { headline = "", focus = null, pid = null } =
 }
 
 // ---------------------------------------------------------------- cards
-const pctOr = (u) => (u == null ? null : pct(u));
+const pctOr = (u, T) => (u == null ? null : pct(u, T));
 // Fable's weekly allowance, in the rate_limit_events of Fable calls only.
 const fableOf = (l) => l?.unifiedWindows?.seven_day_overage_included || null;
-const lastFable = (ls) => pctOr(ls.map(fableOf).filter(Boolean).at(-1)?.utilization);
+const lastFable = (ls, T) => pctOr(ls.map(fableOf).filter(Boolean).at(-1)?.utilization, T);
 const okOf = (s) => Boolean(s.result && !s.result.is_error && s.result.subtype === "success");
 const costOf = (s) => (s.result ? s.result.total_cost_usd || 0 : s.rows.reduce((a, r) => a + (r.cost || 0), 0));
 const firstCommit = (f) => f.commits[0]?.replace(/^\S+\s/, "");
 
 // One job's card facts: its title and next step from the night report, its own problems and commits.
 function jobFacts(c, s) {
+  const { T } = c;
   const section = sectionOf(c, s);
   const range = [`--since=${s.start}`, ...(s.end ? [`--until=${s.end}`] : [])];
   const commits = c.run.repo ? git(c.run.repo, ["log", ...range, "--format=%h %s"]).split("\n")
-    .filter((l) => l && !/^\S+ docs: gece raporu/.test(l)) : [];
+    .filter((l) => l && !/^\S+ docs: (?:gece raporu|night report)/.test(l)) : [];
   const w = s.limits.at(-1)?.unifiedWindows || {};
   return {
-    nn: s.nn, ok: okOf(s), took: minutes(workMs(s)),
-    cost: `${s.result ? "" : "≈"}${usd(costOf(s))}`, five: pctOr(w.five_hour?.utilization), seven: pctOr(w.seven_day?.utilization),
-    fable: lastFable(s.limits),
+    nn: s.nn, ok: okOf(s), took: minutes(workMs(s), T),
+    cost: `${s.result ? "" : "≈"}${usd(costOf(s))}`, five: pctOr(w.five_hour?.utilization, T), seven: pctOr(w.seven_day?.utilization, T),
+    fable: lastFable(s.limits, T),
     title: section?.title, next: section?.next, waits: section?.waits || [], older: section?.older || 0,
     progress: s.end ? progressOf(c, s) : null,
     commits,
     problems: [
-      ...(s.result && !okOf(s) ? [`hata ile bitti (${s.result.subtype})`] : []),
-      ...(s.end && !s.result ? ["sonuç satırı olmadan bitti"] : []),
-      ...(s.denials.length ? [`guard ${s.denials.length} kez reddetti: ${s.denials[0]}`] : []),
-      ...(effortOff(c.state, c.run, s) ? [`düzey ${s.efforts.join("/")} (${wantOf(c.state, c.run, s.nn).effort} olmalı)`] : []),
+      ...(s.result && !okOf(s) ? [`${T.failed} (${s.result.subtype})`] : []),
+      ...(s.end && !s.result ? [T.noResult] : []),
+      ...(s.denials.length ? [`${T.denied(s.denials.length)}: ${s.denials[0]}`] : []),
+      ...(effortOff(c.state, c.run, s) ? [T.effortOff(s.efforts.join("/"), wantOf(c.state, c.run, s.nn).effort)] : []),
       ...(s.notes || []),
     ],
   };
@@ -486,11 +496,12 @@ const effortOff = (state, run, s) => { const want = wantOf(state, run, s.nn).eff
 export function sessionMessage(state, nn, pid) {
   const c = collect(state, pid);
   const s = c.parsed.findLast((p) => p.nn === nn);
-  return s ? sessionCard(jobFacts(c, s)) : null;
+  return s ? sessionCard(jobFacts(c, s), c.T) : null;
 }
 
 export function chainMessage(state, reason, pid) {
   const c = collect(state, pid);
+  const { T } = c;
   const jobs = runJobs(c);
   const facts = jobs.map((s) => jobFacts(c, s));
   const limits = jobs.flatMap((s) => s.limits).map((l) => l.unifiedWindows?.seven_day?.utilization).filter((u) => u != null);
@@ -500,34 +511,35 @@ export function chainMessage(state, reason, pid) {
   return chainCard({
     project: path.basename(c.run.repo || c.state), reason,
     jobs: facts.map((f) => ({ nn: f.nn, ok: f.ok, title: f.title || firstCommit(f), took: f.took })),
-    took: jobs.length ? minutes(jobs.reduce((a, s) => a + workMs(s), 0)) : null,
+    took: jobs.length ? minutes(jobs.reduce((a, s) => a + workMs(s), 0), T) : null,
     cost: usd(jobs.reduce((a, s) => a + costOf(s), 0)),
-    seven: limits.length ? `${pct(limits[0])}→${pct(limits.at(-1))}` : null,
-    fable: (() => { const f = jobs.flatMap((s) => s.limits).map(fableOf).filter(Boolean); return f.length ? `${pct(f[0].utilization)}→${pct(f.at(-1).utilization)}` : null; })(),
+    seven: limits.length ? `${pct(limits[0], T)}→${pct(limits.at(-1), T)}` : null,
+    fable: (() => { const f = jobs.flatMap((s) => s.limits).map(fableOf).filter(Boolean); return f.length ? `${pct(f[0].utilization, T)}→${pct(f.at(-1).utilization, T)}` : null; })(),
     waits: waitList.length, waitList,
     problems: facts.flatMap((f) => f.problems.map((p) => `#${f.nn} ${p}`)),
-  });
+  }, T);
 }
 
-// /rapor: this run's jobs one line each, with the progress, the limits, problems and what waits.
+// /rapor (/report): this run's jobs one line each, with the progress, the limits, problems and what waits.
 export function reportMessage(state, pid) {
   const c = collect(state, pid);
+  const { T } = c;
   const jobs = runJobs(c);
   const w = jobs.flatMap((s) => s.limits).at(-1)?.unifiedWindows || {};
   return reportCard({
     project: path.basename(c.run.repo || c.state),
-    state: c.ended ? `bitti: ${c.ended.text.slice(12).replace(/^STOP:\s*/i, "")}` : c.running ? "çalışıyor" : "durdu",
+    state: c.ended ? T.stateEnded(c.ended.text.slice(12).replace(/^STOP:\s*/i, "")) : c.running ? T.stateRunning : T.stateStopped,
     at: hm(new Date()),
     progress: c.running ? progressOf(c) : null,
-    five: pctOr(w.five_hour?.utilization), seven: pctOr(w.seven_day?.utilization), fable: lastFable(jobs.flatMap((s) => s.limits)),
+    five: pctOr(w.five_hour?.utilization, T), seven: pctOr(w.seven_day?.utilization, T), fable: lastFable(jobs.flatMap((s) => s.limits), T),
     cost: jobs.length ?`${jobs.some((s) => !s.result) ? "≈" : ""}${usd(jobs.reduce((a, s) => a + costOf(s), 0))}` : null,
     jobs: jobs.map((s) => (s.end
-      ? { nn: s.nn, ok: okOf(s), title: sectionOf(c, s)?.title, took: minutes(workMs(s)) }
-      : { nn: s.nn, running: true, took: minutes(workMs(s)), step: s.lastStep && String(s.lastStep).slice(0, 60) })),
+      ? { nn: s.nn, ok: okOf(s), title: sectionOf(c, s)?.title, took: minutes(workMs(s), T) }
+      : { nn: s.nn, running: true, took: minutes(workMs(s), T), step: s.lastStep && String(s.lastStep).slice(0, 60) })),
     // A day's folder can hold an earlier run: its jobs' problems are not this run's.
     problems: c.issues.filter((i) => { const m = /#(\d+)/.exec(i); return !m || jobs.some((s) => s.nn === m[1]); }),
     waits: waitsOf(c).map((l) => l.replace(/^\s*(?:[-*] |\d+\. )/, "").replace(/\*\*|`/g, "").slice(0, 100)).filter(Boolean),
-  });
+  }, T);
 }
 
 // What waits for the user once the chain is over: a STOP prompt's body (without its own
@@ -544,25 +556,26 @@ function waitsOf(c) {
   }
   const last = c.parsed.findLast((s) => s.end);
   const f = last && jobFacts(c, last);
-  return f ? [...f.waits.map((w) => `- ${w}`), ...(f.older ? [`- ve ${f.older} eski madde (#${f.nn}'in raporunda)`] : [])] : [];
+  return f ? [...f.waits.map((w) => `- ${w}`), ...(f.older ? [`- ${c.T.olderInReport(f.older, f.nn)}`] : [])] : [];
 }
 
 export function statusMessage(state, pid) {
   const c = collect(state, pid);
+  const { T } = c;
   const cur = c.parsed.at(-1), done = c.parsed.findLast((s) => s.end);
   const w = c.parsed.flatMap((s) => s.limits).at(-1)?.unifiedWindows || {};
   const f = done && jobFacts(c, done);
   return statusCard({
     project: path.basename(c.run.repo || c.state), running: c.running,
-    state: c.ended ? `bitti: ${c.ended.text.slice(12)}` : "durdu",
-    nn: cur && !cur.end ? cur.nn : null, took: cur && !cur.end ? minutes(workMs(cur)) : null,
+    state: c.ended ? T.stateEnded(c.ended.text.slice(12)) : T.stateStopped,
+    nn: cur && !cur.end ? cur.nn : null, took: cur && !cur.end ? minutes(workMs(cur), T) : null,
     step: cur && !cur.end && cur.lastStep ? String(cur.lastStep).slice(0, 80) : null,
     effort: cur && !cur.end ? cur.efforts.join("/") || null : null,
-    five: pctOr(w.five_hour?.utilization), fiveReset: w.five_hour?.resetsAt ? hm(new Date(w.five_hour.resetsAt * 1000)) : null,
-    seven: pctOr(w.seven_day?.utilization), fable: lastFable(c.parsed.flatMap((s) => s.limits)),
+    five: pctOr(w.five_hour?.utilization, T), fiveReset: w.five_hour?.resetsAt ? hm(new Date(w.five_hour.resetsAt * 1000)) : null,
+    seven: pctOr(w.seven_day?.utilization, T), fable: lastFable(c.parsed.flatMap((s) => s.limits), T),
     last: f &&{ nn: f.nn, ok: f.ok, title: f.title || firstCommit(f) }, next: f?.next,
     progress: c.running ? progressOf(c) : null,
-  });
+  }, T);
 }
 
 // ---------------------------------------------------------------- telegram
@@ -653,6 +666,7 @@ export async function notify(state, headline, opt = {}) {
 // ---------------------------------------------------------------- watch
 async function watch(opt) {
   const state = path.resolve(opt.state);
+  const T = stateStrings(state);
   const pid = Number(opt.pid) || runnerPid(state);
   const lock = path.join(state, "watch.pid");
   const other = Number(read(lock));
@@ -667,7 +681,7 @@ async function watch(opt) {
   const say = async (message) => {
     fs.writeFileSync(path.join(state, "status.md"), buildReport(state, { pid }).plain);
     if (!message) return;
-    if (opt.dry) return console.log(`----- ${message.silent ? "(sessiz)" : ""}\n${message.text}`);
+    if (opt.dry) return console.log(`----- ${message.silent ? `(${T.silent})` : ""}\n${message.text}`);
     const began = Date.now();
     let outcome, tries = 0;
     for (;;) {
@@ -688,10 +702,10 @@ async function watch(opt) {
   const cfg = readJson(TELEGRAM);
   if (cfg.token && !opt.dry) {
     await telegram("setMyCommands", cfg, { commands: [
-      { command: "durum", description: "Şu an ne çalışıyor" }, { command: "rapor", description: "Tam rapor" }] }).catch(() => {});
+      { command: T.cmdStatus, description: T.cmdStatusDesc }, { command: T.cmdReport, description: T.cmdReportDesc }] }).catch(() => {});
   }
   const project = path.basename(readJson(path.join(state, "run.json")).repo || state);
-  if (opt.announce) await say(eventLine("start", { project }));
+  if (opt.announce) await say(eventLine("start", { project }, T));
   const started = Date.now();
 
   let poison = 0; // tries in a row that failed on one log line
@@ -705,10 +719,10 @@ async function watch(opt) {
         try {
           // In an outage each retry logs "ends" and then "transient error"; the error is the card, so the "ends" before it is not.
           if ((m = /^session (\d+) ends: /.exec(t))) { if (!retriedAfter(lines.slice(mark.lines + 1), m[1])) await say(sessionMessage(state, m[1], pid)); }
-          else if ((m = /^usage limit: waiting until \S+ (\d\d:\d\d)/.exec(t))) await say(eventLine("limit", { until: m[1], progress: progressOf(collect(state, pid)) }));
-          else if ((m = /^session (\d+) resumes /.exec(t))) await say(eventLine("resume", { nn: m[1] }));
-          else if ((m = /^session (\d+): transient error .*; try 1, waiting until \S+ (\d\d:\d\d)/.exec(t))) await say(eventLine("error", { nn: m[1], until: m[2] })); // later tries stay quiet
-          else if ((m = /^session (\d+) left no continuation prompt/.exec(t))) await say(eventLine("retry", { nn: m[1] }));
+          else if ((m = /^usage limit: waiting until \S+ (\d\d:\d\d)/.exec(t))) await say(eventLine("limit", { until: m[1], progress: progressOf(collect(state, pid)) }, T));
+          else if ((m = /^session (\d+) resumes /.exec(t))) await say(eventLine("resume", { nn: m[1] }, T));
+          else if ((m = /^session (\d+): transient error .*; try 1, waiting until \S+ (\d\d:\d\d)/.exec(t))) await say(eventLine("error", { nn: m[1], until: m[2] }, T)); // later tries stay quiet
+          else if ((m = /^session (\d+) left no continuation prompt/.exec(t))) await say(eventLine("retry", { nn: m[1] }, T));
           else if ((m = /^chain ends: (.*)$/.exec(t))) {
             await say(chainMessage(state, m[1], pid));
             mark.lines++;
@@ -734,7 +748,7 @@ async function watch(opt) {
         if (!mtime) mtime = fs.existsSync(f) ? fs.statSync(f).mtimeMs : Date.now();
         if (Date.now() - mtime > QUIET_MINUTES * 60_000 && mark.quiet[current[1]] !== mtime) {
           const step = collect(state, pid).parsed.findLast((s) => s.nn === current[1])?.lastStep;
-          await say(eventLine("quiet", { nn: current[1], minutes: QUIET_MINUTES, step: step && String(step).slice(0, 80) }));
+          await say(eventLine("quiet", { nn: current[1], minutes: QUIET_MINUTES, step: step && String(step).slice(0, 80) }, T));
           // Marked after the card: a watcher that dies mid-send sends it again on its next pass.
           mark.quiet[current[1]] = mtime;
           save();
@@ -745,7 +759,7 @@ async function watch(opt) {
           const s = parseSession(state, current[1]);
           const run = readJson(path.join(state, "run.json"));
           if (s.efforts.length) {
-            if (effortOff(state, run, s)) await say(eventLine("effort", { nn: current[1], got: s.efforts.join("/"), want: wantOf(state, run, current[1]).effort }));
+            if (effortOff(state, run, s)) await say(eventLine("effort", { nn: current[1], got: s.efforts.join("/"), want: wantOf(state, run, current[1]).effort }, T));
             mark.effort[current[1]] = s.efforts.join("/");
             save();
           }
@@ -754,7 +768,7 @@ async function watch(opt) {
       if (pid && !alive(pid)) {
         await sleep(5_000);
         if (read(path.join(state, "chain.log")).split("\n").filter(Boolean).length > mark.lines) continue;
-        await say(eventLine("died"));
+        await say(eventLine("died", {}, T));
         return fs.rmSync(lock, { force: true });
       }
       await commands(state, pid, mark, save, started, opt.dry ? 0 : 20);
@@ -782,7 +796,8 @@ async function commands(state, pid, mark, save, started, seconds) {
     // telegram.json may hold the id as text; String() on both keeps it matching either way.
     if (String(msg?.chat?.id) !== String(cfg.chatId) || msg.date * 1000 < started - 60_000) continue;
     const cmd = /^\/(\w+)/.exec(msg.text || "")?.[1];
-    const reply = cmd === "durum" ? statusMessage(state, pid) : cmd === "rapor" ? reportMessage(state, pid) : null;
+    // Either language's name answers, whatever the run's own language is.
+    const reply = cmd === "durum" || cmd === "status" ? statusMessage(state, pid) : cmd === "rapor" || cmd === "report" ? reportMessage(state, pid) : null;
     if (!reply) continue;
     const outcome = await send([reply]);
     watchLog(state, `/${cmd}: ${outcome}, ${Math.round((Date.now() - msg.date * 1000) / 1000)} s after the message`);
@@ -807,9 +822,9 @@ if (path.resolve(process.argv[1] || "") === SELF) {
   else if (opt.cmd === "notify") console.log(await notify(path.resolve(opt.state), typeof opt.headline === "string" ? opt.headline : "", opt));
   else if (opt.cmd === "card") {
     const state = path.resolve(opt.state);
-    const card = opt.chain ? chainMessage(state, typeof opt.chain === "string" ? opt.chain : "önizleme")
+    const card = opt.chain ? chainMessage(state, typeof opt.chain === "string" ? opt.chain : stateStrings(state).preview)
       : opt.nn ? sessionMessage(state, String(opt.nn).padStart(2, "0")) : statusMessage(state);
-    console.log(opt.send ? await send([card]) : `${card.silent ? "(sessiz)\n" : ""}${card.text}`);
+    console.log(opt.send ? await send([card]) : `${card.silent ? `(${stateStrings(state).silent})\n` : ""}${card.text}`);
   } else if (opt.cmd === "watch") await watch(opt);
   else if (opt.cmd === "telegram-setup") {
     const cfg = JSON.parse(read(TELEGRAM) || "{}");

@@ -42,7 +42,8 @@ async function bot(answer) {
 }
 
 // A throwaway home and state folder, a helper process standing in for the runner, the watcher itself.
-async function scene(answer, { chatId = 42, notified, env = {}, token = "T" } = {}, body) {
+// lang: null writes a run.json from before the language was a setting.
+async function scene(answer, { chatId = 42, notified, env = {}, token = "T", lang = "tr" } = {}, body) {
   const api = await bot(answer);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ns-watch-"));
   const home = path.join(dir, "home"), state = path.join(dir, "state"), root = path.join(dir, "repo");
@@ -50,7 +51,7 @@ async function scene(answer, { chatId = 42, notified, env = {}, token = "T" } = 
   fs.mkdirSync(state);
   fs.mkdirSync(root);
   fs.writeFileSync(path.join(home, ".claude", "night-shift", "telegram.json"), JSON.stringify({ token, chatId }));
-  fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ repo: root }));
+  fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ repo: root, ...(lang && { lang }) }));
   fs.writeFileSync(path.join(state, "chain.log"), "");
   if (notified !== undefined) fs.writeFileSync(path.join(state, "notified.json"), notified);
   const helper = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore", windowsHide: true });
@@ -129,6 +130,48 @@ test("a chat id saved as text still answers /durum", async () => {
   const ask = { ok: true, result: [{ update_id: 1, message: { chat: { id: 42 }, date: Math.floor(Date.now() / 1000), text: "/durum" } }] };
   await scene((m, b, n) => (m === "getUpdates" && n === 0 ? [200, ask] : m === "sendMessage" ? [200, { ok: true }] : undefined), { chatId: "42" }, async ({ api }) => {
     await until(() => api.sends().length >= 1, 10_000, "the /durum answer");
+  });
+});
+
+// A command typed in the user's own chat; both languages' names answer, whatever the run's language.
+const asked = (text) => ({ ok: true, result: [{ update_id: 1, message: { chat: { id: 42 }, date: Math.floor(Date.now() / 1000), text } }] });
+const asking = (text) => (m, b, n) => (m === "getUpdates" && n === 0 ? [200, asked(text)] : m === "sendMessage" ? [200, { ok: true }] : undefined);
+
+test("/durum answers under lang en and /status under lang tr, each in the run's language", async () => {
+  await scene(asking("/durum"), { lang: "en" }, async ({ api }) => {
+    await until(() => api.sends().length >= 1, 10_000, "the /durum answer");
+    assert.match(api.sends()[0].body.text, /<b>repo<\/b> · running/);
+    assert.doesNotMatch(api.sends()[0].body.text, /çalışıyor/);
+  });
+  await scene(asking("/status"), { lang: "tr" }, async ({ api }) => {
+    await until(() => api.sends().length >= 1, 10_000, "the /status answer");
+    assert.match(api.sends()[0].body.text, /<b>repo<\/b> · çalışıyor/);
+  });
+});
+
+test("/report and /rapor both give the report, in the run's language", async () => {
+  for (const [lang, cmd, head] of [["en", "/rapor", /^🌙 <b>repo<\/b> · running · \d\d:\d\d/], ["tr", "/report", /^🌙 <b>repo<\/b> · çalışıyor · \d\d:\d\d/]]) {
+    await scene(asking(cmd), { lang }, async ({ api }) => {
+      await until(() => api.sends().length >= 1, 10_000, `the ${cmd} answer`);
+      assert.match(api.sends()[0].body.text, head);
+    });
+  }
+});
+
+test("the bot's menu lists the command pair of the run's language", async () => {
+  for (const [lang, names] of [["tr", ["durum", "rapor"]], ["en", ["status", "report"]]]) {
+    await scene(() => undefined, { lang }, async ({ api }) => {
+      await until(() => api.calls.some((c) => c.method === "setMyCommands"), 10_000, "setMyCommands");
+      assert.deepEqual(api.calls.find((c) => c.method === "setMyCommands").body.commands.map((c) => c.command), names);
+    });
+  }
+});
+
+test("a run.json from before the language was a setting is watched in English", async () => {
+  await scene(() => undefined, { lang: null }, async ({ api, chain }) => {
+    chain(RETRY);
+    await until(() => api.sends().length >= 1, 10_000, "the retry card");
+    assert.match(api.sends()[0].body.text, /#02 left no continuation prompt, retrying/);
   });
 });
 

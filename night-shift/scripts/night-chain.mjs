@@ -48,7 +48,8 @@ import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { buildReport, userWaits } from "./night-report.mjs";
+import { buildReport, userWaits, stateStrings } from "./night-report.mjs";
+import { strings, langOf } from "./lang/index.mjs";
 import { mergedConfig, LANGS, stateDirProblem, tempRoot } from "./config.mjs";
 import { sessionOutcome, windowSpan } from "./session-outcome.mjs";
 import { MAIN_MODEL, SUB_MODEL, MAIN_EFFORT, subEffortText, MAX_NOTE, FABLE_NOTE, nightModelSettings, sessionPlan,
@@ -647,15 +648,15 @@ function runSession(run, session, plan, nn, resume) {
 }
 
 // ---------------------------------------------------------------- status / wait / stop
-const statusHead = (ptr, running) => [running ? `running (pid ${ptr.pid}) since ${ptr.startedAt}`
-  : ptr.finished ? `finished ${ptr.finishedAt}: ${ptr.reason}` : `scheduled ${ptr.scheduledAt}, not running`, `state: ${ptr.state}`];
+const statusHead = (ptr, running, T) => [running ? T.cli.statusRunning(ptr.pid, ptr.startedAt)
+  : ptr.finished ? T.cli.statusFinished(ptr.finishedAt, ptr.reason) : T.cli.statusScheduled(ptr.scheduledAt), T.cli.statusState(ptr.state)];
 
 function status(opt) {
   const repo = repoRoot(opt.repo || process.cwd());
   const ptr = readPointer(repo);
-  if (!ptr) return console.log("no night-shift run recorded for this repository");
+  if (!ptr) return console.log(strings(langOf({ repo })).cli.noRun);
   const running = !ptr.finished && isRunner(ptr.pid);
-  console.log(`${statusHead(ptr, running).join("\n")}\n`);
+  console.log(`${statusHead(ptr, running, stateStrings(ptr.state, repo)).join("\n")}\n`);
   console.log(buildReport(ptr.state, { focus: "all", pid: running ? ptr.pid : 0 }).plain);
 }
 
@@ -702,28 +703,29 @@ async function waitChain(opt) {
   if (typeof opt.state === "string" && !same(opt.state)) fail(`${path.resolve(opt.state)} is not this repository's last run (${state})`);
   const runner = (not) => (p) => Boolean(p.state && same(p.state) && p.pid && p.pid !== not && alive(p.pid));
   const run = JSON.parse(read(path.join(state, "run.json")) || "{}");
+  const T = stateStrings(state, repo);
   const report = (head) => [...head, "", ...buildReport(state, { pid: 0 }).plain.split("\n\n").slice(0, 2).flatMap((b) => [b, ""])];
   const over = () => {
     const waits = userWaits(state);
-    console.log([...report(statusHead(pointerOr(repo) || first, false)),
-      waits.length ? `Kullanıcıyı bekleyenler:\n${waits.join("\n")}` : "Kullanıcıyı bekleyenler: listede madde yok", "",
-      `Rapor: ${path.resolve(repo, run.report || "NIGHT_RUNS.md")} · tam durum: node "${SELF}" status --repo "${repo}"`].join("\n"));
+    console.log([...report(statusHead(pointerOr(repo) || first, false, T)),
+      T.cli.userWaits(waits), "",
+      T.cli.reportLine(path.resolve(repo, run.report || "NIGHT_RUNS.md"), `node "${SELF}" status --repo "${repo}"`)].join("\n"));
   };
   const crashed = (why) => {
     const tail = read(path.join(state, "chain.log")).trim().split("\n").slice(-3).map((l) => `  ${l}`);
-    console.log([...report([`zincir çöktü: ${why}`, `state: ${state}`]), "chain.log'un sonu:", ...tail, "",
-      `Kullanıcı isterse devam (promptsuz; yarım kalan oturum kendi konuşmasında sürer): node "${SELF}" start --repo "${repo}" --state "${state}"`].join("\n"));
+    console.log([...report([T.cli.crashed(why), T.cli.statusState(state)]), T.cli.logTail, ...tail, "",
+      T.cli.resumeHint(`node "${SELF}" start --repo "${repo}" --state "${state}"`)].join("\n"));
     process.exitCode = 2;
   };
 
   let pid = first.pid;
   if (!pid && !first.finished) {
-    console.log("runner henüz başlamadı; bekleniyor");
+    console.log(T.cli.notStartedYet);
     const p = await pointerChange(repo, (x) => x.finished || runner(0)(x), HANDOVER_MS);
-    if (!p) return crashed(`${HANDOVER_MS / 60_000} dakikada runner başlamadı (Task Scheduler görevi çalışmadı)`);
+    if (!p) return crashed(T.cli.neverStarted(HANDOVER_MS / 60_000));
     pid = p.pid;
   }
-  if (pid && alive(pid)) console.log(`bekliyor: runner pid ${pid} (${state})`);
+  if (pid && alive(pid)) console.log(T.cli.waiting(pid, state));
   for (;;) {
     if (pid && alive(pid)) {
       const code = await exitOf(pid).catch((e) => fail(`could not wait for runner pid ${pid}: ${e.message}`));
@@ -741,11 +743,10 @@ async function waitChain(opt) {
         : await pointerChange(repo, (x) => x.finished || runner(pid)(x), 5_000);
       if (!next || !runner(pid)(next)) {
         if (next?.finished) return over();
-        return crashed(handover ? `runner ${pid} devretti ama ${HANDOVER_MS / 60_000} dakikada yeni runner başlamadı`
-          : `runner (pid ${pid}) bitiş satırı yazmadan kapandı`);
+        return crashed(handover ? T.cli.handoverLost(pid, HANDOVER_MS / 60_000) : T.cli.diedNoEnd(pid));
       }
     }
-    console.log(`runner devretti: pid ${pid} → ${next.pid}`);
+    console.log(T.cli.handedOver(pid, next.pid));
     pid = next.pid;
   }
 }
