@@ -7,16 +7,87 @@ const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").
 const plain = (s) => String(s ?? "").replace(/\*\*|`/g, "").trim();
 const mark = (ok) => (ok ? "✅" : "❌");
 
+// HTML helpers: Telegram rejects a message whose tag is left open or whose entity is cut in half.
+const TAG = /<(\/?)([a-zA-Z][\w-]*)[^>]*>/g;
+// The tags still open after s, given those open before it.
+function openTags(s, stack = []) {
+  const st = [...stack];
+  for (const m of s.matchAll(TAG)) {
+    if (!m[1]) st.push({ name: m[2], tag: m[0] });
+    else { const i = st.findLastIndex((t) => t.name === m[2]); if (i >= 0) st.length = i; }
+  }
+  return st;
+}
+const closers = (st) => st.map((t) => `</${t.name}>`).reverse().join("");
+const openers = (st) => st.map((t) => t.tag).join("");
+// The length to cut s to, at most n, backed off out of a tag or an "&…;" entity.
+function safeCut(s, n) {
+  let head = s.slice(0, n);
+  const lt = head.lastIndexOf("<");
+  if (lt > head.lastIndexOf(">")) head = head.slice(0, lt);
+  return head.length - (/&#?\w*$/.exec(head)?.[0].length ?? 0);
+}
+// s cut to fit max with "…", its open tags closed, so the result is valid HTML.
+function trimHtml(s, max) {
+  if (s.length <= max) return s;
+  for (let n = max - 1; ; ) {
+    const head = s.slice(0, safeCut(s, n));
+    const tail = `…${closers(openTags(head))}`;
+    const over = head.length + tail.length - max;
+    if (over <= 0 || n <= 1) return head + tail;
+    n -= over;
+  }
+}
+
+// A long message as parts of at most max characters, each cut at a line end. A tag open at
+// the cut (<pre>, <blockquote expandable>) is closed there and opened again in the next part.
+// A line longer than max is cut hard, still outside a tag or an entity.
+export function splitHtml(html, max = 4000) {
+  if (html.length <= max) return [html];
+  const parts = [];
+  let stack = [], head = "", text = "", started = false;
+  const flush = () => {
+    if (started) parts.push(head + text + closers(stack));
+    head = openers(stack); text = ""; started = false;
+  };
+  for (const line of html.split("\n")) {
+    let rest = line;
+    while (true) {
+      const joined = started ? `${text}\n${rest}` : rest;
+      const after = openTags(rest, stack);
+      if (head.length + joined.length + closers(after).length <= max) { text = joined; started = true; stack = after; break; }
+      if (started) { flush(); continue; }
+      let n = max - head.length - closers(stack).length, k, st;
+      while (true) {
+        k = safeCut(rest, n);
+        if (k <= 0) k = Math.max(1, n);
+        st = openTags(rest.slice(0, k), stack);
+        const over = head.length + k + closers(st).length - max;
+        if (over <= 0 || k <= 1) break;
+        n = k - over;
+      }
+      text = rest.slice(0, k); started = true; stack = st;
+      flush();
+      rest = rest.slice(k);
+      if (!rest) break;
+    }
+  }
+  flush();
+  return parts;
+}
+
 // Details as "<b>Name</b> · n" blocks inside one expandable quote, cut to fit the message.
 function card(head, blocks, silent = false) {
   const top = head.filter(Boolean).join("\n");
   const body = blocks.filter((b) => b.lines.length)
     .map((b) => `<b>${b.name}</b>${b.count ? ` · ${b.lines.length}` : ""}\n${[...b.lines, ...(b.extra ? [b.extra] : [])].map(esc).join("\n")}`)
     .join("\n\n");
-  if (!body) return { text: top, silent };
+  // A head within 40 of the limit leaves no room for a quote worth opening: send the head alone.
+  if (!body || top.length > LIMIT - 40) return { text: trimHtml(top, LIMIT), silent };
   const open = "\n<blockquote expandable>", close = "</blockquote>";
   let inner = body;
   if (top.length + open.length + inner.length + close.length > LIMIT) {
+    // A line end is outside every tag and entity, so this cut leaves the HTML whole.
     inner = inner.slice(0, LIMIT - top.length - open.length - close.length - 2);
     inner = `${inner.slice(0, inner.lastIndexOf("\n"))}\n…`;
   }
@@ -147,7 +218,7 @@ export function statusCard(f) {
 export function reportSection(text, nn, hhmm) {
   const toMin = (t) => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
   const near = (a, b) => { const d = Math.abs(toMin(a) - toMin(b)); return Math.min(d, 1440 - d) <= 15; };
-  const lines = String(text).split("\n");
+  const lines = String(text).split(/\r?\n/);
   let found = null;
   lines.forEach((l, i) => {
     const m = /^## .*?\bsession (\d+) \((\d{2}:\d{2})[^)]*\) · (.+)$/.exec(l);
@@ -157,14 +228,14 @@ export function reportSection(text, nn, hhmm) {
   const end = lines.findIndex((l, i) => i > found.i && l.startsWith("## "));
   const body = lines.slice(found.i + 1, end < 0 ? lines.length : end);
   const nextLine = body.find((l) => l.startsWith("**Next:**"));
-  const left = /^\*\*Remaining:\*\*\s*(\d+)/.exec(body.find((l) => l.startsWith("**Remaining:**")) || "");
+  const left = body.map((l) => /^\*\*Remaining(?::\*\*|\*\*:)\s*~?\s*(\d+)/.exec(l)).find(Boolean);
   // Run 2's sections group what waits under "- New" and "- Still waiting …", the second carried
   // over from every earlier session, either as a heading over indented items ("- New:", then
   // "  - a") or one item a line ("- New: a"); "- New: none" is no item. Without the groups,
   // every item is this job's.
   const cut = (s) => (s.length > 100 ? `${s.slice(0, 99)}…` : s);
   const items = [];
-  const at = body.findIndex((l) => /^\*\*Waits for you\*\*/.test(l));
+  const at = body.findIndex((l) => /^\*\*Waits for you(?::\*\*|\*\*:?)/.test(l));
   for (const l of at < 0 ? [] : body.slice(at + 1)) {
     if (l.startsWith("**")) break;
     const m = /^(\s*)(?:[-*] |\d+\. )(.*)$/.exec(l);

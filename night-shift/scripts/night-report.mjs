@@ -20,7 +20,7 @@ import path from "node:path";
 import os from "node:os";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { sessionCard, eventLine, chainCard, statusCard, reportCard, reportSection, chainProgress, progressText } from "./telegram-cards.mjs";
+import { sessionCard, eventLine, chainCard, statusCard, reportCard, reportSection, chainProgress, progressText, splitHtml } from "./telegram-cards.mjs";
 import { sessionPlan } from "./effort.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
@@ -434,7 +434,7 @@ export function buildReport(state, { headline = "", focus = null, pid = null } =
   const messages = [];
   for (const part of out) {
     if (messages.length && messages.at(-1).length + part.length + 2 <= 4000) messages[messages.length - 1] += `\n\n${part}`;
-    else messages.push(part.slice(0, 4000));
+    else messages.push(...splitHtml(part));
   }
   return { html, plain, messages };
 }

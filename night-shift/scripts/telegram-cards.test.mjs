@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { sessionCard, eventLine, chainCard, statusCard, reportSection, reportCard } from "./telegram-cards.mjs";
+import { sessionCard, eventLine, chainCard, statusCard, reportSection, reportCard, splitHtml } from "./telegram-cards.mjs";
 
 const done = {
   nn: "13", ok: true, took: "1 sa 21 dk", cost: "$19.24", five: "%56", seven: "%47",
@@ -290,4 +290,51 @@ test("the job card, /durum and the limit line carry the progress", () => {
   assert.equal(eventLine("limit", { until: "17:00", progress: "3/5 iş bitti · tahmini bitiş ~18:40" }).text,
     "⏳ Limit doldu · 17:00'de sürer · 3/5 iş bitti · tahmini bitiş ~18:40");
   assert.equal(eventLine("limit", { until: "17:00" }).text, "⏳ Limit doldu · 17:00'de sürer");
+});
+
+// ---------------------------------------------------------------- tolerant markers, safe splitting
+test("a report with CRLF line ends is read like one with LF", () => {
+  const crlf = reportSection(report.replace(/\n/g, "\r\n"), "07", "19:24");
+  assert.ok(crlf);
+  assert.deepEqual(crlf, reportSection(report, "07", "19:24"));
+});
+test("the markers are read with the colon inside or outside the bold, and an approximate count", () => {
+  const sec = (body) => `## 2026-11-16 · session 03 (02:00–03:00) · T\n\n${body}\n`;
+  assert.equal(reportSection(sec("**Remaining**: 2"), "03", "02:00").remaining, 2);
+  assert.equal(reportSection(sec("**Remaining:** ~4"), "03", "02:00").remaining, 4);
+  const a = reportSection(sec("**Waits for you:**\n- New: push the branch"), "03", "02:00");
+  const b = reportSection(sec("**Waits for you**\n- New: push the branch"), "03", "02:00");
+  assert.deepEqual(a.waits, b.waits);
+  assert.equal(a.waits.length, 1);
+});
+test("a card whose head alone is too long is cut, never over Telegram's limit", () => {
+  const c = sessionCard({ ...done, title: "x".repeat(6000) });
+  assert.ok(c.text.length <= 4096);
+  // the cut keeps the bold tag closed, and an entity is never cut in half
+  assert.match(c.text, /…<\/b>$/);
+  const e = sessionCard({ ...done, title: "&".repeat(6000) }).text;
+  assert.ok(e.length <= 4096);
+  assert.doesNotMatch(e.replace(/&amp;/g, ""), /&/);
+});
+test("a long report is split at line ends with its tags closed and reopened", () => {
+  const html = `<b>Jobs</b>\n<pre>${Array.from({ length: 300 }, (_, i) => `#${i} ${"y".repeat(40)}`).join("\n")}</pre>\ntail`;
+  const parts = splitHtml(html);
+  assert.ok(parts.length > 1);
+  for (const p of parts) {
+    assert.ok(p.length <= 4000);
+    assert.equal((p.match(/<pre>/g) || []).length, (p.match(/<\/pre>/g) || []).length);
+  }
+  assert.equal(parts.join("\n").replace(/<\/pre>\n<pre>/g, "\n"), html);
+  assert.equal(splitHtml("short").length, 1);
+});
+test("a single line longer than the limit is cut hard, but not inside a tag or an entity, and each part still fits", () => {
+  const html = `<blockquote expandable>${"a &amp; <b>b</b> ".repeat(500)}</blockquote>`;
+  const parts = splitHtml(html, 300);
+  assert.ok(parts.length > 1);
+  for (const p of parts) {
+    assert.ok(p.length <= 300);
+    assert.equal((p.match(/<blockquote expandable>/g) || []).length, (p.match(/<\/blockquote>/g) || []).length);
+    assert.equal((p.match(/<b>/g) || []).length, (p.match(/<\/b>/g) || []).length);
+    assert.doesNotMatch(p.replace(/<[^>]*>|&amp;/g, ""), /[<>&]/);
+  }
 });
