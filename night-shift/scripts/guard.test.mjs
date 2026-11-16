@@ -511,3 +511,9 @@ test("a PowerShell parameter's value is no delete target; a find expression goes
   assert.equal(bash(`find . -name '*.tmp' -exec rm {} \\;`), null);
   assert.equal(bash(`find . -name '*.tmp' -exec rm {} \\; -print`), null);
 });
+
+test("an escaped backslash leaves the semicolon after it a separator; an escaped semicolon is text", () => {
+  for (const c of [`echo x\\\\; rm -rf ~`, `printf a\\\\; git push --force`, `bash -c 'echo x\\\\; rm -rf ~'`, `true \\\\; rm -rf /c/Users/u/Documents`])
+    assert.ok(bash(c), c);
+  assert.equal(bash(`echo a\\; rm -rf ~`), null);
+});

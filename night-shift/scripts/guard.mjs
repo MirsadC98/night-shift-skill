@@ -160,8 +160,10 @@ export function simpleCommands(text, ps = false) {
     }
     if (c === "'" || c === '"') { q = c; if (word === null) { word = ""; wb = false; } continue; }
     if (c === "|" && wb && /^\d*>$/.test(word ?? "")) { word += c; continue; }
-    // bash: `\;` is a literal semicolon (`find -exec ... \; -delete` is one command); PowerShell has no such escape.
-    if (!ps && c === "\\" && text[i + 1] === ";") { if (word === null) wb = true; word = (word ?? "") + "\\;"; i++; continue; }
+    // bash: a backslash escapes the next character, so `\;` is a literal semicolon (`find -exec ... \; -delete`
+    // is one command) and the second `\` of `\\;` leaves the `;` a separator. The pair stays in the word as
+    // written ($ and ` keep their live meaning, which only makes the guard refuse more). PowerShell has no such escape.
+    if (!ps && c === "\\" && i + 1 < text.length) { if (word === null) wb = true; word = (word ?? "") + c + text[++i]; continue; }
     if (/[;&|()`\n]/.test(c)) {
       endCmd(); run += c;
       if (c === "(") lvl++; else if (c === ")") lvl = Math.max(0, lvl - 1);
