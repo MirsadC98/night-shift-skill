@@ -825,6 +825,12 @@ function selfTest() {
     [bash("rm -rf src/.*"), true], [bash("rm -rf {/c/Users/u/Documents,x}"), true], [bash("rm -rf /c/temp/*"), true], [bash("rm -rf `cat list.txt`"), true],
     [bash(`D=$(mktemp -d) && rm -rf "$D"`), false], [bash(String.raw`find . -name '*.tmp' -exec rm {} \;`), false],
     [bash("bash -c 'npm run build'"), false], [bash("echo hi > notes.md"), false], [bash("grep -n taskkill probe.ps1"), false],
+    // Abbreviated git options, a ref moved by plumbing, dot globs, a delete behind an if, a stream path, a quoted word that only names a command.
+    [bash("git push --dele side"), true], [bash("git reset --har HEAD~1"), true], [bash("git clean -d --force"), true],
+    [bash("git update-ref refs/heads/x 0000000000000000000000000000000000000000"), true],
+    [bash("rm -rf .*"), true], [bash("rm -rf C:/work/repo/*"), true], [bash("if cd /c/Users/u; then rm -rf Documents; fi"), true],
+    [write("C:/work/repo/.git::$INDEX_ALLOCATION/config"), true], [mcp("mcp__x__y"), true],
+    [bash('grep -n "taskkill|reg import" a.ps1'), false],
   ];
   let failed = 0;
   cases.forEach(([got, deny], i) => {

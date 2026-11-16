@@ -5,7 +5,7 @@ description: Use when the user wants work to go on unattended for hours (overnig
 
 # Night shift
 
-A chain of fresh headless sessions (`claude -p`), each the same as the user opening a fresh chat and pasting a continuation prompt. State passes through the repository (plan, logs, ledger, memory) and one file, `<state>/next-prompt.md`. The runner is `scripts/night-chain.mjs`, the guard hook `scripts/guard.mjs`; a project adds its own deny rules in `.claude/night-shift.json`.
+A chain of fresh headless sessions (`claude -p`), each the same as the user opening a fresh chat and pasting a continuation prompt. State passes through the repository (plan, logs, ledger, memory) and one file, `<state>/next-prompt.md`. The runner is `scripts/night-chain.mjs`, the guard hook `scripts/guard.mjs`; a project adds its own deny rules in `.claude/night-shift.json`. MCP tools are refused in a night run unless that file's `"mcp"` lists their server.
 
 - **In a night session** (the prompt opens with "Gece vardiyası (night-shift)"): follow "Inside a night session" below.
 - **In an interactive chat** (starting, checking, stopping or changing a run, or telling the user when it ends): read `references/interactive.md` in this skill's folder and follow it.

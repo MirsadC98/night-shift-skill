@@ -43,13 +43,13 @@ node ~/.claude/skills/night-shift/scripts/night-chain.mjs stop   --repo <dir> [-
 node ~/.claude/skills/night-shift/scripts/night-chain.mjs reload --repo <dir>
 ```
 
-`start` also takes `--until HH:MM`, `--max-sessions <n>`, `--model <m>`, `--effort <level>`, `--fable-ceiling <share>`, `--fable-sessions <n>`, `--state <dir>` (continue in an earlier run's folder) and `--window` (a visible console; closing it stops the chain).
+`start` also takes `--until HH:MM`, `--max-sessions <n>`, `--model <m>`, `--effort <level>`, `--fable-ceiling <share>`, `--fable-sessions <n>`, `--max-wait-hours <h>` (the longest wait for a usage limit or an outage, default 6), `--state <dir>` (continue in an earlier run's folder) and `--window` (a visible console; closing it stops the chain). `start` without a prompt goes on from a session a limit or an error cut off, kept in `<state>/resume.json`.
 
 While a chain runs, write new work or changed rules into `<state>/inbox.md`. The next session reads that file first.
 
 ### Per-project settings
 
-Put a `.claude/night-shift.json` in the target repository. Every key is optional:
+Put a `.claude/night-shift.json` in the target repository. Every key is optional, and a key the runner does not know is an error: `start` refuses to run and names it (a key that starts with `_` or `$` is a comment). The guard reads the same file and refuses MCP tools while it is invalid.
 
 ```json
 {
@@ -60,6 +60,8 @@ Put a `.claude/night-shift.json` in the target repository. Every key is optional
   "effort": "xhigh",
   "fableCeiling": 0.6,
   "fableSessions": 2,
+  "maxWaitHours": 6,
+  "mcp": "none",
   "deny": [
     { "pattern": "\\bmy-app\\.exe\\b", "reason": "that is the app running on my desktop" }
   ]
@@ -71,6 +73,8 @@ Put a `.claude/night-shift.json` in the target repository. Every key is optional
 - `lessons`: the notes file where sessions keep lessons that outlast one session.
 - `model`, `effort`: what a session runs on when its prompt names neither.
 - `fableCeiling`, `fableSessions`: the share of Fable's weekly allowance above which a `MODEL: fable` prompt runs on Opus at `max` instead, and how many Fable sessions a chain may run while that share is unknown.
+- `maxWaitHours`: the longest the chain waits for a usage limit to reset or for an outage to pass (see "When a session fails"). The default is 6.
+- `mcp`: `"none"` (the default), `"inherit"` or a list of server names. A night run loads no MCP server and the guard refuses every `mcp__` tool, unless the project lists the server (`"mcp": ["my-server"]`) or sets `"inherit"`.
 - `deny`: your own guard rules. `pattern` is a regular expression and `flags` defaults to `i`.
 
 ## The guard
@@ -83,21 +87,30 @@ Put a `.claude/night-shift.json` in the target repository. Every key is optional
 - deletes outside the repository and temp folders, recursive or not, with the target read from the folder the command stands in (`cd elsewhere && rm -rf x` is refused);
 - file writes (Write, Edit) outside the repository and temp folders, and writes to the skill itself, Claude settings, your global `CLAUDE.md`, the project's `.claude/night-shift.json`, `.git`, and the runner's own files in the state folder (`night-settings.json`, `run.json`, `launch.cmd`, the logs);
 - registry writes, system-level commands, and killing `node`, `claude`, the editor or the shell;
+- MCP tools, unless the project lists their server (`mcp` above);
 - anything your project's `deny` rules match.
 
 A blocked action becomes an item under "Waits for you" in the night report.
 
-Paths are compared the way Windows resolves them (`..`, a trailing dot or space, a `\\?\` prefix, UNC), and a quoted flag (`git push "--force"`) or flags written together (`-uf`) are still read as flags. The runner writes the hook into `night-settings.json` again before every session, and registers it with `onFailure: "block"`, so a guard that crashes refuses the action; a CLI too old to know that option would let it through.
+Paths are compared the way Windows resolves them (`..`, a trailing dot or space, a `\\?\` prefix, UNC); a path with a stream name or an 8.3 short name is refused outright. The guard also reads the command a wrapper runs (`bash -c`, `powershell -c`, `eval`, `xargs`, `find -exec`, `timeout`, `nice`), a shell fed by a pipe, a git alias, abbreviated options (`git push --dele`, `git reset --har`) and the targets of a delete through globs and braces. A quoted flag (`git push "--force"`) or flags written together (`-uf`) are still read as flags. The runner writes the hook into `night-settings.json` again before every session, and registers it with `onFailure: "block"`, so a guard that crashes refuses the action; a CLI too old to know that option would let it through.
 
 ### What the guard does not stop
 
 It reads the text of a command; it does not confine the process. These still pass, among others:
 
 - a shell redirect, or a program that writes or deletes on its own (`echo x > C:\somewhere\file`, `node -e "fs.rmSync(...)"`, a build script);
+- a script file the session writes and then runs: the guard reads commands, not the files they start;
 - network calls such as `curl -X POST`;
 - `git push` to a branch and `gh pr create`: sessions are meant to push their work.
 
 So the rule from the top of this page stands: run it only on a repository you have committed and can restore, on a machine and with credentials you would hand to an unattended script.
+
+## When a session fails
+
+- **A usage limit** pauses the chain, and the session it cut off resumes in the same conversation once the limit resets. A reset more than `maxWaitHours` away, or after `--until`, ends the chain (`the usage limit resets …`) with `resume.json` (or the handover) kept for the next `start`.
+- **An API or network error** is retried: the same conversation goes on when the session had already worked, else its prompt runs again. The waits are 1, 2, 5, 10, 20 and then 30 minutes, and they do not count toward "two handovers fail in a row". After `maxWaitHours` of failures the chain ends (`session NN kept failing for N h (…)`).
+- **A refused login** or a bad request ends the chain at once (`session NN cannot run: …`), since the next session would fail the same way.
+- **A runner that crashes** ends the chain with `the runner crashed: …`.
 
 ## Telegram (optional)
 
