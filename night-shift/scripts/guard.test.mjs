@@ -861,3 +861,33 @@ test("xargs may hand file names to a git command that only takes them as paths",
     "cat list | xargs git push origin --", "cat list | xargs -I{} git checkout {} --"])
     assert.ok(git(c), c);
 });
+
+test("a night session cannot write or delete the rule and config files", () => {
+  const rules = /the project's night-shift rules/, mine = /the user's night-shift settings and rules/;
+  assert.match(write("C:/work/repo/.claude/night-shift-rules.md"), rules);
+  assert.match(bash("echo 'push is fine' >> .claude/night-shift-rules.md"), rules);
+  assert.match(bash("rm .claude/night-shift-rules.md"), /refusing a delete of the project's night-shift rules/);
+  assert.ok(bash("rm -f C:/work/repo/.claude/night-shift-*"));
+  assert.match(ps("Set-Content .claude\\night-shift-rules.md 'x'"), rules);
+  assert.equal(bash("cat .claude/night-shift-rules.md"), null);
+  // Outside the writable roots the folder was refused too; the new reason names it.
+  assert.match(write("C:/Users/u/.claude/night-shift/rules.md"), mine);
+  assert.match(write("C:/Users/u/.claude/night-shift/runs/x.json"), mine);
+  assert.match(write("C:/USERS/U/.Claude/Night-Shift/Config.json"), mine);
+  assert.match(write("C:/Users/u/.claude/night-shift/../night-shift/config.json"), mine);
+  assert.match(bash("rm -f C:/Users/u/.claude/night-shift/rules.md"), /refusing a delete of the user's night-shift settings and rules/);
+  assert.ok(bash("rm -f C:/Users/u/.claude/night-*/rules.md"));
+  assert.ok(bash("find . -name night-shift-rules.md -delete"));
+});
+
+test("a run whose repository is ~/.claude still cannot touch the global rule and config files", () => {
+  const inHome = { ...env, NIGHT_SHIFT_REPO: "C:/Users/u/.claude" };
+  const mine = /the user's night-shift settings and rules/;
+  assert.match(write("C:/Users/u/.claude/night-shift/rules.md", inHome), mine);
+  assert.match(write("C:/Users/u/.claude/night-shift/config.json", inHome), mine);
+  assert.match(bash("rm night-shift/rules.md", inHome), mine);
+  assert.match(bash("echo x > night-shift/config.json", inHome), mine);
+  assert.match(bash("rm -rf night-shift", inHome), mine);
+  assert.equal(write("C:/Users/u/.claude/notes.md", inHome), null);
+  assert.equal(bash("echo x > notes.md", inHome), null);
+});

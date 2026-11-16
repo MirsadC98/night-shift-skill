@@ -63,7 +63,9 @@ function protectedPath(p, r) {
   if (under(p, `${r.home}/.claude/skills/night-shift`)) return "the night-shift skill itself";
   if (/^.*\/\.claude\/settings(\.local)?\.json$/.test(p)) return "Claude settings";
   if (p === `${r.home}/.claude/claude.md`) return "the user's global CLAUDE.md";
-  if (r.repo && p === `${r.repo}/.claude/night-shift.json`) return "the project's night-shift rules";
+  // Config, rules and run state the user steers the night with. Before the repo roots: with the repo at ~/.claude they sit inside a writable root.
+  if (under(p, `${r.home}/.claude/night-shift`)) return "the user's night-shift settings and rules";
+  if (r.repo && (p === `${r.repo}/.claude/night-shift.json` || p === `${r.repo}/.claude/night-shift-rules.md`)) return "the project's night-shift rules";
   if (r.repo && under(p, `${r.repo}/.git`)) return "the .git directory";
   if (r.state && under(p, r.state) && RUNNER_FILES.test(p.slice(r.state.length + 1))) return "the runner's own files in the state folder";
   return null;
@@ -296,6 +298,7 @@ function protectedTargets(r) {
     [r.repo && `${r.repo}/.git`, "the .git directory"],
     [r.repo && `${r.repo}/.claude`, "the project's .claude folder"],
     [`${r.home}/.claude/skills/night-shift`, "the night-shift skill itself"],
+    [`${r.home}/.claude/night-shift`, "the user's night-shift settings and rules"],
     [`${r.home}/.claude/settings.json`, "Claude settings"],
     [`${r.home}/.claude/settings.local.json`, "Claude settings"],
     [`${r.home}/.claude/claude.md`, "the user's global CLAUDE.md"],
@@ -762,7 +765,7 @@ const findExecDeletes = (words) => execGroups(words).some(execDeletes);
 // Names found inside .git and the project's .claude folder, in lower case. A name test that can match one
 // of them does not keep a find, or a PowerShell listing, out of those folders. Of branches only main and
 // master are known.
-const INSIDE = `.git .claude night-shift.json settings.json settings.local.json head orig_head fetch_head merge_head config description index
+const INSIDE = `.git .claude night-shift.json night-shift-rules.md settings.json settings.local.json head orig_head fetch_head merge_head config description index
   packed-refs commit_editmsg hooks info exclude objects pack refs heads tags remotes origin main master logs pre-commit.sample 0a
   0123456789abcdef0123456789abcdef012345 pack-0123456789abcdef0123456789abcdef01234567.pack pack-0123456789abcdef0123456789abcdef01234567.idx
   pack-0123456789abcdef0123456789abcdef01234567.rev`.split(/\s+/);
@@ -1236,9 +1239,11 @@ export function decide(input, env = process.env, opts = {}) {
 
 function selfTest() {
   const env = { NIGHT_SHIFT_REPO: "C:/work/repo", NIGHT_SHIFT_STATE: "C:/temp/x-night", USERPROFILE: "C:\\Users\\u" };
-  const bash = (command) => decide({ tool_name: "Bash", tool_input: { command } }, env);
+  // inHome: the run's repository is the user's own .claude folder.
+  const inHome = { ...env, NIGHT_SHIFT_REPO: "C:/Users/u/.claude" };
+  const bash = (command, e = env) => decide({ tool_name: "Bash", tool_input: { command } }, e);
   const ps = (command) => decide({ tool_name: "PowerShell", tool_input: { command } }, env);
-  const write = (file_path) => decide({ tool_name: "Write", tool_input: { file_path } }, env);
+  const write = (file_path, e = env) => decide({ tool_name: "Write", tool_input: { file_path } }, e);
   const mcp = (tool_name) => decide({ tool_name, tool_input: {} }, env);
   const cases = [
     [mcp("mcp__blender__execute_blender_code"), true],
@@ -1325,6 +1330,11 @@ function selfTest() {
     [bash("USERPROFILE=C:/temp/x git status"), true], [bash("declare -x HOME=C:/temp/x; git status"), true],
     [bash(`M='fix --amend docs'; git commit -m "$M"`), false], [bash("git clone -bfeature https://github.com/a/b dir"), false],
     [bash(`GIT_SSH_COMMAND="ssh -i $KEY" git fetch`), false], [bash("git ls-files -m | xargs git add"), false], [bash("git ls-files | xargs git push -f"), true],
+    [write("C:/work/repo/.claude/night-shift-rules.md"), true], [bash("echo 'push is fine' >> .claude/night-shift-rules.md"), true],
+    [bash("rm .claude/night-shift-rules.md"), true], [bash("rm -f C:/work/repo/.claude/night-shift-*"), true],
+    [ps("Set-Content .claude\\night-shift-rules.md 'x'"), true], [bash("cat .claude/night-shift-rules.md"), false],
+    [write("C:/Users/u/.claude/night-shift/rules.md", inHome), true], [write("C:/Users/u/.claude/night-shift/config.json", inHome), true],
+    [bash("rm night-shift/rules.md", inHome), true], [write("C:/Users/u/.claude/notes.md", inHome), false],
   ];
   let failed = 0;
   cases.forEach(([got, deny], i) => {
