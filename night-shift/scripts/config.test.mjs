@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { readProjectConfig, stateDirProblem, tempRoot, norm } from "./config.mjs";
+import { readProjectConfig, readGlobalConfig, mergedConfig, globalConfigFile, CONFIG_KEYS, stateDirProblem, tempRoot, norm } from "./config.mjs";
 
 const repoWith = (text) => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "night-config-test-"));
@@ -13,6 +13,15 @@ const repoWith = (text) => {
     fs.writeFileSync(path.join(repo, ".claude", "night-shift.json"), typeof text === "string" ? text : JSON.stringify(text));
   }
   return repo;
+};
+
+// A throwaway home: the global file is never read from the real one.
+const emptyHome = () => fs.mkdtempSync(path.join(os.tmpdir(), "night-config-home-"));
+const tmpHome = (cfg) => {
+  const home = emptyHome();
+  fs.mkdirSync(path.dirname(globalConfigFile(home)), { recursive: true });
+  fs.writeFileSync(globalConfigFile(home), JSON.stringify(cfg));
+  return home;
 };
 
 test("a missing file is an empty config; a valid one is returned as written", () => {
@@ -92,4 +101,26 @@ test("tempRoot is the temp folder in long form: a short-form TEMP resolves, one 
     for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
     fs.rmSync(base, { recursive: true, force: true });
   }
+});
+
+test("the global file holds only run-wide keys", () => {
+  const home = tmpHome({ lang: "tr", stateDir: "C:/x/y", nope: 1 });
+  const { config, errors } = readGlobalConfig(home);
+  assert.deepEqual(config, { lang: "tr" });
+  assert.deepEqual(errors, ['"stateDir" belongs in a project\x27s .claude/night-shift.json', 'unknown key "nope"']);
+});
+test("a missing global file is no error", () => assert.deepEqual(readGlobalConfig(emptyHome()), { config: {}, errors: [] }));
+test("the project file wins over the global one, key by key", () => {
+  const home = tmpHome({ lang: "tr", effort: "high" }), repo = repoWith({ effort: "max" });
+  assert.deepEqual(mergedConfig(repo, home).config, { lang: "tr", effort: "max" });
+});
+test("mergedConfig names the file each error is in", () => {
+  const home = tmpHome({ lang: "TR" }), repo = repoWith({ mode: "sonnet" });
+  assert.deepEqual(mergedConfig(repo, home).errors, [
+    `${globalConfigFile(home)}: "lang" must be one of en, tr`,
+    `${path.join(repo, ".claude", "night-shift.json")}: "mode" must be one of opus, fable`]);
+});
+test("lang takes only its listed values", () => {
+  for (const v of ["TR", "tr-TR", "Türkçe", "", 5]) assert.equal(CONFIG_KEYS.lang(v), "must be one of en, tr");
+  for (const v of ["en", "tr"]) assert.equal(CONFIG_KEYS.lang(v), null);
 });

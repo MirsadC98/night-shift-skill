@@ -997,7 +997,7 @@ function pointerCase(ptrOf) {
   const write = (p) => fs.writeFileSync(file, JSON.stringify({ state, task: "x", finished: false, ...p }));
   const run = (cmd, extra = []) => spawnSync(process.execPath, [CHAIN, cmd, "--repo", repo, ...extra],
     { env: { ...env, NIGHT_SHIFT_LAUNCH: "fail", NIGHT_SHIFT_CLAUDE: process.execPath, TEMP: root, TMP: root }, encoding: "utf8", cwd: root });
-  return { write, run, state, repo, read: () => JSON.parse(fs.readFileSync(file, "utf8")) };
+  return { write, run, state, repo, home, read: () => JSON.parse(fs.readFileSync(file, "utf8")) };
 }
 const stamped = (ms) => new Date(ms).toLocaleString("sv-SE");
 
@@ -1126,6 +1126,43 @@ test("start takes --max-wait-hours from the command line, else the config, else 
   assert.equal(maxWaitOf({ maxWaitHours: 3 }, ["--max-wait-hours", "1.5"]).wait, 1.5);
   assert.equal(maxWaitOf({ maxWaitHours: 3 }, []).wait, 3);
   assert.equal(maxWaitOf({}, []).wait, 6);
+});
+
+// The language: --lang, else the project file, else the global file (under the case's home), else en.
+const langOf = ({ global, project }, extra = []) => {
+  const c = pointerCase();
+  const write = (file, cfg) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(cfg)); };
+  if (global) write(path.join(c.home, ".claude", "night-shift", "config.json"), global);
+  if (project) write(path.join(c.repo, ".claude", "night-shift.json"), project);
+  const r = c.run("start", ["--state", c.state, "--prompt", "x", "--allow-dirty", ...extra]);
+  return { ...r, lang: r.stderr.includes("launch refused (test)") ? JSON.parse(fs.readFileSync(path.join(c.state, "run.json"), "utf8")).lang : undefined };
+};
+
+test("start takes the language from --lang, else the project file, else the global file, else en", () => {
+  assert.equal(langOf({ global: { lang: "tr" } }).lang, "tr");
+  assert.equal(langOf({ global: { lang: "tr" }, project: { lang: "en" } }).lang, "en");
+  assert.equal(langOf({ global: { lang: "en" }, project: { lang: "en" } }, ["--lang", "tr"]).lang, "tr");
+  assert.equal(langOf({}).lang, "en");
+});
+
+test("start refuses a language it has no table for, on the command line or in a file", () => {
+  for (const v of ["TR", "tr-TR", "Türkçe"]) {
+    const r = langOf({}, ["--lang", v]);
+    assert.equal(r.status, 1, v);
+    assert.match(r.stderr, /--lang must be one of en, tr/, v);
+    assert.doesNotMatch(r.stderr, /launch refused/);
+  }
+  const noValue = langOf({}, ["--lang"]);
+  assert.equal(noValue.status, 1);
+  assert.match(noValue.stderr, /--lang must be one of en, tr/);
+  const g = langOf({ global: { lang: "tr-TR" } });
+  assert.equal(g.status, 1);
+  assert.match(g.stderr, /config.json: "lang" must be one of en, tr/);
+  assert.match(g.stderr, /.claude[\\/]night-shift[\\/]config.json/);
+  assert.doesNotMatch(g.stderr, /launch refused/);
+  const p = langOf({ project: { lang: "Türkçe" } });
+  assert.equal(p.status, 1);
+  assert.match(p.stderr, /night-shift.json: "lang" must be one of en, tr/);
 });
 
 // C8a: the hours in the chain's own messages are short to read, and never 0 for a positive value.

@@ -7,7 +7,7 @@
 //   node night-chain.mjs start  --repo <dir> (--prompt-file <f> | --prompt <text>) [--until HH:MM]
 //                               [--max-sessions <n>] [--session-hours 4] [--model <m>] [--allow-dirty]
 //                               [--effort xhigh] [--fable-ceiling 0.6] [--fable-sessions 2]
-//                               [--max-wait-hours 6]
+//                               [--max-wait-hours 6] [--mode opus|fable] [--lang en|tr]
 //                               [--state <dir>] [--window]
 //   (without --until and --max-sessions the chain goes on until a session writes STOP,
 //    two handovers fail in a row, or stop is called; a usage limit pauses it, and the
@@ -49,7 +49,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { buildReport, userWaits } from "./night-report.mjs";
-import { readProjectConfig, stateDirProblem, tempRoot } from "./config.mjs";
+import { mergedConfig, LANGS, stateDirProblem, tempRoot } from "./config.mjs";
 import { sessionOutcome, windowSpan } from "./session-outcome.mjs";
 import { MAIN_MODEL, SUB_MODEL, MAIN_EFFORT, subEffortText, MAX_NOTE, FABLE_NOTE, nightModelSettings, sessionPlan,
   promptDirectives, directiveLines, fableGate, familyOf } from "./effort.mjs";
@@ -102,8 +102,8 @@ function repoRoot(dir) {
   } catch { fail(`not a git repository: ${dir}`); }
 }
 const projectConfig = (repo) => {
-  const { config, errors } = readProjectConfig(repo);
-  if (errors.length) fail(`${path.join(repo, ".claude", "night-shift.json")}: ${errors.join("; ")}`);
+  const { config, errors } = mergedConfig(repo);
+  if (errors.length) fail(errors.join("; "));
   return config;
 };
 const slug = (repo) => `${path.basename(repo)}-${crypto.createHash("sha1").update(repo.toLowerCase()).digest("hex").slice(0, 8)}`;
@@ -212,6 +212,8 @@ function start(opt) {
   if (waitArg !== undefined && !(typeof waitArg === "string" && Number.isFinite(Number(waitArg)) && Number(waitArg) > 0)) {
     fail(`--max-wait-hours must be a positive number of hours (got ${waitArg === true ? "no value" : waitArg})`);
   }
+  // A language is never guessed from "TR" or "tr-TR": a night in English that was asked for in Turkish is worse than a refusal.
+  if (opt.lang !== undefined && !LANGS.includes(opt.lang)) fail(`--lang must be one of ${LANGS.join(", ")} (got ${opt.lang === true ? "no value" : opt.lang})`);
   let state = path.resolve(typeof opt.state === "string" ? opt.state
     : (cfg.stateDir || path.join(tempRoot(), `night-shift-${path.basename(repo)}-{date}`)).replace("{date}", today()));
   // The runner writes here and a session reads its instructions from here: not a folder of the user's own.
@@ -261,6 +263,7 @@ function start(opt) {
     maxWaitHours: waitArg !== undefined ? Number(waitArg) : cfg.maxWaitHours > 0 ? cfg.maxWaitHours : 6,
     // "none", "inherit" or the list of servers the guard lets through (the guard reads the same file).
     mcp: cfg.mcp ?? "none",
+    lang: opt.lang ?? cfg.lang ?? "en",
     claude: findClaude(),
     report: cfg.report || "NIGHT_RUNS.md",
     path: sessionPath,

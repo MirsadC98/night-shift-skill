@@ -2,6 +2,8 @@
 // typo is named at start instead of ending a run at 3 a.m. (or silently switching a rule off), and
 // so that a state folder too wide to be a state folder is refused by both. Imports only node.
 //   readProjectConfig(repo) -> { config, errors }   never throws; config holds only the valid keys
+//   readGlobalConfig(home)  -> { config, errors }   the same for ~/.claude/night-shift/config.json (run-wide keys only)
+//   mergedConfig(repo, home) -> { config, errors }  the global file overlaid key by key with the project's
 //   stateDirProblem(dir, { home, repo, temp })      null, or why dir may not be the state folder
 
 import fs from "node:fs";
@@ -42,6 +44,8 @@ const under = (p, root) => root && (p === root || p.startsWith(root + "/"));
 
 const isStr = (v) => typeof v === "string";
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+export const MODES = ["opus", "fable"];
+export const LANGS = ["en", "tr"];
 // Each check returns null when the value is fine, else the text that follows the key's name.
 // `deny` is checked rule by rule in denyErrors.
 export const CONFIG_KEYS = {
@@ -49,6 +53,8 @@ export const CONFIG_KEYS = {
   report: (v) => (isStr(v) ? null : "must be a string"),
   lessons: (v) => (isStr(v) ? null : "must be a string"),
   model: (v) => (isStr(v) ? null : "must be a string"),
+  mode: (v) => (MODES.includes(v) ? null : `must be one of ${MODES.join(", ")}`),
+  lang: (v) => (LANGS.includes(v) ? null : `must be one of ${LANGS.join(", ")}`),
   effort: (v) => (EFFORTS.includes(v) ? null : `must be one of ${EFFORTS.join(", ")}`),
   fableCeiling: (v) => (typeof v === "number" && v > 0 && v <= 100 ? null : "must be a number above 0 and at most 100"),
   fableSessions: (v) => (Number.isInteger(v) && v >= 0 ? null : "must be a whole number, 0 or more"),
@@ -70,8 +76,9 @@ function denyErrors(list) {
   return errors;
 }
 
-export function readProjectConfig(repo) {
-  const file = path.join(String(repo), ".claude", "night-shift.json");
+// Both files go through one reader. `allowed` limits the keys a file may hold: a known key outside it is
+// named as belonging elsewhere, so a project-only setting in the global file is not silently applied to every repo.
+function readConfigFile(file, allowed) {
   let text;
   try { text = fs.readFileSync(file, "utf8"); }
   catch (e) { return e.code === "ENOENT" ? { config: {}, errors: [] } : { config: {}, errors: [`cannot be read: ${e.message}`] }; }
@@ -83,11 +90,28 @@ export function readProjectConfig(repo) {
   for (const [k, v] of Object.entries(raw)) {
     if (k.startsWith("_") || k.startsWith("$")) continue; // a comment
     if (!Object.hasOwn(CONFIG_KEYS, k)) { errors.push(`unknown key "${k}"`); continue; }
+    if (allowed && !allowed.includes(k)) { errors.push(`"${k}" belongs in a project's .claude/night-shift.json`); continue; }
     // A scalar check returns text for after the key's name; deny returns whole messages.
     const bad = k === "deny" ? denyErrors(v) : [CONFIG_KEYS[k](v)].filter(Boolean).map((m) => `"${k}" ${m}`);
     if (bad.length) errors.push(...bad); else config[k] = v;
   }
   return { config, errors };
+}
+
+export const projectConfigFile = (repo) => path.join(String(repo), ".claude", "night-shift.json");
+export const readProjectConfig = (repo) => readConfigFile(projectConfigFile(repo));
+
+// Only what is about the run as a whole; anything that names a path or a rule of one repository stays per project.
+export const GLOBAL_KEYS = ["mode", "lang", "effort", "fableCeiling", "fableSessions", "maxWaitHours"];
+export const globalConfigFile = (home = os.homedir()) => path.join(String(home), ".claude", "night-shift", "config.json");
+export const readGlobalConfig = (home = os.homedir()) => readConfigFile(globalConfigFile(home), GLOBAL_KEYS);
+
+export function mergedConfig(repo, home = os.homedir()) {
+  const files = [[globalConfigFile(home), readGlobalConfig(home)], [projectConfigFile(repo), readProjectConfig(repo)]];
+  return {
+    config: Object.assign({}, ...files.map(([, r]) => r.config)),
+    errors: files.flatMap(([file, r]) => r.errors.map((e) => `${file}: ${e}`)),
+  };
 }
 
 // The runner writes into the state folder, trusts inbox.md and next-prompt.md there as
