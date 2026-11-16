@@ -1489,3 +1489,26 @@ test("start refuses a rules file over the limit and status names the files in fo
   putRules(projectRules(c.repo), "a".repeat(9000));
   assert.match(c.run("status").stdout, /\n {2}rules: {2}.*night-shift-rules\.md is 9000 bytes, over the 8192 limit\n\n/);
 });
+
+// The real start, which pointerCase cannot reach (its launch is refused before start prints). The chain it starts
+// is the reload stand-in's; waiting for its end keeps a runner from outliving the test.
+const startPrints = async (setupRules) => {
+  const { repo, state, env, root, home } = setup();
+  // An untracked rules file would make the tree dirty, which start refuses.
+  fs.appendFileSync(path.join(repo, ".git", "info", "exclude"), "/.claude/\n");
+  setupRules({ repo, home });
+  const e = { ...env, NIGHT_SHIFT_CLAUDE: path.join(root, "fake-claude.mjs") };
+  const out = startChain(repo, state, e, root);
+  const done = await waitFor(repo, e, root).done;
+  assert.equal(done.code, 0, done.out);
+  return out;
+};
+
+test("start prints the rule files in force: each with its bytes, or none", async () => {
+  const some = await startPrints(({ home, repo }) => { putRules(globalRules(home), "ş".repeat(10)); putRules(projectRules(repo), "keep commits small"); });
+  assert.match(some, /^ {2}rules: {2}.*[\\/]night-shift[\\/]rules\.md \(20 bytes\)$/m);
+  assert.match(some, /^ {2}rules: {2}.*[\\/]night-shift-rules\.md \(18 bytes\)$/m);
+  assert.doesNotMatch(some, /rules: {2}none/);
+  assert.match(some, /^ {2}until: .*\n {2}rules: /m, "after the until line");
+  assert.match(await startPrints(() => {}), / {2}rules: {2}none/);
+});
