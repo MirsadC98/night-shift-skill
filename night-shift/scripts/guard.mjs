@@ -769,16 +769,20 @@ const INSIDE = `.git .claude night-shift.json night-shift-rules.md settings.json
   packed-refs commit_editmsg hooks info exclude objects pack refs heads tags remotes origin main master logs pre-commit.sample 0a
   0123456789abcdef0123456789abcdef012345 pack-0123456789abcdef0123456789abcdef01234567.pack pack-0123456789abcdef0123456789abcdef01234567.idx
   pack-0123456789abcdef0123456789abcdef01234567.rev`.split(/\s+/);
-const meetsInside = (pat) => INSIDE.some((n) => segMatch(pat, n));
+// What the user's ~/.claude/night-shift folder holds (config, rules, the runs the runner keeps, the Telegram token): names a find
+// or a listing must also steer clear of, but only when its start path covers that folder, so no other find reads them as inside.
+const NS_NAMES = ["night-shift", "rules.md", "config.json", "runs", "telegram.json"];
+const nsNames = (q, r) => under(`${r.home}/.claude/night-shift`, q) ? NS_NAMES : [];
+const meetsInside = (pat, extra = []) => [...INSIDE, ...extra].some((n) => segMatch(pat, n));
 // A -path test keeps a find out of .git when it stays below one folder of the start path (./dist/*), or
 // needs a folder on the way that .git and .claude do not hold (*/node_modules/*). start: the start path's own folders.
-function pathNarrows(pat, start) {
+function pathNarrows(pat, start, extra = []) {
   if (/\.git|\.claude/.test(pat)) return false;
-  if (!/[\\/]/.test(pat)) return !meetsInside(pat);
+  if (!/[\\/]/.test(pat)) return !meetsInside(pat, extra);
   const segs = pat.split(/[\\/]/).filter(Boolean);
   if (segs[0] === "." && segs[1] && !GLOB.test(segs[1])) return true;
   const fixed = segs.filter((s) => s !== "." && !GLOB.test(s) && !start.includes(s));
-  return fixed.length > 0 && !fixed.some((s) => INSIDE.includes(s));
+  return fixed.length > 0 && !fixed.some((s) => INSIDE.includes(s) || extra.includes(s));
 }
 // find . -delete takes .git with it. A find from the repository (or its .claude folder) up is safe only
 // when every delete in it (-delete, an -exec that deletes) stands behind a name, path or regex test that
@@ -786,7 +790,7 @@ function pathNarrows(pat, start) {
 // The expression is read as find reads it: -o starts a new alternative with no test yet, ( ) groups.
 const NAME_TEST = /^-(i?name|i?lname|i?path|i?wholename|i?regex)$/;
 const FIND_END = /^(\\?;|\\|\+)$/;
-function findNarrowed(words, q = "") {
+function findNarrowed(words, q = "", extra = []) {
   const w = words.map(unmark).map((x) => x.toLowerCase()), start = q.split("/");
   let k = 0, acted = false, pruned = false, any = false;
   const narrows = (test, pat, not) => {
@@ -794,7 +798,7 @@ function findNarrowed(words, q = "") {
     // A negated test narrows only when it leaves out what is inside .git: -not -name .git still walks into it.
     if (not) return (path || regex) && pat.includes(".git") && /\*$/.test(pat);
     if (regex) return !pat.includes(".git") && !/^[*?./\\]*$/.test(pat);
-    return path ? pathNarrows(pat, start) : !meetsInside(pat);
+    return path ? pathNarrows(pat, start, extra) : !meetsInside(pat, extra);
   };
   // One ( ) group, or the whole expression. given: a test before it already narrowed. Returns whether every
   // delete in it stands behind a test, and whether every alternative of it narrows.
@@ -827,8 +831,8 @@ function findNarrowed(words, q = "") {
   return acted ? safe : any;
 }
 
-const wideFind = (q, r) => Boolean(r.repo) && (under(r.repo, q) || under(`${r.repo}/.claude`, q));
-const wideFindReason = (t) => `refusing a find delete from the repository or its .claude folder (${t}) without a name, path or regex test that leaves .git out: it would take .git with it`;
+const wideFind = (q, r) => (Boolean(r.repo) && (under(r.repo, q) || under(`${r.repo}/.claude`, q))) || nsNames(q, r).length > 0;
+const wideFindReason = (t) => `refusing a find delete from the repository or its .claude folder (${t}) without a name, path or regex test that leaves .git and the user's night-shift settings and rules out: it would take them with it`;
 
 // One target of a delete or a move, as the shell hands it over (variables filled in). o.recursive: it takes
 // a whole tree; o.noun: what the reason calls it ("move"); o.find: the target is a find's word ({ expr: its
@@ -901,8 +905,10 @@ function listed(line, vars, env) {
 // The delete at the end of such a line, judged by what the listing can hand it. A Where-Object is a test the
 // guard does not read: it counts as narrowing, like a -Filter that cannot match inside .git.
 function listedReason(src, recursive, where, r) {
-  const narrowed = src.where || (src.pats.length > 0 && src.pats.every((p) => !/[$`]/.test(p) && !meetsInside(p.toLowerCase())));
   for (const p of src.paths) {
+    const q0 = isAbsolute(p) ? norm(p) : where.at && !where.lost ? norm(`${where.at}/${p}`) : null;
+    const extra = q0 ? nsNames(q0, r) : [];
+    const narrowed = src.where || (src.pats.length > 0 && src.pats.every((x) => !/[$`]/.test(x) && !meetsInside(x.toLowerCase(), extra)));
     let targets = [p], rec = recursive;
     if (src.item) targets = [p];
     else if (src.recurse && !narrowed) {
@@ -934,7 +940,7 @@ function checkDelete(words, ni, env, where, vars, r, line) {
   const recursive = RECURSIVE_DELETE.test(cut < 0 ? text : words.slice(0, cut).join(" "));
   const plain = !recursive && DELETE_WORD.test(name) && (!isFind || words.includes("-delete") || findExecDeletes(words));
   if (!recursive && !plain) return null;
-  const find = () => ({ expr, narrowed: (q) => findNarrowed(words, q) });
+  const find = () => ({ expr, narrowed: (q) => findNarrowed(words, q, nsNames(q, r)) });
   let expr = false, dNext = false, seen = 0, skip = false, starts = 0, prev = "";
   // Its targets come after the delete's own word, a {a,b} list as the paths it stands for.
   const list = words.slice(words.findIndex((w) => DELETE_WORD.test(w)) + 1);
@@ -1242,7 +1248,7 @@ function selfTest() {
   // inHome: the run's repository is the user's own .claude folder.
   const inHome = { ...env, NIGHT_SHIFT_REPO: "C:/Users/u/.claude" };
   const bash = (command, e = env) => decide({ tool_name: "Bash", tool_input: { command } }, e);
-  const ps = (command) => decide({ tool_name: "PowerShell", tool_input: { command } }, env);
+  const ps = (command, e = env) => decide({ tool_name: "PowerShell", tool_input: { command } }, e);
   const write = (file_path, e = env) => decide({ tool_name: "Write", tool_input: { file_path } }, e);
   const mcp = (tool_name) => decide({ tool_name, tool_input: {} }, env);
   const cases = [
@@ -1335,6 +1341,9 @@ function selfTest() {
     [ps("Set-Content .claude\\night-shift-rules.md 'x'"), true], [bash("cat .claude/night-shift-rules.md"), false],
     [write("C:/Users/u/.claude/night-shift/rules.md", inHome), true], [write("C:/Users/u/.claude/night-shift/config.json", inHome), true],
     [bash("rm night-shift/rules.md", inHome), true], [write("C:/Users/u/.claude/notes.md", inHome), false],
+    [bash("find . -name rules.md -delete", inHome), true], [bash("find . -name config.json -delete", inHome), true],
+    [bash("find . -path '*/night-shift/*' -delete", inHome), true], [bash("find . -name rules.md -exec rm {} +", inHome), true],
+    [ps("Get-ChildItem . -Recurse -Filter config.json | Remove-Item", inHome), true], [bash("find . -name notes.md -delete", inHome), false],
   ];
   let failed = 0;
   cases.forEach(([got, deny], i) => {
