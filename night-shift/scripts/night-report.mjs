@@ -31,6 +31,8 @@ const QUIET_MINUTES = 30;
 const WEIGHT = { input: 1, read: 0.1, write5m: 1.25, write1h: 2, output: 5 };
 
 const read = (f) => (fs.existsSync(f) ? fs.readFileSync(f, "utf8") : "");
+// A file caught half-written (or by a crash) reads as its default: the watcher must outlive it.
+const readJson = (f, dflt = {}) => { try { const v = JSON.parse(read(f)); return v && typeof v === "object" ? v : dflt; } catch { return dflt; } };
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jsonl = (f) => read(f).split("\n").flatMap((l) => { try { return l ? [JSON.parse(l)] : []; } catch { return []; } });
@@ -601,6 +603,8 @@ export function chooseChat(cfg, updates, wanted = null) {
   return { chatId: null, lines: ["more than one chat wrote to this bot; name yours with --chat <id>:", ...chats.map((c) => `  ${c.id}  ${c.name}`)] };
 }
 
+// Outcomes: "sent"; why it cannot go; "telegram: ..." when Telegram refused for good; "retry: ..." when
+// the request threw or Telegram was busy or down (429, 5xx), so that asking again may work.
 async function send(messages) {
   let cfg;
   try { cfg = JSON.parse(read(TELEGRAM)); } catch { return "no telegram.json"; }
@@ -609,12 +613,12 @@ async function send(messages) {
     const chat = cfg.chatId;
     if (!chat) return "no chat yet: press Start in the bot's chat, then run night-report.mjs telegram-setup";
     for (const m of messages) {
-      const { text, silent = false } = typeof m === "string" ? { text: m } : m;
-      const j = await telegram("sendMessage", cfg, { chat_id: chat, text, parse_mode: "HTML", disable_web_page_preview: true, disable_notification: silent });
-      if (!j.ok) return `telegram: ${j.description}`;
+      const { text, silent = false, plain = false } = typeof m === "string" ? { text: m } : m;
+      const j = await telegram("sendMessage", cfg, { chat_id: chat, text, parse_mode: plain ? undefined : "HTML", disable_web_page_preview: true, disable_notification: silent });
+      if (!j.ok) return `${j.error_code === 429 || j.error_code >= 500 ? "retry" : "telegram"}: ${j.description}`;
     }
     return "sent";
-  } catch (e) { return `telegram: ${e.message}`; }
+  } catch (e) { return `retry: ${e.message}`; }
 }
 
 export async function notify(state, headline, opt = {}) {
@@ -635,80 +639,113 @@ async function watch(opt) {
   if (other && other !== process.pid && alive(other)) return console.log(`already watched by pid ${other}`);
   fs.writeFileSync(lock, String(process.pid));
   const markFile = path.join(state, "notified.json");
-  const mark = { lines: 0, quiet: {}, ...JSON.parse(read(markFile) || "{}") };
+  const mark = { lines: 0, quiet: {}, ...readJson(markFile) };
   const save = () => fs.writeFileSync(markFile, JSON.stringify(mark));
   // Each event is one short card; status.md keeps the full report for `status` and /rapor.
+  // A card is sent until Telegram takes it or the give-up time passes; the caller counts its log line after that.
+  const retryMs = Number(process.env.NIGHT_SHIFT_SEND_RETRY_MS) || 30_000, giveUpMs = Number(process.env.NIGHT_SHIFT_SEND_GIVEUP_MS) || 1_800_000;
   const say = async (message) => {
     fs.writeFileSync(path.join(state, "status.md"), buildReport(state, { pid }).plain);
     if (!message) return;
     if (opt.dry) return console.log(`----- ${message.silent ? "(sessiz)" : ""}\n${message.text}`);
-    const outcome = await send([message]);
-    if (outcome !== "sent") console.error(`night-report: ${outcome}`);
+    const began = Date.now();
+    let outcome, tries = 0;
+    for (;;) {
+      outcome = await send([message]);
+      tries++;
+      // Unreadable HTML (a stray "<" in a title) must not lose the card: once more, tags stripped.
+      if (/^telegram: .*can't parse entities/.test(outcome) && !message.plain) {
+        message = { ...message, plain: true, text: message.text.replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&") };
+        continue;
+      }
+      if (!outcome.startsWith("retry:")) break;
+      if (tries === 1) watchLog(state, `card not taken, trying again: ${outcome}`);
+      if (Date.now() - began >= giveUpMs) { outcome = `gave up on a card after ${tries} tries: ${outcome}`; break; }
+      await sleep(retryMs);
+    }
+    if (outcome !== "sent") watchLog(state, outcome);
   };
-  const cfg = JSON.parse(read(TELEGRAM) || "{}");
+  const cfg = readJson(TELEGRAM);
   if (cfg.token && !opt.dry) {
     await telegram("setMyCommands", cfg, { commands: [
       { command: "durum", description: "Şu an ne çalışıyor" }, { command: "rapor", description: "Tam rapor" }] }).catch(() => {});
   }
-  const project = path.basename(JSON.parse(read(path.join(state, "run.json")) || "{}").repo || state);
+  const project = path.basename(readJson(path.join(state, "run.json")).repo || state);
   if (opt.announce) await say(eventLine("start", { project }));
   const started = Date.now();
 
+  let poison = 0; // tries in a row that failed on one log line
   for (;;) {
-    const lines = read(path.join(state, "chain.log")).split("\n").filter(Boolean);
-    for (const line of lines.slice(mark.lines)) {
-      mark.lines++;
-      const t = line.replace(/^\[[^\]]+\] /, "");
-      let m;
-      if ((m = /^session (\d+) ends: /.exec(t))) await say(sessionMessage(state, m[1], pid));
-      else if ((m = /^usage limit: waiting until \S+ (\d\d:\d\d)/.exec(t))) await say(eventLine("limit", { until: m[1], progress: progressOf(collect(state, pid)) }));
-      else if ((m = /^session (\d+) resumes /.exec(t))) await say(eventLine("resume", { nn: m[1] }));
-      else if ((m = /^session (\d+): transient error .*; try 1, waiting until \S+ (\d\d:\d\d)/.exec(t))) await say(eventLine("error", { nn: m[1], until: m[2] })); // later tries stay quiet
-      else if ((m = /^session (\d+) left no continuation prompt/.exec(t))) await say(eventLine("retry", { nn: m[1] }));
-      else if ((m = /^chain ends: (.*)$/.exec(t))) {
+    try {
+      const lines = read(path.join(state, "chain.log")).split("\n").filter(Boolean);
+      for (const line of lines.slice(mark.lines)) {
+        const t = line.replace(/^\[[^\]]+\] /, "");
+        let m;
+        // A line is counted after its card was delivered or given up, so a card Telegram did not take is not lost.
+        try {
+          if ((m = /^session (\d+) ends: /.exec(t))) await say(sessionMessage(state, m[1], pid));
+          else if ((m = /^usage limit: waiting until \S+ (\d\d:\d\d)/.exec(t))) await say(eventLine("limit", { until: m[1], progress: progressOf(collect(state, pid)) }));
+          else if ((m = /^session (\d+) resumes /.exec(t))) await say(eventLine("resume", { nn: m[1] }));
+          else if ((m = /^session (\d+): transient error .*; try 1, waiting until \S+ (\d\d:\d\d)/.exec(t))) await say(eventLine("error", { nn: m[1], until: m[2] })); // later tries stay quiet
+          else if ((m = /^session (\d+) left no continuation prompt/.exec(t))) await say(eventLine("retry", { nn: m[1] }));
+          else if ((m = /^chain ends: (.*)$/.exec(t))) {
+            await say(chainMessage(state, m[1], pid));
+            mark.lines++;
+            save();
+            return fs.rmSync(lock, { force: true });
+          }
+        } catch (e) {
+          // A line no card can be made of would hold every later card back for good: it is skipped on the third try.
+          if (++poison < 3) throw e;
+          watchLog(state, `watch loop: skipped a line it could not make a card of: ${e.message}`);
+        }
+        poison = 0;
+        mark.lines++;
         save();
-        await say(chainMessage(state, m[1], pid));
-        return fs.rmSync(lock, { force: true });
       }
-      save();
-    }
-    const current = [...lines].reverse().map((l) => /session (\d+) (starts|resumes|ends)/.exec(l)).find(Boolean);
-    if (current && current[2] !== "ends") {
-      const f = path.join(state, `session-${current[1]}.jsonl`);
-      const mtime = fs.existsSync(f) ? fs.statSync(f).mtimeMs : Date.now();
-      if (Date.now() - mtime > QUIET_MINUTES * 60_000 && mark.quiet[current[1]] !== mtime) {
-        mark.quiet[current[1]] = mtime;
-        save();
-        const step = collect(state, pid).parsed.findLast((s) => s.nn === current[1])?.lastStep;
-        await say(eventLine("quiet", { nn: current[1], minutes: QUIET_MINUTES, step: step && String(step).slice(0, 80) }));
-      }
-      // Say at once when a running session is on the wrong effort, not only on its card.
-      mark.effort ||= {};
-      if (!mark.effort[current[1]]) {
-        const s = parseSession(state, current[1]);
-        const run = JSON.parse(read(path.join(state, "run.json")) || "{}");
-        if (s.efforts.length) {
-          mark.effort[current[1]] = s.efforts.join("/");
+      const current = [...lines].reverse().map((l) => /session (\d+) (starts|resumes|ends)/.exec(l)).find(Boolean);
+      if (current && current[2] !== "ends") {
+        // lastActivity looks past the main stream (a session waiting on a long workflow writes nothing itself).
+        const f = path.join(state, `session-${current[1]}.jsonl`);
+        let mtime = 0;
+        try { mtime = lastActivity(state, current[1]); } catch {}
+        if (!mtime) mtime = fs.existsSync(f) ? fs.statSync(f).mtimeMs : Date.now();
+        if (Date.now() - mtime > QUIET_MINUTES * 60_000 && mark.quiet[current[1]] !== mtime) {
+          mark.quiet[current[1]] = mtime;
           save();
-          if (effortOff(state, run, s)) await say(eventLine("effort", { nn: current[1], got: s.efforts.join("/"), want: wantOf(state, run, current[1]).effort }));
+          const step = collect(state, pid).parsed.findLast((s) => s.nn === current[1])?.lastStep;
+          await say(eventLine("quiet", { nn: current[1], minutes: QUIET_MINUTES, step: step && String(step).slice(0, 80) }));
+        }
+        // Say at once when a running session is on the wrong effort, not only on its card.
+        mark.effort ||= {};
+        if (!mark.effort[current[1]]) {
+          const s = parseSession(state, current[1]);
+          const run = readJson(path.join(state, "run.json"));
+          if (s.efforts.length) {
+            mark.effort[current[1]] = s.efforts.join("/");
+            save();
+            if (effortOff(state, run, s)) await say(eventLine("effort", { nn: current[1], got: s.efforts.join("/"), want: wantOf(state, run, current[1]).effort }));
+          }
         }
       }
-    }
-    if (pid && !alive(pid)) {
+      if (pid && !alive(pid)) {
+        await sleep(5_000);
+        if (read(path.join(state, "chain.log")).split("\n").filter(Boolean).length > mark.lines) continue;
+        await say(eventLine("died"));
+        return fs.rmSync(lock, { force: true });
+      }
+      await commands(state, pid, mark, save, started, opt.dry ? 0 : 20);
+    } catch (e) {
+      watchLog(state, `watch loop: ${e.message}`);
       await sleep(5_000);
-      if (read(path.join(state, "chain.log")).split("\n").filter(Boolean).length > mark.lines) continue;
-      await say(eventLine("died"));
-      return fs.rmSync(lock, { force: true });
     }
-    await commands(state, pid, mark, save, started, opt.dry ? 0 : 20);
   }
 }
 
 // /durum and /rapor from the user's own chat, read by long polling in place of the
 // loop's wait. Two runs watching the same bot take turns (Telegram answers 409).
 async function commands(state, pid, mark, save, started, seconds) {
-  let cfg = null;
-  try { cfg = JSON.parse(read(TELEGRAM)); } catch {}
+  const cfg = readJson(TELEGRAM, null);
   if (!seconds || !cfg?.token || !cfg.chatId) return sleep(20_000);
   let j = null;
   try { j = await telegram("getUpdates", cfg, { offset: (mark.update || 0) + 1, timeout: seconds, allowed_updates: ["message"] }); }
@@ -719,7 +756,8 @@ async function commands(state, pid, mark, save, started, seconds) {
     mark.update = u.update_id;
     save();
     const msg = u.message;
-    if (msg?.chat?.id !== cfg.chatId || msg.date * 1000 < started - 60_000) continue;
+    // telegram.json may hold the id as text; String() on both keeps it matching either way.
+    if (String(msg?.chat?.id) !== String(cfg.chatId) || msg.date * 1000 < started - 60_000) continue;
     const cmd = /^\/(\w+)/.exec(msg.text || "")?.[1];
     const reply = cmd === "durum" ? statusMessage(state, pid) : cmd === "rapor" ? reportMessage(state, pid) : null;
     if (!reply) continue;
