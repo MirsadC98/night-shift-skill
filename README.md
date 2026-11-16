@@ -43,13 +43,13 @@ node ~/.claude/skills/night-shift/scripts/night-chain.mjs stop   --repo <dir> [-
 node ~/.claude/skills/night-shift/scripts/night-chain.mjs reload --repo <dir>
 ```
 
-`start` also takes `--until HH:MM`, `--max-sessions <n>`, `--model <m>`, `--effort <level>`, `--fable-ceiling <share>`, `--fable-sessions <n>`, `--max-wait-hours <h>` (the longest wait for a usage limit or an outage, default 6), `--state <dir>` (continue in an earlier run's folder) and `--window` (a visible console; closing it stops the chain). `start` without a prompt goes on from a session a limit or an error cut off, kept in `<state>/resume.json`.
+`start` also takes `--until HH:MM`, `--max-sessions <n>`, `--model <m>`, `--effort <level>`, `--fable-ceiling <share>`, `--fable-sessions <n>`, `--max-wait-hours <h>` (the longest wait for a usage limit or an outage, default 6; a value that is not a positive number stops `start`), `--state <dir>` (continue in an earlier run's folder) and `--window` (a visible console; closing it stops the chain). `start` without a prompt goes on from a session a limit or an error cut off, kept in `<state>/resume.json`.
 
 While a chain runs, write new work or changed rules into `<state>/inbox.md`. The next session reads that file first.
 
 ### Per-project settings
 
-Put a `.claude/night-shift.json` in the target repository. Every key is optional, and a key the runner does not know is an error: `start` refuses to run and names it (a key that starts with `_` or `$` is a comment). The guard reads the same file and refuses MCP tools while it is invalid.
+Put a `.claude/night-shift.json` in the target repository. Every key is optional, and a key the runner does not know is an error: `start` refuses to run and names it (a key that starts with `_` or `$` is a comment). The guard reads the same file and, while it is invalid, refuses every shell command and MCP tool.
 
 ```json
 {
@@ -68,7 +68,7 @@ Put a `.claude/night-shift.json` in the target repository. Every key is optional
 }
 ```
 
-- `stateDir`: the folder for the chain's log, prompts and inbox. The default is `<temp>/night-shift-<repo>-{date}`, inside your own profile. A folder under `C:/temp` is shorter to type, but on a PC with other accounts those users can write there too, and the next session reads `inbox.md` and `next-prompt.md` from this folder as instructions. On a shared PC keep the default.
+- `stateDir`: the folder for the chain's log, prompts and inbox. The default is `<temp>/night-shift-<repo>-{date}`, inside your own profile. A folder under `C:/temp` is shorter to type, but on a PC with other accounts those users can write there too, and the next session reads `inbox.md` and `next-prompt.md` from this folder as instructions. On a shared PC keep the default. A drive root, a folder directly below one, your home folder, the repository, the temp folder itself, `.git` and `~/.claude` are refused.
 - `report`: the night report. The default is `NIGHT_RUNS.md`.
 - `lessons`: the notes file where sessions keep lessons that outlast one session.
 - `model`, `effort`: what a session runs on when its prompt names neither.
@@ -81,18 +81,18 @@ Put a `.claude/night-shift.json` in the target repository. Every key is optional
 
 `scripts/guard.mjs` runs as a hook in every night session. It blocks:
 
-- history rewrites, force pushes, merges, branch and ref deletes, `git reset --hard`, `git clean -f`, and discarding the whole working tree (`git checkout .`, `git restore .`);
-- changes to remotes and to global git config;
+- history rewrites, force pushes, merges, branch, tag and ref deletes, `git reset --hard`, `git clean -f`, forced worktree removal, pruning of unreachable objects, and discarding the whole working tree (`git checkout .`, `git restore .`);
+- changes to remotes, to global git config and to git settings that run a command, and a git command started with another home folder;
 - publishing: `npm publish`, `gh release`, GitHub API writes and store uploads;
-- deletes outside the repository and temp folders, recursive or not, with the target read from the folder the command stands in (`cd elsewhere && rm -rf x` is refused);
-- file writes (Write, Edit) outside the repository and temp folders, and writes to the skill itself, Claude settings, your global `CLAUDE.md`, the project's `.claude/night-shift.json`, `.git`, and the runner's own files in the state folder (`night-settings.json`, `run.json`, `launch.cmd`, the logs);
+- deletes and moves outside the repository and temp folders, recursive or not, with the target read from the folder the command stands in (`cd elsewhere && rm -rf x` is refused);
+- file writes (Write, Edit) outside the repository and temp folders, and writes to the skill itself, Claude settings, your global `CLAUDE.md`, the project's `.claude/night-shift.json`, `.git`, and the runner's own files in the state folder (`night-settings.json`, `run.json`, `launch.cmd`, the logs); the same files are protected from a shell redirect and from the common commands that write a file in place (`sed -i`, `tee`, `cp`, `Set-Content` and the like);
 - registry writes, system-level commands, and killing `node`, `claude`, the editor or the shell;
 - MCP tools, unless the project lists their server (`mcp` above);
 - anything your project's `deny` rules match.
 
 A blocked action becomes an item under "Waits for you" in the night report.
 
-Paths are compared the way Windows resolves them (`..`, a trailing dot or space, a `\\?\` prefix, UNC); a path with a stream name or an 8.3 short name is refused outright. The guard also reads the command a wrapper runs (`bash -c`, `powershell -c`, `eval`, `xargs`, `find -exec`, `timeout`, `nice`), a shell fed by a pipe, a git alias, abbreviated options (`git push --dele`, `git reset --har`) and the targets of a delete through globs and braces. A quoted flag (`git push "--force"`) or flags written together (`-uf`) are still read as flags. The runner writes the hook into `night-settings.json` again before every session, and registers it with `onFailure: "block"`, so a guard that crashes refuses the action; a CLI too old to know that option would let it through.
+Paths are compared the way Windows resolves them (`..`, a trailing dot or space, a `\\?\` prefix, UNC); a path with a stream name or an 8.3 short name is refused outright. The guard also reads the command a wrapper runs (`bash -c`, `powershell -c`, `eval`, `xargs`, `find -exec`, `timeout`, `nice`, `su -c`), a shell fed by a pipe, a git alias, abbreviated options (`git push --dele`, `git reset --har`), the targets of a delete through globs and braces, the tests of a `find` that deletes, and the folder a PowerShell pipeline lists before it deletes (`Get-ChildItem … | Remove-Item`). A quoted flag (`git push "--force"`) or flags written together (`-uf`) are still read as flags. The runner writes the hook into `night-settings.json` again before every session, and registers it with `onFailure: "block"`, so a guard that crashes refuses the action; a CLI too old to know that option would let it through.
 
 ### What the guard does not stop
 
