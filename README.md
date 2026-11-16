@@ -100,7 +100,7 @@ Each file is at most 8 KB (UTF-8 bytes) and is read again at every session start
 
 | A rule can change | A rule cannot change |
 |---|---|
-| The five tests a piece must pass (`night-shift/SKILL.md`, "One session, one piece") | What the guard refuses: merges, branch deletes, history rewrites, force pushes |
+| The five tests that decide which decisions wait for you (`night-shift/SKILL.md`, "What reaches the user") | What the guard refuses: merges, branch deletes, history rewrites, force pushes |
 | How work is split into pieces | Deletes outside the repository and temp folders |
 | The stops the guard does not enforce: live desktop, physical tests, messages, work outside the roadmap | Publishing |
 | When a session asks for another model | Writes to the skill, Claude settings, the config files and the rule files |
