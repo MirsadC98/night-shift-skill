@@ -67,7 +67,7 @@ export default {
     fableCut: "Fable payı bittiği için kesildi; parçası Opus max'te sürer",
     mainFell: (why, level) => `Ana model Fable, Opus'ta ${level} düzeyinde çalıştı (${why})`,
     mainCut: "Fable payı bittiği için kesildi; parçası Opus'ta xhigh düzeyinde sürer",
-    fableNot:(why) => `Fable'da çalışmadı: ${why}`,
+    fableNot: (why) => `Fable'da çalışmadı: ${why}`,
     bigPrompt: (kb) => `devam promptu ${kb} KB (30 KB üstü; her çağrıda baştan okunur)`,
     badModel: (m) => `MODEL: ${m} tanınmadı, Opus'ta çalıştı`,
   },

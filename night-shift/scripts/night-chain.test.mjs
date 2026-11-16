@@ -513,6 +513,18 @@ test("fable mode: a session the allowance cuts off goes on on Opus at xhigh, wit
   assert.doesNotMatch(card, /max/);
 });
 
+test("fable mode: a fallback whose prompt asks for EFFORT: max is told one level and one next-prompt rule", async () => {
+  const resets = Math.floor(Date.now() / 1000) + 3 * 86_400;
+  const { log, seen, flag } = await fableRun("first piece", { 1: { fable: 0.65, resets, next: "EFFORT: max\nhard piece" }, 2: { next: "STOP: done" } }, FM);
+  const two = seen(2);
+  assert.equal(flag(two, "--model"), "opus");
+  assert.equal(flag(two, "--effort"), "max");
+  assert.doesNotMatch(two.input, /at xhigh|without a MODEL or EFFORT line/);
+  assert.match(two.input, /main model is Fable/);
+  assert.match(two.input, /This session runs at max effort, only for this piece/);
+  assert.match(log, /session 02 runs Opus at max \(its prompt asks for it\)\n/);
+});
+
 test("fable mode: Fable comes back once the reset has passed", async () => {
   const { seen, flag } = await fableRun("first piece", { 1: { next: "STOP: done" } }, FM,
     (state) => fs.writeFileSync(path.join(state, "fable.json"), JSON.stringify({ outUntil: Date.now() - 1000 })));
@@ -557,7 +569,7 @@ test("start works out the mode from --mode, the config and the model, and names 
   assert.match(both.stderr, /--mode must be one of opus, fable/);
 });
 
-test("a runner in a visible console moves to a hidden one,and puts back the pointer its old parent marks finished", async () => {
+test("a runner in a visible console moves to a hidden one, and puts back the pointer its old parent marks finished", async () => {
   // What an older runner's hand-over starts: `run` without --headless, NIGHT_SHIFT_RELOADED=1,
   // in the old runner's console; the old runner marks the pointer finished once it exits.
   const { state, env, root, home } = setup();

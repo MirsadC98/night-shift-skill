@@ -127,3 +127,9 @@ test("fallbackNote says why and never names max", () => {
   const n = fallbackNote("its allowance is at 65%, at or over the 60% ceiling");
   assert.match(n, /main model is Fable/); assert.match(n, /65%/); assert.doesNotMatch(n, /\bmax\b/);
 });
+test("fallbackNote for a prompt with its own level names no level and leaves the EFFORT line to that level's note", () => {
+  const n = fallbackNote("its allowance is used up", { asked: "max" });
+  assert.match(n, /Opus at the level its prompt asked for/); assert.match(n, /without a MODEL line/);
+  assert.doesNotMatch(n, /xhigh|EFFORT|\bmax\b/);
+  assert.equal(fallbackNote("x", { asked: null }), fallbackNote("x"));
+});

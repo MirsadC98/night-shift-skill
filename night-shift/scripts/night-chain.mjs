@@ -604,7 +604,7 @@ function runSession(run, session, plan, nn, resume) {
     `Mode: ${run.mode}.`,
     `Skill folder: ${SKILL_DIR}. Continuation file: ${path.join(run.state, "next-prompt.md")}. Night report: ${run.report}.`,
     ...(plan.family === "fable" && run.mode !== "fable" ? [FABLE_NOTE] : []),
-    ...(plan.downgrade && run.mode === "fable" ? [fallbackNote(plan.why)] : []),
+    ...(plan.downgrade && run.mode === "fable" ? [fallbackNote(plan.why, { asked: plan.askedEffort })] : []),
     ...(plan.downgrade && run.mode !== "fable" ? ["The prompt asked for MODEL: fable, but Fable's weekly allowance does not cover it tonight; this piece runs on Opus at max."] : []),
     ...(effort === "max" ? [MAX_NOTE] : []),
     "",

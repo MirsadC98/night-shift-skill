@@ -69,7 +69,7 @@ export default {
     fableCut: "cut off because Fable's share ran out; the rest goes on Opus at max",
     mainFell: (why, level) => `Fable is the main model, but ran on Opus at ${level} (${why})`,
     mainCut: "cut off because Fable's share ran out; the rest goes on Opus at xhigh",
-    fableNot:(why) => `did not run on Fable: ${why}`,
+    fableNot: (why) => `did not run on Fable: ${why}`,
     bigPrompt: (kb) => `continuation prompt is ${kb} KB (over 30 KB; every call reads it again)`,
     badModel: (m) => `MODEL: ${m} not recognised, ran on Opus`,
   },
