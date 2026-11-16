@@ -93,6 +93,8 @@ export const PROMPT_WARN_BYTES = 30_000;
 const ratioArg = (v, d) => { const n = Number(v); return v == null || v === true || Number.isNaN(n) ? d : n > 1 ? n / 100 : n; };
 const countArg = (v, d) => { const n = Number(v); return v == null || v === true || !Number.isFinite(n) || n < 0 ? d : Math.floor(n); };
 const pct = (u) => `${Math.round(u * 100)}%`;
+// Hours as people read them: two decimals at most, no trailing zeros, and "<0.01" instead of a 0 or an exponent.
+export const hoursText = (h) => (h >= 0.01 ? String(Number(h.toFixed(2))) : "<0.01");
 
 function repoRoot(dir) {
   try {
@@ -205,6 +207,11 @@ function start(opt) {
   }
 
   const cfg = projectConfig(repo);
+  // Unlike the other numbers, a wrong one here is not quietly replaced: a wait of 1 h or 6 h is not what was typed.
+  const waitArg = opt["max-wait-hours"];
+  if (waitArg !== undefined && !(typeof waitArg === "string" && Number.isFinite(Number(waitArg)) && Number(waitArg) > 0)) {
+    fail(`--max-wait-hours must be a positive number of hours (got ${waitArg === true ? "no value" : waitArg})`);
+  }
   let state = path.resolve(typeof opt.state === "string" ? opt.state
     : (cfg.stateDir || path.join(tempRoot(), `night-shift-${path.basename(repo)}-{date}`)).replace("{date}", today()));
   // The runner writes here and a session reads its instructions from here: not a folder of the user's own.
@@ -251,7 +258,7 @@ function start(opt) {
     fableCeiling: ratioArg(opt["fable-ceiling"] ?? cfg.fableCeiling, 0.6),
     fableSessions: countArg(opt["fable-sessions"] ?? cfg.fableSessions, 2),
     // The longest a usage limit's reset may be away for the chain to wait for it; farther ends the chain.
-    maxWaitHours: (() => { const n = Number(opt["max-wait-hours"] ?? cfg.maxWaitHours); return Number.isFinite(n) && n > 0 ? n : 6; })(),
+    maxWaitHours: waitArg !== undefined ? Number(waitArg) : cfg.maxWaitHours > 0 ? cfg.maxWaitHours : 6,
     // "none", "inherit" or the list of servers the guard lets through (the guard reads the same file).
     mcp: cfg.mcp ?? "none",
     claude: findClaude(),
@@ -497,7 +504,7 @@ async function runChain(opt) {
       // A reset the chain cannot use ends it, with resume.json (or the handover) kept for the next start.
       if (result.resetAt && run.deadline && result.resetAt > run.deadline) finish(`the usage limit resets ${stamp(result.resetAt)}, after ${run.until}`);
       const maxWait = run.maxWaitHours ?? 6;
-      if (result.resetAt && result.resetAt - Date.now() > maxWait * 3_600_000) finish(`the usage limit resets ${stamp(result.resetAt)}, more than ${maxWait} h away (--max-wait-hours)`);
+      if (result.resetAt && result.resetAt - Date.now() > maxWait * 3_600_000) finish(`the usage limit resets ${stamp(result.resetAt)}, more than ${hoursText(maxWait)} h away (--max-wait-hours)`);
       const until = Math.min(result.resetAt || Date.now() + 30 * 60_000, run.deadline || Infinity);
       if (wrote) log(`session ${nn}: the limit cut it off after its handover; session ${String(session + 1).padStart(2, "0")} starts when it resets`);
       log(`usage limit: waiting until ${new Date(until).toLocaleString("sv-SE")}`);
@@ -513,7 +520,7 @@ async function runChain(opt) {
       streak++;
       streakStart ||= Date.now();
       const maxWait = run.maxWaitHours ?? 6;
-      if (Date.now() - streakStart > maxWait * 3_600_000) finish(`session ${nn} kept failing for ${maxWait} h (${result.errorText})`);
+      if (Date.now() - streakStart > maxWait * 3_600_000) finish(`session ${nn} kept failing for ${hoursText(maxWait)} h (${result.errorText})`);
       if (result.mainModels.length > 0 && result.sessionId) {
         // It worked before the error: the same conversation goes on, so nothing is done twice.
         fs.writeFileSync(resumeFile, JSON.stringify({ nn, sessionId: result.sessionId, why: "error", model: plan.model, effort: plan.effort }));
@@ -522,7 +529,7 @@ async function runChain(opt) {
         // A resume that dies without a turn gets one more try; then the conversation is given up
         // and the piece goes on from the recovery note below. An API or network error is not a dead
         // conversation: it waits out the outage and resumes the same one.
-        const outage = result.apiError != null || /^API Error\b|\b(?:ENOTFOUND|ECONN\w*|ETIMEDOUT|EAI_AGAIN)\b/.test(result.errorText);
+        const outage = result.apiError != null || result.apiErrorStatus != null || /^API Error\b|\b(?:ENOTFOUND|ECONN\w*|ETIMEDOUT|EAI_AGAIN)\b/.test(result.errorText);
         if (!outage && ++deadResumes >= 2) { fs.rmSync(resumeFile, { force: true }); retryHandover = true; }
       } else if (plan.family === "fable" && result.mainModels.length === 0) writeFable({ sessions: Math.max(0, (readFable().sessions || 0) - 1) }); // it never had a turn: the retry is not a second Fable session
       if (!retryHandover) {
@@ -644,7 +651,7 @@ function status(opt) {
   const repo = repoRoot(opt.repo || process.cwd());
   const ptr = readPointer(repo);
   if (!ptr) return console.log("no night-shift run recorded for this repository");
-  const running = !ptr.finished && ptr.pid && alive(ptr.pid);
+  const running = !ptr.finished && isRunner(ptr.pid);
   console.log(`${statusHead(ptr, running).join("\n")}\n`);
   console.log(buildReport(ptr.state, { focus: "all", pid: running ? ptr.pid : 0 }).plain);
 }

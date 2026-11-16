@@ -64,7 +64,9 @@ export function sessionOutcome(stream, errText = "", code = null, { timedOut = f
   const fatal = cut && !limited && !fableOut && ([400, 401, 403, 404].includes(res?.api_error_status) || /^\s*API Error: (?:400|401|403|404)\b|Please run \/login/.test(resText));
   const transient = !timedOut && cut && !limited && !fableOut && !fatal && (!res || res.api_error != null || res.api_error_status != null || /^\s*API Error\b/.test(resText));
   const lastErrLine = errTail.split("\n").map((l) => l.trim()).filter(Boolean).pop();
-  const errorText = !cut ? "" : (res ? resText.trim().split("\n")[0] : lastErrLine || `exit ${code}, no output`).slice(0, 160);
+  // A result with no text (is_error and nothing said) still names its error fields, else says there was none.
+  const resWhy = String((typeof res?.api_error === "string" && res.api_error) || (res?.api_error_status != null ? `API status ${res.api_error_status}` : "no error text"));
+  const errorText = !cut ? "" : (res ? resText.trim().split("\n")[0] || resWhy : lastErrLine || `exit ${code}, no output`).slice(0, 160);
   return {
     limited,
     transient,
@@ -78,6 +80,7 @@ export function sessionOutcome(stream, errText = "", code = null, { timedOut = f
     limitType: info?.rateLimitType ?? null,
     limitInfo: info || null,
     apiError: res?.api_error ?? null,
+    apiErrorStatus: res?.api_error_status ?? null,
     fableOut,
     fableResetAt: fableEpoch ? fableEpoch * 1000 + 60_000 : null,
     // The model the session started on, the ones its own turns ran on, and the one the CLI moved
@@ -90,7 +93,7 @@ export function sessionOutcome(stream, errText = "", code = null, { timedOut = f
     timedOut,
     summary: (res
       ? `${res.subtype}${res.is_error ? " (error)" : ""}, ${res.num_turns} turns, $${cost.toFixed(2)}`
-      : timedOut ? "" : `exit ${code}, no result line`) + (timedOut ? `${res ? "; " : ""}killed after ${hours} h (--session-hours)` : ""),
+      : timedOut ? "" : `exit ${code}, no result line`) + (timedOut ? `${res ? "; " : ""}killed${hours != null ? ` after ${hours} h` : ""} (--session-hours)` : ""),
   };
 }
 

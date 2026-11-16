@@ -570,12 +570,32 @@ export function statusMessage(state, pid) {
 // that dropped without a word, and the watcher, with /durum and /rapor behind it, with it.
 export async function telegram(method, cfg, body, { graceMs = 10_000 } = {}) {
   const api = process.env.NIGHT_SHIFT_TELEGRAM_API || "https://api.telegram.org";
-  const r = await fetch(`${api}/bot${cfg.token}/${method}`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}),
-    signal: AbortSignal.timeout((body?.timeout || 0) * 1000 + graceMs),
-  });
+  let r;
+  try {
+    r = await fetch(`${api}/bot${cfg.token}/${method}`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}),
+      signal: AbortSignal.timeout((body?.timeout || 0) * 1000 + graceMs),
+    });
+  } catch (e) {
+    // fetch names the whole URL in its error, token included: it must not reach watch.log or a console.
+    const said = `${e.message}${e.cause?.message ? `: ${e.cause.message}` : ""}`;
+    const err = new Error(cfg.token ? said.split(String(cfg.token)).join("<token>") : said);
+    err.name = e.name;
+    throw err;
+  }
   return r.json();
 }
+
+// True when the same session's "transient error" line follows (before its next start or resume): that
+// retry's card is the error one. A line not in the file yet is not seen, and the end gets its card as before.
+const retriedAfter = (later, nn) => {
+  for (const l of later) {
+    const t = l.replace(/^\[[^\]]+\] /, "");
+    if (t.startsWith(`session ${nn}: transient error`)) return true;
+    if (t.startsWith(`session ${nn} starts`) || t.startsWith(`session ${nn} resumes `)) return false;
+  }
+  return false;
+};
 
 // The watcher's own trail (its output goes nowhere): commands, their delay, Telegram errors.
 const watchLog = (state, line) => { try { fs.appendFileSync(path.join(state, "watch.log"), `[${new Date().toLocaleString("sv-SE")}] ${line}\n`); } catch {} };
@@ -683,7 +703,8 @@ async function watch(opt) {
         let m;
         // A line is counted after its card was delivered or given up, so a card Telegram did not take is not lost.
         try {
-          if ((m = /^session (\d+) ends: /.exec(t))) await say(sessionMessage(state, m[1], pid));
+          // In an outage each retry logs "ends" and then "transient error"; the error is the card, so the "ends" before it is not.
+          if ((m = /^session (\d+) ends: /.exec(t))) { if (!retriedAfter(lines.slice(mark.lines + 1), m[1])) await say(sessionMessage(state, m[1], pid)); }
           else if ((m = /^usage limit: waiting until \S+ (\d\d:\d\d)/.exec(t))) await say(eventLine("limit", { until: m[1], progress: progressOf(collect(state, pid)) }));
           else if ((m = /^session (\d+) resumes /.exec(t))) await say(eventLine("resume", { nn: m[1] }));
           else if ((m = /^session (\d+): transient error .*; try 1, waiting until \S+ (\d\d:\d\d)/.exec(t))) await say(eventLine("error", { nn: m[1], until: m[2] })); // later tries stay quiet
@@ -691,7 +712,8 @@ async function watch(opt) {
           else if ((m = /^chain ends: (.*)$/.exec(t))) {
             await say(chainMessage(state, m[1], pid));
             mark.lines++;
-            save();
+            // The chain is over and its card out: a notified.json that cannot be saved must not keep the watcher going.
+            try { save(); } catch (e) { watchLog(state, `chain ended; could not save notified.json: ${e.message}`); }
             return fs.rmSync(lock, { force: true });
           }
         } catch (e) {
@@ -711,10 +733,11 @@ async function watch(opt) {
         try { mtime = lastActivity(state, current[1]); } catch {}
         if (!mtime) mtime = fs.existsSync(f) ? fs.statSync(f).mtimeMs : Date.now();
         if (Date.now() - mtime > QUIET_MINUTES * 60_000 && mark.quiet[current[1]] !== mtime) {
-          mark.quiet[current[1]] = mtime;
-          save();
           const step = collect(state, pid).parsed.findLast((s) => s.nn === current[1])?.lastStep;
           await say(eventLine("quiet", { nn: current[1], minutes: QUIET_MINUTES, step: step && String(step).slice(0, 80) }));
+          // Marked after the card: a watcher that dies mid-send sends it again on its next pass.
+          mark.quiet[current[1]] = mtime;
+          save();
         }
         // Say at once when a running session is on the wrong effort, not only on its card.
         mark.effort ||= {};
@@ -722,9 +745,9 @@ async function watch(opt) {
           const s = parseSession(state, current[1]);
           const run = readJson(path.join(state, "run.json"));
           if (s.efforts.length) {
+            if (effortOff(state, run, s)) await say(eventLine("effort", { nn: current[1], got: s.efforts.join("/"), want: wantOf(state, run, current[1]).effort }));
             mark.effort[current[1]] = s.efforts.join("/");
             save();
-            if (effortOff(state, run, s)) await say(eventLine("effort", { nn: current[1], got: s.efforts.join("/"), want: wantOf(state, run, current[1]).effort }));
           }
         }
       }
@@ -737,7 +760,7 @@ async function watch(opt) {
       await commands(state, pid, mark, save, started, opt.dry ? 0 : 20);
     } catch (e) {
       watchLog(state, `watch loop: ${e.message}`);
-      await sleep(5_000);
+      await sleep(Number(process.env.NIGHT_SHIFT_WATCH_RETRY_MS) || 5_000); // the env variable is for the tests: a poison line takes three of these
     }
   }
 }

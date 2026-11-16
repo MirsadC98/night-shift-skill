@@ -152,3 +152,52 @@ test("a session the timer killed says so and is not retried as a transient error
   const late = sessionOutcome(result({ num_turns: 30 }), "", 1, { timedOut: true, hours: 4 });
   assert.equal(late.summary, "success, 30 turns, $1.00; killed after 4 h (--session-hours)");
 });
+
+test("the status of an API error is exposed even when the CLI named no api_error", () => {
+  const o = sessionOutcome(result({ is_error: true, api_error_status: 529, num_turns: 0, result: "Overloaded" }), "", 1);
+  assert.deepEqual([o.transient, o.apiError, o.apiErrorStatus], [true, null, 529]);
+  assert.equal(sessionOutcome(result({ is_error: true, api_error: "overloaded_error", api_error_status: 529 })).apiErrorStatus, 529);
+  assert.equal(sessionOutcome(result({})).apiErrorStatus, null);
+});
+
+test("a timeout with no known hours says so without a number", () => {
+  assert.equal(sessionOutcome("", "", 1, { timedOut: true }).summary, "killed (--session-hours)");
+});
+
+test("a cut session whose result text is empty still says why", () => {
+  const status = sessionOutcome(result({ is_error: true, api_error_status: 529, num_turns: 0, result: "" }), "", 1);
+  assert.equal(status.errorText, "API status 529");
+  const named = sessionOutcome(result({ is_error: true, api_error: "overloaded_error", api_error_status: 529, num_turns: 0, result: "  " }), "", 1);
+  assert.equal(named.errorText, "overloaded_error");
+  const bare = sessionOutcome(result({ is_error: true, subtype: "error_during_execution", num_turns: 0, result: "" }), "", 1);
+  assert.equal(bare.errorText, "no error text");
+  assert.equal(sessionOutcome(result({ result: "" })).errorText, "");
+});
+
+// Test only (D): the paths below were believed right. Each would fail if its line in session-outcome.mjs went.
+test("an empty trailing result never lowers the cost of the real one", () => {
+  // Breaks if the empty-result branch assigns cost instead of taking the larger.
+  const o = sessionOutcome([result({ num_turns: 4, total_cost_usd: 5 }), result({ num_turns: 0, result: "", total_cost_usd: 2 })].join("\n"));
+  assert.equal(o.summary, "success, 4 turns, $5.00");
+  assert.equal(sessionOutcome([result({ num_turns: 4, total_cost_usd: 5 }), result({ num_turns: 0, result: "", total_cost_usd: 7 })].join("\n")).summary, "success, 4 turns, $7.00");
+});
+
+test("a rate-limit event that is not rejected clears the rejected one a later limit result would borrow", () => {
+  // Breaks if the `else if (j.rate_limit_info) lastRejected = null` line goes.
+  const rejected = JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "rejected", rateLimitType: "five_hour", resetsAt: 1795000000 } });
+  const allowed = JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "allowed" } });
+  const hit = result({ is_error: true, api_error: "usage_limit_reached", num_turns: 5 });
+  const stale = sessionOutcome([rejected, result({ is_error: true, subtype: "error_max_turns", result: "Reached max turns" }), hit].join("\n"));
+  assert.equal(stale.resetAt, 1795000000 * 1000 + 60_000); // the control: with no event between, the earlier one is borrowed
+  const cleared = sessionOutcome([rejected, result({ is_error: true, subtype: "error_max_turns", result: "Reached max turns" }), allowed, hit].join("\n"));
+  assert.deepEqual([cleared.limited, cleared.limitInfo, cleared.resetAt], [true, null, null]);
+});
+
+test("with several rejected windows and no reset of its own, the smallest window's reset is used", () => {
+  // Breaks if the fallback takes the largest, or the first, of the rejected windows' resets.
+  const event = JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "rejected", unifiedWindows: {
+    seven_day: { status: "rejected", resetsAt: 1795900000 }, five_hour: { status: "rejected", resetsAt: 1795000000 }, seven_day_overage_included: { status: "allowed", resetsAt: 1790000000 } } } });
+  const o = sessionOutcome([event, result({ is_error: true, api_error: "usage_limit_reached", num_turns: 5 })].join("\n"));
+  assert.equal(o.limited, true);
+  assert.equal(o.resetAt, 1795000000 * 1000 + 60_000);
+});

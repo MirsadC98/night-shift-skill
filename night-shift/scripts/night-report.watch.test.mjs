@@ -42,14 +42,14 @@ async function bot(answer) {
 }
 
 // A throwaway home and state folder, a helper process standing in for the runner, the watcher itself.
-async function scene(answer, { chatId = 42, notified, env = {} } = {}, body) {
+async function scene(answer, { chatId = 42, notified, env = {}, token = "T" } = {}, body) {
   const api = await bot(answer);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ns-watch-"));
   const home = path.join(dir, "home"), state = path.join(dir, "state"), root = path.join(dir, "repo");
   fs.mkdirSync(path.join(home, ".claude", "night-shift"), { recursive: true });
   fs.mkdirSync(state);
   fs.mkdirSync(root);
-  fs.writeFileSync(path.join(home, ".claude", "night-shift", "telegram.json"), JSON.stringify({ token: "T", chatId }));
+  fs.writeFileSync(path.join(home, ".claude", "night-shift", "telegram.json"), JSON.stringify({ token, chatId }));
   fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ repo: root }));
   fs.writeFileSync(path.join(state, "chain.log"), "");
   if (notified !== undefined) fs.writeFileSync(path.join(state, "notified.json"), notified);
@@ -64,7 +64,7 @@ async function scene(answer, { chatId = 42, notified, env = {} } = {}, body) {
     });
     watcher.on("exit", (c) => { code = c ?? -1; onExit(code); });
     const chain = (line) => fs.appendFileSync(path.join(state, "chain.log"), stamp(line));
-    await body({ api, state, home, chain, exited, watcher, ended: () => code !== undefined });
+    await body({ api, state, home, chain, exited, watcher, helper, ended: () => code !== undefined });
   } finally {
     watcher?.kill();
     helper.kill();
@@ -129,5 +129,131 @@ test("a chat id saved as text still answers /durum", async () => {
   const ask = { ok: true, result: [{ update_id: 1, message: { chat: { id: 42 }, date: Math.floor(Date.now() / 1000), text: "/durum" } }] };
   await scene((m, b, n) => (m === "getUpdates" && n === 0 ? [200, ask] : m === "sendMessage" ? [200, { ok: true }] : undefined), { chatId: "42" }, async ({ api }) => {
     await until(() => api.sends().length >= 1, 10_000, "the /durum answer");
+  });
+});
+
+const marks = (state) => { try { return JSON.parse(fs.readFileSync(path.join(state, "notified.json"), "utf8")); } catch { return {}; } };
+const logOf = (state) => { try { return fs.readFileSync(path.join(state, "watch.log"), "utf8"); } catch { return ""; } };
+const SESSION_DONE = JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 1, session_id: "s-1", result: "ok" });
+
+// fetch's own error text carries the URL, which holds the token; it must not reach watch.log.
+test("a Telegram error that names the request's URL does not leak the token into watch.log", async () => {
+  const token = "123456:SECRET-TOKEN-VALUE";
+  await scene(() => undefined, { token, env: { NIGHT_SHIFT_TELEGRAM_API: "not a url", NIGHT_SHIFT_SEND_GIVEUP_MS: "300" } }, async ({ state, chain }) => {
+    chain(RETRY);
+    await until(() => /gave up on a card/.test(logOf(state)) && /getUpdates:/.test(logOf(state)), 15_000, "the send and getUpdates failures in watch.log");
+    assert.match(logOf(state), /<token>/);
+    assert.equal(logOf(state).includes("SECRET-TOKEN-VALUE"), false, logOf(state));
+  });
+});
+
+// A mark is saved after its card went out, so a watcher that dies mid-send sends the card again.
+// The old session file makes the quiet case due at once (no 30-minute wait); Telegram stays down until the test lifts it.
+async function markAfterCard(prepare, mark, card) {
+  let up = false;
+  await scene((m) => (m === "sendMessage" ? (up ? [200, { ok: true }] : [500, { ok: false, error_code: 500, description: "down" }]) : undefined), {}, async ({ api, state, chain }) => {
+    prepare(state);
+    chain("session 01 starts: x");
+    await until(() => api.sends().length >= 2, 10_000, "two attempts at the card");
+    assert.match(api.sends()[0].body.text, card);
+    assert.deepEqual(marks(state)[mark] ?? {}, {}, "the mark must wait for the card");
+    const before = api.sends().length;
+    up = true;
+    await until(() => Object.keys(marks(state)[mark] ?? {}).length === 1, 10_000, "the mark after the card went out");
+    await sleep(500);
+    assert.equal(api.sends().length, before + 1, "one card per event");
+  });
+}
+test("the quiet mark is saved only after the quiet card went out", async () => {
+  await markAfterCard((state) => {
+    const f = path.join(state, "session-01.jsonl");
+    fs.writeFileSync(f, JSON.stringify({ type: "system", subtype: "init", session_id: "s-1" }) + "\n");
+    const old = new Date(Date.now() - 2 * 3_600_000);
+    fs.utimesSync(f, old, old);
+  }, "quiet", /dakikadır sessiz/);
+});
+test("the effort mark is saved only after the effort card went out", async () => {
+  await markAfterCard((state) => {
+    fs.writeFileSync(path.join(state, "session-01.jsonl"), JSON.stringify({ type: "assistant", session_id: "s-1", perTurnEffort: "low", message: { model: "m", content: [] } }) + "\n");
+  }, "effort", /düzeyde çalışıyor/);
+});
+
+// The chain's last card is out and its line counted; a notified.json that cannot be written (here: a folder
+// in its place) must not keep the watcher going, to send a false "died" card once the runner is gone.
+test("the watcher ends after the chain's last card even when notified.json cannot be saved", async () => {
+  await scene(() => undefined, {}, async ({ api, state, chain, exited, helper }) => {
+    fs.mkdirSync(path.join(state, "notified.json"));
+    chain("chain ends: STOP: done");
+    const code = await Promise.race([exited, sleep(4_000).then(() => "still running")]);
+    assert.notEqual(code, "still running");
+    helper.kill();
+    await sleep(300);
+    assert.equal(api.sends().length, 1);
+    assert.equal(fs.existsSync(path.join(state, "watch.pid")), false);
+    assert.match(logOf(state), /notified\.json/);
+  });
+});
+
+// During an outage each retry logs "ends" and then "transient error"; only the error is a card.
+const OUTAGE = [
+  "session 01 starts: x",
+  "session 01 ends: success (error), 0 turns, $0.00",
+  "session 01: transient error (API Error: 500); try 1, waiting until 2026-11-16 03:01",
+  "session 01 resumes fake-1 after the error",
+  "session 01 ends: success (error), 0 turns, $0.00",
+  "session 01: transient error (API Error: 500); try 2, waiting until 2026-11-16 03:03",
+  "session 01 resumes fake-1 after the error",
+  "session 01 ends: success, 3 turns, $1.00",
+  "session 02 left no continuation prompt; retrying with a recovery note",
+];
+test("an outage's retries make one error card and no session card until the session really ends", async () => {
+  await scene(() => undefined, {}, async ({ api, state, chain }) => {
+    fs.writeFileSync(path.join(state, "session-01.jsonl"), SESSION_DONE + "\n");
+    for (const l of OUTAGE) chain(l);
+    await until(() => api.sends().some((c) => /#02 devam istemi bırakmadı/.test(c.body.text)), 10_000, "the last card");
+    await sleep(300);
+    const texts = api.sends().map((c) => c.body.text);
+    assert.equal(texts.filter((t) => /bağlantı ya da API hatası/.test(t)).length, 1, "the try 1 error card, none for try 2");
+    assert.equal(texts.filter((t) => /<b>#01/.test(t)).length, 1, "one session card, for the final end");
+    assert.equal(texts.filter((t) => /kaldığı yerden sürüyor/.test(t)).length, 2);
+    assert.equal(marks(state).lines, OUTAGE.length);
+  });
+});
+test("a session's end with no transient error behind it still gets its card", async () => {
+  await scene(() => undefined, {}, async ({ api, state, chain }) => {
+    fs.writeFileSync(path.join(state, "session-01.jsonl"), SESSION_DONE + "\n");
+    for (const l of ["session 01 starts: x", "session 01 ends: success, 3 turns, $1.00", "session 02 starts: y"]) chain(l);
+    await until(() => api.sends().length >= 1, 10_000, "the session card");
+    await sleep(300);
+    assert.equal(api.sends().length, 1);
+    assert.match(api.sends()[0].body.text, /<b>#01/);
+  });
+});
+
+// Test only: the error card's line, and the skip of a line no card can be made of.
+test("the error card comes from try 1 only", async () => {
+  await scene(() => undefined, {}, async ({ api, chain }) => {
+    chain("session 01: transient error (API Error: 500); try 2, waiting until 2026-11-16 03:03");
+    chain("session 01: transient error (API Error: 500); try 1, waiting until 2026-11-16 03:01");
+    chain(RETRY);
+    await until(() => api.sends().length >= 2, 10_000, "two cards");
+    await sleep(300);
+    assert.equal(api.sends().length, 2);
+    assert.match(api.sends()[0].body.text, /#01 bağlantı ya da API hatası · 03:01'de yeniden denenecek/);
+    assert.match(api.sends()[1].body.text, /#02 devam istemi/);
+  });
+});
+test("a log line no card can be made of is skipped on the third try, and later lines still get theirs", async () => {
+  // status.md as a folder makes say() throw (EISDIR) before it sends. Breaks if the skip goes: the line is then retried for ever.
+  await scene(() => undefined, { env: { NIGHT_SHIFT_WATCH_RETRY_MS: "50" } }, async ({ api, state, chain }) => {
+    fs.mkdirSync(path.join(state, "status.md"));
+    chain(RETRY);
+    await until(() => /skipped a line it could not make a card of/.test(logOf(state)), 10_000, "the skip in watch.log");
+    assert.equal(api.sends().length, 0);
+    fs.rmSync(path.join(state, "status.md"), { recursive: true });
+    chain("session 03 left no continuation prompt; retrying with a recovery note");
+    await until(() => api.sends().length >= 1, 10_000, "the later line's card");
+    assert.match(api.sends()[0].body.text, /#03 devam istemi/);
+    assert.equal(marks(state).lines, 2);
   });
 });

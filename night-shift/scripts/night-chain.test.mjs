@@ -917,7 +917,7 @@ process.exit(1);
 
 test("errors that outlast --max-wait-hours end the chain", async () => {
   const { log } = await errorRun(`apiError();`, { maxWaitHours: 0.0001 });
-  assert.match(log, /chain ends: session 01 kept failing for [\d.]+ h \(API Error: 500 Internal server error\)/);
+  assert.match(log, /chain ends: session 01 kept failing for <0\.01 h \(API Error: 500 Internal server error\)/);
 });
 
 // A session that had a turn and then met an API error: resume.json is written, and the next call resumes it.
@@ -1074,4 +1074,70 @@ test("start builds the default state folder from the temp folder in long form, s
   const run = JSON.parse(fs.readFileSync(path.join(long, made[0], "run.json"), "utf8"));
   assert.ok(!run.state.includes("~"), run.state);
   assert.equal(run.state.toLowerCase(), fs.realpathSync.native(path.join(long, made[0])).toLowerCase());
+});
+
+// C4: an answer with only api_error_status (no api_error, no "API Error" text) is an outage too.
+test("a dead resume that carries only an API status is waited out, not given up", async () => {
+  const { log, calls } = await errorRun(WORKED_THEN_ERROR + `
+if (call <= 4) {
+  console.log(JSON.stringify({ type: "result", subtype: "success", is_error: true, api_error_status: 529, num_turns: 0, total_cost_usd: 0, result: "Overloaded" }));
+  process.exit(1);
+}
+stop();
+`);
+  assert.deepEqual(calls, ["1 -", "1 fake-1", "1 fake-1", "1 fake-1", "1 fake-1"]);
+  assert.doesNotMatch(log, /left no continuation prompt|two sessions in a row/);
+  assert.match(log, /chain ends: STOP: done/);
+});
+
+// C5: status shows "running" only for a live process that is a night-chain runner.
+test("status does not show a pointer as running when its pid now belongs to another program", () => {
+  const c = pointerCase();
+  const other = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" });
+  // The same kind of process, but with the runner's file name on its command line.
+  const runner = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)", "night-chain.mjs"], { stdio: "ignore" });
+  try {
+    c.write({ pid: other.pid, startedAt: stamped(Date.now()) });
+    assert.doesNotMatch(c.run("status").stdout, /^running/);
+    c.write({ pid: runner.pid, startedAt: stamped(Date.now()) });
+    assert.match(c.run("status").stdout, /^running \(pid \d+\)/);
+  } finally { other.kill(); runner.kill(); }
+});
+
+// C6: a command-line --max-wait-hours that is not a positive number stops start; otherwise it wins over the config's, then 6.
+const maxWaitOf = (cfg, extra) => {
+  const c = pointerCase();
+  fs.mkdirSync(path.join(c.repo, ".claude"), { recursive: true });
+  fs.writeFileSync(path.join(c.repo, ".claude", "night-shift.json"), JSON.stringify(cfg));
+  const r = c.run("start", ["--state", c.state, "--prompt", "x", "--allow-dirty", ...extra]);
+  return { ...r, wait: r.stderr.includes("launch refused (test)") ? JSON.parse(fs.readFileSync(path.join(c.state, "run.json"), "utf8")).maxWaitHours : undefined };
+};
+
+test("start refuses a --max-wait-hours that is not a positive number, even with a good one in the config", () => {
+  for (const extra of [["--max-wait-hours"], ["--max-wait-hours", "0"], ["--max-wait-hours", "-2"], ["--max-wait-hours", "abc"]]) {
+    const r = maxWaitOf({ maxWaitHours: 3 }, extra);
+    assert.equal(r.status, 1, extra.join(" "));
+    assert.match(r.stderr, /--max-wait-hours .*positive number/, extra.join(" "));
+    assert.doesNotMatch(r.stderr, /launch refused/);
+  }
+});
+
+test("start takes --max-wait-hours from the command line, else the config, else 6", () => {
+  assert.equal(maxWaitOf({ maxWaitHours: 3 }, ["--max-wait-hours", "1.5"]).wait, 1.5);
+  assert.equal(maxWaitOf({ maxWaitHours: 3 }, []).wait, 3);
+  assert.equal(maxWaitOf({}, []).wait, 6);
+});
+
+// C8a: the hours in the chain's own messages are short to read, and never 0 for a positive value.
+test("hoursText gives at most two decimals, no trailing zeros, and never 0 for a positive value", async () => {
+  const { hoursText } = await import("./night-chain.mjs");
+  assert.deepEqual([6, 1.5, 0.25, 1.234, 0.5, 2.0].map(hoursText), ["6", "1.5", "0.25", "1.23", "0.5", "2"]);
+  assert.deepEqual([0.0011, 0.0001, 1e-7, 0.004].map(hoursText), ["<0.01", "<0.01", "<0.01", "<0.01"]);
+});
+
+test("the chain's two wait messages print the hours short", async () => {
+  const far = await limitRun(`limit(Math.floor(Date.now() / 1000) + 3 * 86400);`, { maxWaitHours: 1.5 });
+  assert.match(far.log, /more than 1\.5 h away \(--max-wait-hours\)/);
+  const tiny = await limitRun(`limit(Math.floor(Date.now() / 1000) + 3 * 86400);`, { maxWaitHours: 0.0001 });
+  assert.match(tiny.log, /more than <0\.01 h away/);
 });
