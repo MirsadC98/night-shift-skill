@@ -920,17 +920,17 @@ test("a home whose .claude is a link: its protected files are protected under th
   const t = target.replace(/\\/g, "/"), h = home.replace(/\\/g, "/");
   const e = { ...env, USERPROFILE: home };
   try {
-    for (const c of [`echo x > ${t}/settings.json`, `echo x >> ${t}/CLAUDE.md`, `cp a.mjs ${t}/skills/night-shift/scripts/guard.mjs`,
-      `echo x > ${t}/night-shift/rules.md`, `echo '{}' > ${t.toUpperCase()}/SETTINGS.LOCAL.JSON`, `echo x > ${h}/.claude/settings.json`])
+    for (const c of [`echo x > "${t}/settings.json"`, `echo x >> "${t}/CLAUDE.md"`, `cp a.mjs "${t}/skills/night-shift/scripts/guard.mjs"`,
+      `echo x > "${t}/night-shift/rules.md"`, `echo '{}' > "${t.toUpperCase()}/SETTINGS.LOCAL.JSON"`, `echo x > "${h}/.claude/settings.json"`])
       assert.match(bash(c, e) ?? "", /Claude settings|global CLAUDE\.md|night-shift skill|night-shift settings/, c);
-    assert.equal(bash(`echo x > ${t}/notes.md`, e), null);
+    assert.equal(bash(`echo x > "${t}/notes.md"`, e), null);
     // The repository is that folder, named by its real path (Write and Edit are limited to the roots).
     const inTarget = { ...e, NIGHT_SHIFT_REPO: t };
     const write = (file_path) => decide({ tool_name: "Write", tool_input: { file_path } }, inTarget);
     assert.match(write(`${t}/settings.json`) ?? "", /Claude settings/);
     assert.match(write(`${t}/skills/night-shift/SKILL.md`) ?? "", /night-shift skill/);
     assert.equal(write(`${t}/notes.md`), null);
-    assert.match(bash(`rm -f ${t}/settings.*`, inTarget) ?? "", /Claude settings/);
+    assert.match(bash(`rm -f "${t}"/settings.*`, inTarget) ?? "", /Claude settings/);
     assert.match(bash("find . -name rules.md -delete", inTarget) ?? "", /find delete/);
     assert.equal(bash("find . -name notes.md -delete", inTarget), null);
   } finally { rmSync(base, { recursive: true, force: true }); }

@@ -15,15 +15,15 @@ import { fileURLToPath } from "node:url";
 // Whether node was started with the module whose import.meta this is, or imported it. import.meta.main
 // where Node has it (22.18, 24.2 on); else the real paths of process.argv[1] and the module compared,
 // since Node gives import.meta.url the real path and keeps argv[1] as typed: through a linked
-// ~/.claude the text compare took each script for imported, and the guard let every call pass. A path
-// that cannot be resolved is compared as typed.
-export function isMain(meta, argv1 = process.argv[1]) {
+// ~/.claude the text compare took each script for imported, and the guard let every call pass. When
+// the paths differ as typed and one cannot be resolved, unknown is the answer (the guard's is true).
+export function isMain(meta, argv1 = process.argv[1], { unknown = false } = {}) {
   if (typeof meta.main === "boolean") return meta.main;
   if (!argv1) return false;
   const self = fileURLToPath(meta.url), started = path.resolve(argv1);
-  const real = (p) => { try { return fs.realpathSync.native(p); } catch { return p; } };
   const same = (a, b) => a.toLowerCase() === b.toLowerCase();
-  return same(real(started), real(self)) || same(started, self);
+  if (same(started, self)) return true;
+  try { return same(fs.realpathSync.native(started), fs.realpathSync.native(self)); } catch { return unknown; }
 }
 
 // The temp folder in long form. %TEMP% is often written as an 8.3 short name (C:\Users\JOHNSM~1\…),

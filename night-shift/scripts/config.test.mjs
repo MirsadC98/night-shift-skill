@@ -152,11 +152,14 @@ test("isMain compares real paths, so a script started through a link knows itsel
     assert.equal(isMain(meta, path.join(real, "a.mjs")), true);
     assert.equal(isMain(meta, path.join(link, "a.mjs")), true);
     assert.equal(isMain(meta, path.join(link, "b.mjs")), false);
-    assert.equal(isMain(meta, undefined), false);
-    // A path that cannot be resolved is compared as text.
+    for (const none of ["", null]) assert.equal(isMain(meta, none), false);
+    // A path that cannot be resolved is compared as text; where that leaves a doubt, the caller's
+    // `unknown` answers (the guard's is true: a hook that takes itself for imported allows every call).
     const gone = { url: pathToFileURL(path.join(base, "gone.mjs")).href };
     assert.equal(isMain(gone, path.join(base, "gone.mjs")), true);
     assert.equal(isMain(gone, path.join(link, "gone.mjs")), false);
+    assert.equal(isMain(gone, path.join(link, "gone.mjs"), { unknown: true }), true);
+    assert.equal(isMain(meta, path.join(link, "b.mjs"), { unknown: true }), false);
     // Where Node knows, its answer holds.
     assert.equal(isMain({ ...meta, main: false }, path.join(link, "a.mjs")), false);
     assert.equal(isMain({ ...meta, main: true }, path.join(base, "other.mjs")), true);

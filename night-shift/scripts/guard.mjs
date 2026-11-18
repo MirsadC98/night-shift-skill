@@ -1265,6 +1265,25 @@ export function decide(input, env = process.env, opts = {}) {
   return null;
 }
 
+// The self-test's cases for a home whose .claude is a link: a home in the temp folder with a junction
+// to the folder lt, and the files the guard protects named by lt. The folder goes even when a case throws.
+function linkedCases(env, bash, write) {
+  const base = mkdtempSync(join(tempRoot(), "night-guard-self-test-"));
+  try {
+    mkdirSync(join(base, "home"));
+    mkdirSync(join(base, "folder"));
+    symlinkSync(join(base, "folder"), join(base, "home", ".claude"), "junction");
+    const lt = join(base, "folder").replace(/\\/g, "/");
+    const linked = { ...env, USERPROFILE: join(base, "home") }, linkedRepo = { ...linked, NIGHT_SHIFT_REPO: lt };
+    return [
+      [bash(`echo x > "${lt}/settings.json"`, linked), true], [bash(`echo x >> "${lt}/CLAUDE.md"`, linked), true],
+      [bash(`cp a.mjs "${lt}/skills/night-shift/scripts/guard.mjs"`, linked), true], [bash(`echo x > "${lt}/notes.md"`, linked), false],
+      [write(`${lt}/night-shift/rules.md`, linkedRepo), true], [write(`${lt}/notes.md`, linkedRepo), false],
+      [bash(`rm -f "${lt}"/settings.*`, linkedRepo), true], [bash("find . -name rules.md -delete", linkedRepo), true],
+    ];
+  } finally { rmSync(base, { recursive: true, force: true }); }
+}
+
 function selfTest() {
   const env = { NIGHT_SHIFT_REPO: "C:/work/repo", NIGHT_SHIFT_STATE: "C:/temp/x-night", USERPROFILE: "C:\\Users\\u" };
   // inHome: the run's repository is the user's own .claude folder.
@@ -1273,13 +1292,6 @@ function selfTest() {
   const ps = (command, e = env) => decide({ tool_name: "PowerShell", tool_input: { command } }, e);
   const write = (file_path, e = env) => decide({ tool_name: "Write", tool_input: { file_path } }, e);
   const mcp = (tool_name) => decide({ tool_name, tool_input: {} }, env);
-  // linked: a home in the temp folder whose .claude is a junction to the folder lt (t: lt's own spelling).
-  const base = mkdtempSync(join(tempRoot(), "night-guard-self-test-"));
-  mkdirSync(join(base, "home"));
-  mkdirSync(join(base, "folder"));
-  symlinkSync(join(base, "folder"), join(base, "home", ".claude"), "junction");
-  const lt = join(base, "folder").replace(/\\/g, "/");
-  const linked = { ...env, USERPROFILE: join(base, "home") }, linkedRepo = { ...linked, NIGHT_SHIFT_REPO: lt };
   const cases = [
     [mcp("mcp__blender__execute_blender_code"), true],
     [bash("git push --force origin master"), true], [bash("git push -f"), true], [bash("git push origin :old"), true],
@@ -1375,12 +1387,8 @@ function selfTest() {
     [ps("Get-ChildItem . -Recurse -Filter config.json | Remove-Item", inHome), true], [bash("find . -name notes.md -delete", inHome), false],
     [bash("find . -path './night-shift/*' -delete", inHome), true], [bash("find . -path './night-shift/rules.md' -delete", inHome), true],
     [bash("find . -path './skills/*' -delete", inHome), false],
-    [bash(`echo x > ${lt}/settings.json`, linked), true], [bash(`echo x >> ${lt}/CLAUDE.md`, linked), true],
-    [bash(`cp a.mjs ${lt}/skills/night-shift/scripts/guard.mjs`, linked), true], [bash(`echo x > ${lt}/notes.md`, linked), false],
-    [write(`${lt}/night-shift/rules.md`, linkedRepo), true], [write(`${lt}/notes.md`, linkedRepo), false],
-    [bash(`rm -f ${lt}/settings.*`, linkedRepo), true], [bash("find . -name rules.md -delete", linkedRepo), true],
+    ...linkedCases(env, bash, write),
   ];
-  rmSync(base, { recursive: true, force: true });
   let failed = 0;
   cases.forEach(([got, deny], i) => {
     if (Boolean(got) !== deny) { failed++; console.log(`case ${i}: expected ${deny ? "deny" : "allow"}, got ${got ?? "allow"}`); }
@@ -1390,7 +1398,7 @@ function selfTest() {
 }
 
 // Only a real import (the tests import decide()) skips the hook: a hook that takes itself for imported allows every call.
-if (!isMain(import.meta)) { /* imported */ }
+if (!isMain(import.meta, process.argv[1], { unknown: true })) { /* imported */ }
 else if (process.argv.includes("--self-test")) selfTest();
 else {
   const deny = (reason) => process.stdout.write(JSON.stringify({
