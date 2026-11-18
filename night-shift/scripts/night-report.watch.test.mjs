@@ -281,7 +281,7 @@ test("an outage's retries make one error card and no session card until the sess
     assert.equal(texts.filter((t) => /connection or API error/.test(t)).length, 1, "the try 1 error card, none for try 2");
     assert.equal(texts.filter((t) => /<b>#01/.test(t)).length, 1, "one session card, for the final end");
     assert.equal(texts.filter((t) => /is going on where it left off/.test(t)).length, 2);
-    assert.equal(marks(state).lines, OUTAGE.length);
+    await until(() => marks(state).lines === OUTAGE.length, 10_000, "every line marked (the mark follows Telegram's answer)");
   });
 });
 test("a session's end with no transient error behind it still gets its card", async () => {
@@ -319,7 +319,7 @@ test("a log line no card can be made of is skipped on the third try, and later l
     chain("session 03 left no continuation prompt; retrying with a recovery note");
     await until(() => api.sends().length >= 1, 10_000, "the later line's card");
     assert.match(api.sends()[0].body.text, /#03 left no continuation prompt/);
-    assert.equal(marks(state).lines, 2);
+    await until(() => marks(state).lines === 2, 10_000, "both lines marked (the mark follows Telegram's answer)");
   });
 });
 
@@ -332,7 +332,7 @@ test("a rules: line from the runner is sent as a card, not silent, in the run's 
     assert.equal(rules.body.text, "⚠️ Rules file: C:/Users/demo-app/.claude/night-shift/rules.md is 9000 bytes, over the 8192 limit; the last text read stays in force");
     assert.notEqual(rules.body.disable_notification, true, "it makes a sound");
     assert.match(api.sends()[1].body.text, /#02 xx·retry/, "the run's table; the rules line, which it lacks, reads English");
-    assert.equal(marks(state).lines, 2);
+    await until(() => marks(state).lines === 2, 10_000, "both lines marked (the mark follows Telegram's answer)");
   });
   await scene(() => undefined, { lang: "en" }, async ({ api, chain }) => {
     chain("rules: <b>x</b>.md is gone or empty; its rules no longer apply");
