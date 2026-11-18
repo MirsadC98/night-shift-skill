@@ -52,7 +52,7 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { buildReport, userWaits, stateStrings } from "./night-report.mjs";
 import { strings, langOf, LANG_NAMES } from "./lang/index.mjs";
-import { mergedConfig, LANGS, MODES, stateDirProblem, tempRoot } from "./config.mjs";
+import { mergedConfig, LANGS, MODES, stateDirProblem, tempRoot, isMain } from "./config.mjs";
 import { sessionOutcome, windowSpan } from "./session-outcome.mjs";
 import { ruleFiles, readRuleFile, rulesBlock } from "./rules.mjs";
 import { MAIN_MODEL, SUB_MODEL, MAIN_EFFORT, subEffortText, MAX_NOTE, FABLE_NOTE, nightModelSettings, sessionPlan,
@@ -846,7 +846,7 @@ function reload(opt) {
 // Only as a command: night-chain.test.mjs imports cutOffSession.
 const opt = parseArgs(process.argv.slice(2));
 const commands = { start, run: runChain, status, wait: waitChain, stop, reload };
-if (!process.argv[1] || path.resolve(process.argv[1]).toLowerCase() !== SELF.toLowerCase()) { /* imported */ }
+if (!isMain(import.meta)) { /* imported */ }
 else if (commands[opt.cmd]) await commands[opt.cmd](opt);
 else {
   const lines = read(SELF).split("\n");

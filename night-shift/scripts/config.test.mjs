@@ -4,7 +4,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { readProjectConfig, readGlobalConfig, mergedConfig, globalConfigFile, CONFIG_KEYS, stateDirProblem, tempRoot, norm } from "./config.mjs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { readProjectConfig, readGlobalConfig, mergedConfig, globalConfigFile, CONFIG_KEYS, stateDirProblem, tempRoot, norm, isMain } from "./config.mjs";
 
 const repoWith = (text) => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "night-config-test-"));
@@ -128,4 +130,50 @@ test("mergedConfig keeps which file each value came from, the project winning", 
 test("lang takes only its listed values", () => {
   for (const v of ["TR", "tr-TR", "Türkçe", "", 5]) assert.equal(CONFIG_KEYS.lang(v), "must be one of en, tr");
   for (const v of ["en", "tr"]) assert.equal(CONFIG_KEYS.lang(v), null);
+});
+
+// ---------------------------------------------------------------- a linked ~/.claude (2026-11-18)
+// Node gives import.meta.url the real path and keeps process.argv[1] as typed, so a script started
+// through a link (~/.claude as a junction) took itself for imported and did nothing.
+const linkedDir = (prefix) => {
+  const base = fs.mkdtempSync(path.join(tempRoot(), prefix));
+  const real = path.join(base, "real"), link = path.join(base, "link");
+  fs.mkdirSync(real);
+  fs.symlinkSync(real, link, "junction");
+  return { base, real, link };
+};
+
+test("isMain compares real paths, so a script started through a link knows itself", () => {
+  const { base, real, link } = linkedDir("night-main-");
+  try {
+    for (const f of ["a.mjs", "b.mjs"]) fs.writeFileSync(path.join(real, f), "");
+    // Node before 22.18 has no import.meta.main: the paths decide.
+    const meta = { url: pathToFileURL(path.join(real, "a.mjs")).href };
+    assert.equal(isMain(meta, path.join(real, "a.mjs")), true);
+    assert.equal(isMain(meta, path.join(link, "a.mjs")), true);
+    assert.equal(isMain(meta, path.join(link, "b.mjs")), false);
+    assert.equal(isMain(meta, undefined), false);
+    // A path that cannot be resolved is compared as text.
+    const gone = { url: pathToFileURL(path.join(base, "gone.mjs")).href };
+    assert.equal(isMain(gone, path.join(base, "gone.mjs")), true);
+    assert.equal(isMain(gone, path.join(link, "gone.mjs")), false);
+    // Where Node knows, its answer holds.
+    assert.equal(isMain({ ...meta, main: false }, path.join(link, "a.mjs")), false);
+    assert.equal(isMain({ ...meta, main: true }, path.join(base, "other.mjs")), true);
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test("the runner, the report and the guard work when started through a linked folder", () => {
+  const { base, link } = linkedDir("night-linked-scripts-");
+  try {
+    // The link stands for ~/.claude/skills/night-shift/scripts reached through a linked ~/.claude.
+    fs.rmSync(link);
+    fs.symlinkSync(path.dirname(fileURLToPath(import.meta.url)), link, "junction");
+    const run = (script, args = [], input = "") => spawnSync(process.execPath, [path.join(link, script), ...args], { input, encoding: "utf8", cwd: base });
+    assert.match(run("night-chain.mjs").stdout, /night-chain\.mjs start/);
+    assert.match(run("night-report.mjs").stdout, /night-report\.mjs/);
+    const r = run("guard.mjs", [], JSON.stringify({ tool_name: "Bash", tool_input: { command: "git push --force origin main" } }));
+    assert.equal(r.status, 0);
+    assert.equal(JSON.parse(r.stdout || "{}").hookSpecificOutput?.permissionDecision, "deny");
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });

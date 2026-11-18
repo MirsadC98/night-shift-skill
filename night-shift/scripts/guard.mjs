@@ -10,17 +10,32 @@
 // Self-test: node guard.mjs --self-test; tests: node --test guard.test.mjs
 
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync, mkdtempSync, mkdirSync, symlinkSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { norm, readProjectConfig, stateDirProblem, tempRoot } from "./config.mjs";
+import { join } from "node:path";
+import { norm, readProjectConfig, stateDirProblem, tempRoot, isMain } from "./config.mjs";
 
 const under = (p, root) => root && (p === root || p.startsWith(root + "/"));
 
 // What the runner keeps in the state folder: the settings file that loads this guard, the file
 // that names the program each session starts, and its own logs and marks.
 const RUNNER_FILES = /^(night-settings\.json|run\.json|launch\.cmd|resume\.json|chain\.log|reload-request|watch\.pid|notified\.json|fable\.json|session-\d+\.(jsonl|err))$/;
+
+// ~/.claude may be a link (a junction to a folder elsewhere): a shell write can then name the files the
+// guard protects there by the link's target, a spelling norm() cannot know (on 2026-11-18 `echo x >
+// <target>/settings.json` passed). Each spelling of the folder, the home one first.
+function claudeSpellings(home) {
+  const c = `${norm(home)}/.claude`;
+  let real = "";
+  try { real = norm(realpathSync.native(join(home, ".claude"))); } catch { /* no such folder */ }
+  return real && real !== c ? [c, real] : [c];
+}
+// p, and p under each other spelling of ~/.claude when it lies under one of them.
+const spellings = (p, r) => {
+  const out = [p];
+  for (const from of r.claude) if (under(p, from)) for (const to of r.claude) if (to !== from) out.push(to + p.slice(from.length));
+  return out;
+};
 
 function roots(env) {
   const home = norm(env.USERPROFILE || env.HOME || homedir());
@@ -39,6 +54,7 @@ function roots(env) {
       `${home}/appdata/local/temp`,
     ].filter(Boolean),
     home,
+    claude: claudeSpellings(env.USERPROFILE || env.HOME || homedir()),
   };
 }
 
@@ -58,8 +74,12 @@ const oddReason = (p, shown) => {
   return what && `refusing a path with ${what} (${shown}): the guard cannot tell which file it is`;
 };
 
-// Paths a night session may never write, even inside writable roots.
+// Paths a night session may never write, even inside writable roots, under any spelling of ~/.claude.
 function protectedPath(p, r) {
+  for (const s of spellings(p, r)) { const why = protectedSpelling(s, r); if (why) return why; }
+  return null;
+}
+function protectedSpelling(p, r) {
   if (under(p, `${r.home}/.claude/skills/night-shift`)) return "the night-shift skill itself";
   if (/^.*\/\.claude\/settings(\.local)?\.json$/.test(p)) return "Claude settings";
   if (p === `${r.home}/.claude/claude.md`) return "the user's global CLAUDE.md";
@@ -302,7 +322,7 @@ function protectedTargets(r) {
     [`${r.home}/.claude/settings.json`, "Claude settings"],
     [`${r.home}/.claude/settings.local.json`, "Claude settings"],
     [`${r.home}/.claude/claude.md`, "the user's global CLAUDE.md"],
-  ].filter(([c]) => c);
+  ].filter(([c]) => c).flatMap(([c, why]) => spellings(c, r).map((s) => [s, why]));
 }
 
 // Words a command's own name can hide behind: `sudo`, `env X=1`, `builtin`, and the keywords that
@@ -772,7 +792,7 @@ const INSIDE = `.git .claude night-shift.json night-shift-rules.md settings.json
 // What the user's ~/.claude/night-shift folder holds (config, rules, the runs the runner keeps, the Telegram token): names a find
 // or a listing must also steer clear of, but only when its start path covers that folder, so no other find reads them as inside.
 const NS_NAMES = ["night-shift", "rules.md", "config.json", "runs", "telegram.json"];
-const nsNames = (q, r) => under(`${r.home}/.claude/night-shift`, q) ? NS_NAMES : [];
+const nsNames = (q, r) => r.claude.some((c) => under(`${c}/night-shift`, q)) ? NS_NAMES : [];
 const meetsInside = (pat, extra = []) => [...INSIDE, ...extra].some((n) => segMatch(pat, n));
 // A -path test keeps a find out of .git when it stays below one folder of the start path (./dist/*), or
 // needs a folder on the way that .git and .claude do not hold (*/node_modules/*). start: the start path's own folders.
@@ -1253,6 +1273,13 @@ function selfTest() {
   const ps = (command, e = env) => decide({ tool_name: "PowerShell", tool_input: { command } }, e);
   const write = (file_path, e = env) => decide({ tool_name: "Write", tool_input: { file_path } }, e);
   const mcp = (tool_name) => decide({ tool_name, tool_input: {} }, env);
+  // linked: a home in the temp folder whose .claude is a junction to the folder lt (t: lt's own spelling).
+  const base = mkdtempSync(join(tempRoot(), "night-guard-self-test-"));
+  mkdirSync(join(base, "home"));
+  mkdirSync(join(base, "folder"));
+  symlinkSync(join(base, "folder"), join(base, "home", ".claude"), "junction");
+  const lt = join(base, "folder").replace(/\\/g, "/");
+  const linked = { ...env, USERPROFILE: join(base, "home") }, linkedRepo = { ...linked, NIGHT_SHIFT_REPO: lt };
   const cases = [
     [mcp("mcp__blender__execute_blender_code"), true],
     [bash("git push --force origin master"), true], [bash("git push -f"), true], [bash("git push origin :old"), true],
@@ -1348,7 +1375,12 @@ function selfTest() {
     [ps("Get-ChildItem . -Recurse -Filter config.json | Remove-Item", inHome), true], [bash("find . -name notes.md -delete", inHome), false],
     [bash("find . -path './night-shift/*' -delete", inHome), true], [bash("find . -path './night-shift/rules.md' -delete", inHome), true],
     [bash("find . -path './skills/*' -delete", inHome), false],
+    [bash(`echo x > ${lt}/settings.json`, linked), true], [bash(`echo x >> ${lt}/CLAUDE.md`, linked), true],
+    [bash(`cp a.mjs ${lt}/skills/night-shift/scripts/guard.mjs`, linked), true], [bash(`echo x > ${lt}/notes.md`, linked), false],
+    [write(`${lt}/night-shift/rules.md`, linkedRepo), true], [write(`${lt}/notes.md`, linkedRepo), false],
+    [bash(`rm -f ${lt}/settings.*`, linkedRepo), true], [bash("find . -name rules.md -delete", linkedRepo), true],
   ];
+  rmSync(base, { recursive: true, force: true });
   let failed = 0;
   cases.forEach(([got, deny], i) => {
     if (Boolean(got) !== deny) { failed++; console.log(`case ${i}: expected ${deny ? "deny" : "allow"}, got ${got ?? "allow"}`); }
@@ -1357,8 +1389,8 @@ function selfTest() {
   process.exit(failed ? 1 : 0);
 }
 
-const imported = !process.argv[1] || resolve(process.argv[1]).toLowerCase() !== fileURLToPath(import.meta.url).toLowerCase();
-if (imported) { /* the tests import decide() */ }
+// Only a real import (the tests import decide()) skips the hook: a hook that takes itself for imported allows every call.
+if (!isMain(import.meta)) { /* imported */ }
 else if (process.argv.includes("--self-test")) selfTest();
 else {
   const deny = (reason) => process.stdout.write(JSON.stringify({

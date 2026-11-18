@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { decide } from "./guard.mjs";
+import { tempRoot } from "./config.mjs";
 
 const env = { NIGHT_SHIFT_REPO: "C:/work/repo", NIGHT_SHIFT_STATE: "C:/temp/x-night", USERPROFILE: "C:\\Users\\u" };
 const bash = (command, e = env) => decide({ tool_name: "Bash", tool_input: { command } }, e);
@@ -905,4 +906,32 @@ test("a find or a listing from a repository at ~/.claude cannot reach the global
   assert.equal(bash("find . -path './night-shift/*' -delete"), null);
   assert.equal(bash("find src -name config.json -delete", { ...env, NIGHT_SHIFT_REPO: "C:/Users/u/.claude" }), null);
   assert.equal(ps("Get-ChildItem . -Recurse -Filter config.json | Remove-Item"), null);
+});
+
+// ---------------------------------------------------------------- a linked ~/.claude (2026-11-18)
+test("a home whose .claude is a link: its protected files are protected under the link's target too", () => {
+  // On the user's PC ~/.claude is a junction to another folder; `echo x > <that folder>/settings.json` passed.
+  const base = mkdtempSync(join(tempRoot(), "night-linked-home-"));
+  const target = join(base, "settings-folder"), home = join(base, "home");
+  mkdirSync(join(target, "skills", "night-shift", "scripts"), { recursive: true });
+  mkdirSync(join(target, "night-shift"));
+  mkdirSync(home);
+  symlinkSync(target, join(home, ".claude"), "junction");
+  const t = target.replace(/\\/g, "/"), h = home.replace(/\\/g, "/");
+  const e = { ...env, USERPROFILE: home };
+  try {
+    for (const c of [`echo x > ${t}/settings.json`, `echo x >> ${t}/CLAUDE.md`, `cp a.mjs ${t}/skills/night-shift/scripts/guard.mjs`,
+      `echo x > ${t}/night-shift/rules.md`, `echo '{}' > ${t.toUpperCase()}/SETTINGS.LOCAL.JSON`, `echo x > ${h}/.claude/settings.json`])
+      assert.match(bash(c, e) ?? "", /Claude settings|global CLAUDE\.md|night-shift skill|night-shift settings/, c);
+    assert.equal(bash(`echo x > ${t}/notes.md`, e), null);
+    // The repository is that folder, named by its real path (Write and Edit are limited to the roots).
+    const inTarget = { ...e, NIGHT_SHIFT_REPO: t };
+    const write = (file_path) => decide({ tool_name: "Write", tool_input: { file_path } }, inTarget);
+    assert.match(write(`${t}/settings.json`) ?? "", /Claude settings/);
+    assert.match(write(`${t}/skills/night-shift/SKILL.md`) ?? "", /night-shift skill/);
+    assert.equal(write(`${t}/notes.md`), null);
+    assert.match(bash(`rm -f ${t}/settings.*`, inTarget) ?? "", /Claude settings/);
+    assert.match(bash("find . -name rules.md -delete", inTarget) ?? "", /find delete/);
+    assert.equal(bash("find . -name notes.md -delete", inTarget), null);
+  } finally { rmSync(base, { recursive: true, force: true }); }
 });

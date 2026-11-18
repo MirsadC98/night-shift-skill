@@ -5,10 +5,26 @@
 //   readGlobalConfig(home)  -> { config, errors }   the same for ~/.claude/night-shift/config.json (run-wide keys only)
 //   mergedConfig(repo, home) -> { config, from, errors }  the global file overlaid key by key with the project's (from: key -> file)
 //   stateDirProblem(dir, { home, repo, temp })      null, or why dir may not be the state folder
+//   isMain(import.meta)                              whether node was started with this script (night-chain, night-report, guard)
 
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { fileURLToPath } from "node:url";
+
+// Whether node was started with the module whose import.meta this is, or imported it. import.meta.main
+// where Node has it (22.18, 24.2 on); else the real paths of process.argv[1] and the module compared,
+// since Node gives import.meta.url the real path and keeps argv[1] as typed: through a linked
+// ~/.claude the text compare took each script for imported, and the guard let every call pass. A path
+// that cannot be resolved is compared as typed.
+export function isMain(meta, argv1 = process.argv[1]) {
+  if (typeof meta.main === "boolean") return meta.main;
+  if (!argv1) return false;
+  const self = fileURLToPath(meta.url), started = path.resolve(argv1);
+  const real = (p) => { try { return fs.realpathSync.native(p); } catch { return p; } };
+  const same = (a, b) => a.toLowerCase() === b.toLowerCase();
+  return same(real(started), real(self)) || same(started, self);
+}
 
 // The temp folder in long form. %TEMP% is often written as an 8.3 short name (C:\Users\JOHNSM~1\…),
 // which the guard refuses in any path, so the tool's own temp paths all come from this one spelling.

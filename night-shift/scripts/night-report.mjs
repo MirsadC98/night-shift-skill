@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import { sessionCard, eventLine, chainCard, statusCard, reportCard, reportSection, chainProgress, progressText, splitHtml } from "./telegram-cards.mjs";
 import { sessionPlan, resolveMode } from "./effort.mjs";
 import { strings, langOf } from "./lang/index.mjs";
+import { isMain } from "./config.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const TELEGRAM = path.join(os.homedir(), ".claude", "night-shift", "telegram.json");
@@ -822,7 +823,7 @@ function parseArgs(argv) {
   return o;
 }
 
-if (path.resolve(process.argv[1] || "") === SELF) {
+if (isMain(import.meta)) {
   const opt = parseArgs(process.argv.slice(2));
   if (opt.cmd === "show") console.log(buildReport(opt.state).plain);
   else if (opt.cmd === "notify") console.log(await notify(path.resolve(opt.state), typeof opt.headline === "string" ? opt.headline : "", opt));
