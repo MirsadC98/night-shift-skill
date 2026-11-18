@@ -202,7 +202,9 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
   assert.equal(s.env.CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS, "0");
   assert.equal(s.hooks.SessionStart[0].hooks[0].command, "cleanup.ps1");
   assert.match(s.hooks.PreToolUse[0].hooks[0].args[0], /guard\.mjs$/);
-  assert.deepEqual(s.modelSettings, { opus: { effortLevel: "xhigh" }, fable: { effortLevel: "high" }, sonnet: { effortLevel: "medium" }, haiku: { effortLevel: "high" } });
+  // The Mythos id too: the run may start a Mythos session, whose level only its id's key sets (D6).
+  assert.deepEqual(s.modelSettings, { opus: { effortLevel: "xhigh" }, fable: { effortLevel: "high" }, sonnet: { effortLevel: "medium" }, haiku: { effortLevel: "high" },
+    "claude-mythos-5-2": { effortLevel: "high" } });
   assert.equal(s.autoContinueAtUsageLimit, true);
   assert.equal(s.outputStyle, "default");
 });
@@ -322,7 +324,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
   assert.equal(s.env.CLAUDE_CODE_SUBAGENT_MODEL, "sonnet");
   assert.deepEqual(s.modelSettings, {
     opus: { effortLevel: "xhigh" }, "claude-opus-5-5": { effortLevel: "xhigh" },
-    fable: { effortLevel: "high" }, "claude-fable-5-2": { effortLevel: "high" },
+    fable: { effortLevel: "high" }, "claude-fable-5-2": { effortLevel: "high" }, "claude-mythos-5-2": { effortLevel: "high" },
     sonnet: { effortLevel: "medium" }, "claude-sonnet-5-5": { effortLevel: "medium" }, haiku: { effortLevel: "high" } });
   assert.match(log, /session 02 runs Opus at xhigh\n/);
   assert.equal(one.noFallback, null, "the model fallback stays on for Opus");
@@ -405,6 +407,8 @@ const settings = JSON.parse(fs.readFileSync(path.join(st, "night-settings.json")
 fs.writeFileSync(path.join(st, "seen-" + n + ".json"), JSON.stringify({ args: process.argv.slice(2), input, settings,
   noFallback: process.env.CLAUDE_CODE_NO_MODEL_FALLBACK ?? null }));
 const step = JSON.parse(process.env.TEST_SCRIPT)[n] || {};
+// step.stream: a recorded stream (a fixture) is the whole session, as the CLI wrote it.
+if (step.stream) { process.stdout.write(fs.readFileSync(step.stream, "utf8")); process.exit(0); }
 // step.rules: { global, project } rewrites the user's rule files (null deletes one), as a session or an editor may.
 for (const [k, v] of Object.entries(step.rules || {})) {
   const f = k === "global" ? path.join(process.env.USERPROFILE, ".claude", "night-shift", "rules.md") : path.join(process.cwd(), ".claude", "night-shift-rules.md");
@@ -525,7 +529,7 @@ test("over the Fable ceiling, or past the count while the share is unknown, a Fa
   assert.match(over.log, /session 02 asked for Fable, but its allowance is at 55%, at or over the 50% ceiling; it runs on Opus at max/);
   const count = await fableRun("MODEL: fable\nfirst", { 1: { next: "MODEL: fable\nsecond" }, 2: { next: "STOP: done" } }, { fableSessions: 1 });
   assert.equal(count.flag(count.seen(2), "--model"), "opus");
-  assert.match(count.log, /session 02 asked for Fable, but 1 Fable sessions already ran in this chain while its allowance's share is unknown/);
+  assert.match(count.log, /session 02 asked for Fable, but 1 session on its allowance already ran in this chain while the allowance's share is unknown; it runs on Opus at max\n/);
   assert.equal(count.fable().sessions, 1);
 });
 
@@ -645,6 +649,187 @@ test("a run.json from before modes with model fable runs as fable mode", async (
     assert.equal(seen(n).settings.fable.effortLevel, "high");
   }
   assert.doesNotMatch(log, /at max/);
+});
+
+// Mythos (2026-11-18): Fable's seat under another name. The CLI knows it only by its id, and it draws on
+// Fable's weekly allowance, so every Fable rule holds for it and the two share one state (fable.json).
+const MYTHOS = "claude-mythos-5-2";
+const MM = { mode: "mythos", model: MYTHOS, opusModel: "opus", effort: "high" };
+// A session the account cannot run: refused as not found before any turn (claude 2.1.327, `--model mythos`).
+const NOT_FOUND = path.join(path.dirname(CHAIN), "fixtures", "session-mythos-word-2026-11-18.jsonl");
+
+test("a MODEL: mythos prompt runs that session as Mythos's id at high, with its own note and no model fallback", async () => {
+  const { log, seen, flag, fable } = await fableRun("MODEL: mythos\nhard piece", { 1: { next: "plain piece" }, 2: { next: "STOP: done" } });
+  const [one, two] = [seen(1), seen(2)];
+  assert.equal(flag(one, "--model"), MYTHOS);
+  assert.equal(flag(one, "--effort"), null, "high goes through the settings layer");
+  assert.equal(one.settings[MYTHOS].effortLevel, "high", "the level is keyed by the id: a family word is not read for Mythos");
+  assert.equal(one.settings.opus.effortLevel, "xhigh");
+  assert.equal(one.noFallback, "1");
+  assert.match(one.input, /This session runs on Mythos, only for this piece: .* Mythos's weekly allowance is the user's/);
+  assert.match(one.input, /keeps MODEL: mythos\)/);
+  assert.doesNotMatch(one.input, /Fable/);
+  assert.match(one.input, /\n---\nhard piece\n$/);
+  assert.match(log, /session 01 runs Mythos \(claude-mythos-5-2\) at high\n/);
+  assert.equal(fable().sessions, 1);
+  assert.equal(flag(two, "--model"), "opus");
+  assert.equal(two.noFallback, null);
+  assert.doesNotMatch(two.input, /runs on Mythos/);
+  assert.equal(two.settings[MYTHOS].effortLevel, "high", "an Opus session's layer keeps Mythos's level too");
+  assert.match(log, /Fable or Mythos on request under 60% of their shared allowance \(2 sessions while unknown\)\n/);
+});
+
+test("Fable and Mythos share one allowance: the count, the share and a used-up allowance stop either name", async () => {
+  const count = await fableRun("MODEL: fable\nfirst", { 1: { next: "MODEL: mythos\nsecond" }, 2: { next: "MODEL: mythos\nthird" }, 3: { next: "STOP: done" } });
+  assert.equal(count.flag(count.seen(1), "--model"), "fable");
+  assert.equal(count.flag(count.seen(2), "--model"), MYTHOS);
+  assert.equal(count.flag(count.seen(3), "--model"), "opus");
+  assert.equal(count.flag(count.seen(3), "--effort"), "max");
+  assert.match(count.seen(3).input, /The prompt asked for MODEL: mythos, but Mythos's weekly allowance does not cover it tonight; this piece runs on Opus at max\./);
+  assert.match(count.log, /session 03 asked for Mythos, but 2 sessions on its allowance already ran in this chain while the allowance's share is unknown; it runs on Opus at max\n/);
+  assert.equal(count.fable().sessions, 2);
+
+  const resets = Math.floor(Date.now() / 1000) + 3 * 86_400;
+  const share = await fableRun("MODEL: mythos\nfirst", { 1: { fable: 0.65, resets, next: "MODEL: fable\nsecond" }, 2: { next: "STOP: done" } });
+  assert.equal(share.flag(share.seen(2), "--model"), "opus");
+  assert.match(share.log, /session 01 limits: .* · fable 65%→65%/);
+  assert.match(share.log, /session 02 asked for Fable, but its allowance is at 65%, at or over the 60% ceiling; it runs on Opus at max\n/);
+
+  const out = await fableRun("MODEL: mythos\nhard piece", {
+    1: { fable: 1, resets, refuse: "model_requires_usage_credits" }, 2: { next: "MODEL: fable\nanother hard piece" }, 3: { next: "STOP: done" } });
+  const two = out.seen(2);
+  assert.equal(out.flag(two, "--model"), "opus");
+  assert.equal(out.flag(two, "--effort"), "max");
+  assert.match(two.input, /The previous Mythos session \(01\) was cut off because the Mythos allowance ran out; this piece goes on at Opus max\./);
+  assert.match(out.log, /session 01: Mythos's allowance is used up \(model_requires_usage_credits\) until \S+ \S+; limit record null/);
+  assert.match(out.log, /session 01's piece goes on in the next session on Opus at max/);
+  assert.equal(out.flag(out.seen(3), "--model"), "opus");
+  assert.match(out.log, /session 03 asked for Fable, but its allowance is used up until \S+ \S+; it runs on Opus at max\n/);
+});
+
+test("mythos mode: every session runs on Mythos's id at high, past the count; MODEL: fable stays on it", async () => {
+  const resets = Math.floor(Date.now() / 1000) + 3 * 86_400;
+  const { log, seen, flag, fable } = await fableRun("MODEL: fable\nfirst piece", {
+    1: { fable: 0.2, resets, next: "second" }, 2: { next: "third" }, 3: { next: "STOP: done" } }, { ...MM, fableSessions: 1 });
+  for (const n of [1, 2, 3]) {
+    const s = seen(n);
+    assert.equal(flag(s, "--model"), MYTHOS, `session ${n}`);
+    assert.equal(flag(s, "--effort"), null);
+    assert.equal(s.settings[MYTHOS].effortLevel, "high");
+    assert.equal(s.noFallback, "1");
+  }
+  assert.match(seen(1).input, /Mode: mythos\./);
+  assert.doesNotMatch(seen(1).input, /only for this piece/);
+  assert.match(log, /Mythos as the main model under 60% of its allowance, else opus at xhigh\n/);
+  assert.match(log, /session 01: MODEL: fable is the same model as Mythos, this run's main model; it runs on claude-mythos-5-2\n/);
+  assert.match(log, /session 01 runs Mythos \(claude-mythos-5-2\) at high\n/);
+  assert.equal(fable().sessions, undefined);
+});
+
+test("mythos mode: at the ceiling, and when the allowance is used up, the session runs on Opus at xhigh and says why", async () => {
+  const resets = Math.floor(Date.now() / 1000) + 3 * 86_400;
+  const ceiling = await fableRun("first piece", { 1: { fable: 0.65, resets, next: "second" }, 2: { next: "STOP: done" } }, MM);
+  const two = ceiling.seen(2);
+  assert.equal(ceiling.flag(two, "--model"), "opus");
+  assert.equal(ceiling.flag(two, "--effort"), null);
+  assert.equal(two.settings.opus.effortLevel, "xhigh");
+  assert.equal(two.noFallback, null);
+  assert.match(two.input, /This run's main model is Mythos, but it cannot run this session: its allowance is at 65%/);
+  assert.match(two.input, /goes back to Mythos when it can/);
+  assert.doesNotMatch(two.input, /\bmax\b|Fable/);
+  assert.match(ceiling.log, /session 02: Mythos is the main model, but its allowance is at 65%, at or over the 60% ceiling; it runs on Opus at xhigh\n/);
+
+  const out = await fableRun("hard piece", { 1: { fable: 1, resets, refuse: "model_requires_usage_credits" }, 2: { next: "STOP: done" } }, MM);
+  const next = out.seen(2);
+  assert.equal(out.flag(next, "--model"), "opus");
+  assert.equal(out.flag(next, "--effort"), null);
+  assert.doesNotMatch(fs.readFileSync(path.join(out.state, "prompts", "02.md"), "utf8"), /^EFFORT:/m);
+  assert.match(next.input, /The previous Mythos session \(01\) was cut off because the Mythos allowance ran out; this piece goes on at Opus xhigh\./);
+  assert.match(out.log, /session 01: Mythos's allowance is used up \(model_requires_usage_credits\)/);
+  assert.match(out.log, /session 01's piece goes on in the next session on Opus at xhigh/);
+});
+
+test("a run.json from before modes with Mythos's id runs as mythos mode", async () => {
+  const { seen, flag } = await fableRun("first piece", { 1: { next: "STOP: done" } }, { model: MYTHOS });
+  assert.equal(flag(seen(1), "--model"), MYTHOS);
+  assert.equal(seen(1).settings[MYTHOS].effortLevel, "high");
+  assert.match(seen(1).input, /Mode: mythos\./);
+});
+
+test("opus mode: a Mythos session the account cannot run hands its piece to Opus at max, and later asks are refused at the gate", async () => {
+  const { state, log, seen, flag, fable } = await fableRun("MODEL: mythos\nhard piece", {
+    1: { stream: NOT_FOUND }, 2: { next: "MODEL: mythos\nanother hard piece" }, 3: { next: "MODEL: fable\nfable piece" }, 4: { next: "STOP: done" } });
+  assert.equal(flag(seen(1), "--model"), MYTHOS);
+  // The piece goes on, on Opus at max, from its own prompt.
+  const two = seen(2);
+  assert.equal(flag(two, "--model"), "opus");
+  assert.equal(flag(two, "--effort"), "max");
+  assert.match(fs.readFileSync(path.join(state, "prompts", "02.md"), "utf8"), /^EFFORT: max\nThe previous session \(01\) could not run on Mythos: this account cannot run it/);
+  assert.match(two.input, /\n\nhard piece\n$/);
+  assert.match(log, /session 01: this account cannot run Mythos \(There's an issue with the selected model/);
+  assert.match(log, /session 01's piece goes on in the next session on Opus at max\n/);
+  assert.match(log, /session 02 runs Opus at max \(its prompt asks for it\)\n/);
+  // The next ask is refused at the gate, without another try on Mythos; the finding is said once.
+  const three = seen(3);
+  assert.equal(flag(three, "--model"), "opus");
+  assert.equal(flag(three, "--effort"), "max");
+  assert.equal(three.noFallback, null);
+  assert.match(three.input, /The prompt asked for MODEL: mythos, but this account cannot run Mythos \(a session on it was refused earlier in this chain\); this piece runs on Opus at max\./);
+  assert.match(log, /session 03 asked for Mythos, but this account cannot run it \(found earlier in this chain\); it runs on Opus at max\n/);
+  assert.equal((log.match(/this account cannot run Mythos/g) || []).length, 1);
+  // Fable is another name the account may run: its gate is not touched, and the failed try is not counted.
+  assert.equal(flag(seen(4), "--model"), "fable");
+  assert.deepEqual([fable().unavailable, fable().sessions], [["mythos"], 1]);
+  assert.match(log, /chain ends: STOP: done/);
+});
+
+test("opus mode: a resumed Mythos session goes on on Opus at max once the account is found unable to run Mythos", async () => {
+  const resumeMythos = (state) => fs.writeFileSync(path.join(state, "resume.json"), JSON.stringify({ nn: "03", sessionId: "fake-3", why: "limit", model: MYTHOS, effort: "high" }));
+  // Found earlier in the chain: the resume is moved to Opus at max at the gate, in the same conversation.
+  const gated = await fableRun("plain piece", { 3: { next: "STOP: done" } }, {}, (state) => {
+    resumeMythos(state);
+    fs.writeFileSync(path.join(state, "fable.json"), JSON.stringify({ unavailable: ["mythos"] }));
+  });
+  const three = gated.seen(3);
+  assert.deepEqual([gated.flag(three, "--model"), gated.flag(three, "--effort"), gated.flag(three, "--resume")], ["opus", "max", "fake-3"]);
+  assert.match(gated.log, /session 03 asked for Mythos, but this account cannot run it \(found earlier in this chain\); it runs on Opus at max\n/);
+  // Found by the resume itself: the piece goes on in a new session, told to look for unfinished work, and nothing is taken off the count.
+  const found = await fableRun("plain piece", { 3: { stream: NOT_FOUND }, 4: { next: "STOP: done" } }, {}, resumeMythos);
+  assert.equal(found.flag(found.seen(3), "--model"), MYTHOS);
+  assert.match(fs.readFileSync(path.join(found.state, "prompts", "04.md"), "utf8"),
+    /^EFFORT: max\nThe previous session \(03\) could not run on Mythos: [^\n]* First look at git status and git diff/);
+  assert.deepEqual([found.flag(found.seen(4), "--model"), found.flag(found.seen(4), "--effort"), found.flag(found.seen(4), "--resume")], ["opus", "max", null]);
+  assert.deepEqual(found.fable(), { unavailable: ["mythos"] });
+});
+
+test("mythos mode: a main model the account cannot run ends the chain by name", async () => {
+  const { state, log } = await fableRun("first piece", { 1: { stream: NOT_FOUND } }, MM);
+  assert.match(log, /chain ends: session 01 cannot run: There's an issue with the selected model/);
+  assert.equal(fs.existsSync(path.join(state, "seen-2.json")), false);
+});
+
+test("start's model line names the mode, the main model and its stand-in or the premium rule", async () => {
+  const { modelLine } = await import("./night-chain.mjs");
+  const base = { fableCeiling: 0.6, fableSessions: 2 };
+  assert.equal(modelLine({ ...base, mode: "opus", model: "opus", opusModel: "opus", effort: "xhigh" }),
+    "  model:  Opus at xhigh (mode opus); MODEL: fable or MODEL: mythos runs one piece at high while their shared weekly allowance is under 60% (at most 2 such sessions while its share is unknown), else on Opus at max");
+  assert.equal(modelLine({ ...base, mode: "mythos", model: MYTHOS, opusModel: "opus", effort: "high" }),
+    "  model:  Mythos (claude-mythos-5-2) at high (mode mythos); Opus at xhigh while Mythos's weekly allowance is at or over 60% or used up");
+  assert.equal(modelLine({ ...base, mode: "fable", model: "fable", opusModel: "claude-opus-5-5", effort: "high", fableCeiling: 0.5 }),
+    "  model:  Fable at high (mode fable); Opus (claude-opus-5-5) at xhigh while Fable's weekly allowance is at or over 50% or used up");
+});
+
+test("start takes --model mythos or --mode mythos as mode mythos on Mythos's id at high", () => {
+  const runOf = (extra) => {
+    const c = pointerCase();
+    const r = c.run("start", ["--state", c.state, "--allow-dirty", "--prompt", "x", ...extra]);
+    assert.match(r.stderr, /launch refused \(test\)/);
+    return JSON.parse(fs.readFileSync(path.join(c.state, "run.json"), "utf8"));
+  };
+  for (const extra of [["--model", "mythos"], ["--mode", "mythos"], ["--model", MYTHOS]]) {
+    const j = runOf(extra);
+    assert.deepEqual([j.mode, j.model, j.opusModel, j.effort], ["mythos", MYTHOS, "opus", "high"], extra.join(" "));
+  }
 });
 
 test("start works out the mode from --mode, the config and the model, and names a mismatch", () => {
@@ -1643,5 +1828,6 @@ test("start prints the rule files in force: each with its bytes, or none", async
   assert.match(some, /^ {2}rules: {2}.*[\\/]night-shift-rules\.md \(18 bytes\)$/m);
   assert.doesNotMatch(some, /rules: {2}none/);
   assert.match(some, /^ {2}until: .*\n {2}rules: /m, "after the until line");
+  assert.match(some, /^ {2}state: .*\n {2}model: {2}Opus at xhigh \(mode opus\); MODEL: fable or MODEL: mythos runs one piece/m, "after the state line");
   assert.match(await startPrints(() => {}), / {2}rules: {2}none/);
 });

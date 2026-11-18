@@ -7,7 +7,7 @@
 //   node night-chain.mjs start  --repo <dir> (--prompt-file <f> | --prompt <text>) [--until HH:MM]
 //                               [--max-sessions <n>] [--session-hours 4] [--model <m>] [--allow-dirty]
 //                               [--effort xhigh] [--fable-ceiling 0.6] [--fable-sessions 2]
-//                               [--max-wait-hours 6] [--mode opus|fable] [--lang en|tr]
+//                               [--max-wait-hours 6] [--mode opus|fable|mythos] [--lang en|tr]
 //                               [--state <dir>] [--window]
 //   (without --until and --max-sessions the chain goes on until a session writes STOP,
 //    two handovers fail in a row, or stop is called; a usage limit pauses it, and the
@@ -19,12 +19,14 @@
 //    --model opus (or --model, "model" in .claude/night-shift.json) at xhigh (--effort, "effort"),
 //    its subagents on Sonnet at medium (high when a call asks) and Haiku at high, whatever the user's own settings say (effort.mjs); a
 //    prompt that opens with "EFFORT: high|xhigh|max" runs that one session at that level, and one that
-//    opens with "MODEL: fable" runs on Fable at high (or its EFFORT) while Fable's weekly allowance is
+//    opens with "MODEL: fable" (or "MODEL: mythos", the same model under its other name, for an account
+//    it is open to) runs on that model at high (or its EFFORT) while their shared weekly allowance is
 //    under --fable-ceiling ("fableCeiling"; while its ratio is unknown, at most --fable-sessions
-//    "fableSessions" in a chain), else on Opus at max; a Fable session its allowance cuts off runs
-//    again from its prompt on Opus at max, and so does every MODEL: fable prompt until the allowance resets.
-//    --mode fable ("mode") makes Fable every session's model at high, and Opus at xhigh (never max)
-//    stands in while its allowance is at or over the ceiling or used up)
+//    "fableSessions" of the two in a chain), else on Opus at max; a session its allowance cuts off runs
+//    again from its prompt on Opus at max, and so does every such prompt until the allowance resets.
+//    A Mythos or Fable session the account cannot run hands its piece to Opus at max the same way.
+//    --mode fable or --mode mythos ("mode") makes that model every session's model at high, and Opus
+//    at xhigh (never max) stands in while its allowance is at or over the ceiling or used up)
 //   node night-chain.mjs status --repo <dir>
 //   node night-chain.mjs wait   --repo <dir> [--state <dir>]  (returns once the chain is over: exit 0
 //                               with status's first lines and what waits for the user, 2 if it died;
@@ -55,8 +57,9 @@ import { strings, langOf, LANG_NAMES } from "./lang/index.mjs";
 import { mergedConfig, LANGS, MODES, stateDirProblem, tempRoot, isMain } from "./config.mjs";
 import { sessionOutcome, windowSpan } from "./session-outcome.mjs";
 import { ruleFiles, readRuleFile, rulesBlock } from "./rules.mjs";
-import { MAIN_MODEL, SUB_MODEL, MAIN_EFFORT, subEffortText, MAX_NOTE, FABLE_NOTE, nightModelSettings, sessionPlan,
-  promptDirectives, directiveLines, fableGate, mainGate, fallbackNote, resolveMode, familyOf } from "./effort.mjs";
+import { MAIN_MODEL, SUB_MODEL, MAIN_EFFORT, subEffortText, MAX_NOTE, nightModelSettings, sessionPlan, promptDirectives,
+  directiveLines, fableGate, mainGate, fallbackNote, resolveMode, familyOf, isPremium, modelName, runModelIds, premiumNote,
+  deniedNote } from "./effort.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const SKILL_DIR = path.dirname(path.dirname(SELF)); // the folder that holds SKILL.md
@@ -100,6 +103,15 @@ const countArg = (v, d) => { const n = Number(v); return v == null || v === true
 const pct = (u) => `${Math.round(u * 100)}%`;
 // Hours as people read them: two decimals at most, no trailing zeros, and "<0.01" instead of a 0 or an exponent.
 export const hoursText = (h) => (h >= 0.01 ? String(Number(h.toFixed(2))) : "<0.01");
+// start's line about the models: the mode, the main model at its level, and the Opus that stands in
+// (fable or mythos mode) or what a MODEL line gets (opus mode). Fable and Mythos share one allowance.
+export const modelLine = (run) => {
+  const named = (m) => modelText({ family: familyOf(m), model: m });
+  const ceiling = pct(run.fableCeiling ?? 0.6);
+  return `  model:  ${named(run.model || MAIN_MODEL)} at ${run.effort} (mode ${run.mode}); ${isPremium(run.mode)
+    ? `${named(run.opusModel || MAIN_MODEL)} at ${MAIN_EFFORT.opus} while ${modelName(run.mode)}'s weekly allowance is at or over ${ceiling} or used up`
+    : `MODEL: fable or MODEL: mythos runs one piece at ${MAIN_EFFORT.fable} while their shared weekly allowance is under ${ceiling} (at most ${run.fableSessions ?? 2} such sessions while its share is unknown), else on Opus at max`}`;
+};
 
 function repoRoot(dir) {
   try {
@@ -281,8 +293,8 @@ function start(opt) {
     model: picked.model,
     opusModel: picked.opusModel,
     effort: typeof opt.effort === "string" ? opt.effort : cfg.effort || MAIN_EFFORT[picked.mode],
-    // MODEL: fable prompts: Fable while its weekly allowance is under this share, and at most this
-    // many Fable sessions while the share is unknown (effort.mjs, fableGate).
+    // MODEL: fable and MODEL: mythos prompts: that model while their shared weekly allowance is under
+    // this share, and at most this many sessions of the two while the share is unknown (effort.mjs, fableGate).
     fableCeiling: ratioArg(opt["fable-ceiling"] ?? cfg.fableCeiling, 0.6),
     fableSessions: countArg(opt["fable-sessions"] ?? cfg.fableSessions, 2),
     // The longest a usage limit's reset may be away for the chain to wait for it; farther ends the chain.
@@ -307,6 +319,7 @@ function start(opt) {
   console.log(`night-shift started for ${repo}`);
   if (cut) console.log(`  resumes session ${cut.nn} (${cut.sessionId}), which the last runner left unfinished`);
   console.log(`  state:  ${state}`);
+  console.log(modelLine(run));
   console.log(`  until:  ${run.until ? `${run.until} (no new session after that)` : "the work is done (STOP)"}${run.maxSessions ? `, at most ${run.maxSessions} sessions` : ""}`);
   for (const l of ruleLines(ruleStatus(repo))) console.log(l);
   console.log(`  status: node "${SELF}" status --repo "${repo}"`);
@@ -317,10 +330,12 @@ function start(opt) {
 async function runChain(opt) {
   const state = path.resolve(opt.state || fail("run needs --state"));
   const stored = JSON.parse(read(path.join(state, "run.json")) || fail(`no run.json in ${state}`));
-  // A run.json from before modes has no mode: its model says which it is, and a Fable one runs at Fable's
-  // level, not at the effort that was stored for Opus.
-  const run = stored.mode ? stored : (({ error, ...r }) => ({ ...stored, ...r, ...(r.mode === "fable" ? { effort: MAIN_EFFORT.fable } : {}) }))(resolveMode({ model: stored.model }));
-  const fableMode = run.mode === "fable";
+  // A run.json from before modes has no mode: its model says which it is, and a Fable (or Mythos) one runs
+  // at that model's level, not at the effort that was stored for Opus.
+  const run = stored.mode ? stored : (({ error, ...r }) => ({ ...stored, ...r, ...(isPremium(r.mode) ? { effort: MAIN_EFFORT[r.mode] } : {}) }))(resolveMode({ model: stored.model }));
+  // Fable or mythos mode: that model (`main`) runs every session, and Opus stands in for it.
+  const premiumMode = isPremium(run.mode);
+  const main = premiumMode ? run.mode : null;
   const { repo } = run;
   const logFile = path.join(state, "chain.log");
   const log = (line) => { const l = `[${now()}] ${line}`; console.log(l); fs.appendFileSync(logFile, l + "\n"); };
@@ -375,7 +390,9 @@ async function runChain(opt) {
   // Before every session, not once: the file sits in a folder the sessions can write, and one
   // that dropped the guard's hook from it would run every later session without the guard.
   const settings = path.join(state, "night-settings.json");
-  // levels: this session's { [family]: level }; Opus keeps the run's level and Fable its own otherwise.
+  // levels: this session's { [family]: level }; Opus keeps the run's level and Fable and Mythos their own
+  // otherwise. Each level is written under the ids the run starts sessions with too (D6: Mythos reads
+  // only its id's key).
   const writeSettings = (levels = {}) => {
     const prev = parseOr(read(settings), {});
     fs.writeFileSync(settings, JSON.stringify({
@@ -393,7 +410,8 @@ async function runChain(opt) {
       // Not NODE_OPTIONS or NIGHT_SHIFT_*: a session could plant a --require or point the guard's
       // state folder elsewhere through them (Windows names are case-blind, hence the i).
       env: { ...Object.fromEntries(Object.entries(prev.env && typeof prev.env === "object" ? prev.env : {}).filter(([k]) => !/^(NODE_OPTIONS$|NIGHT_SHIFT_)/i.test(k))), CLAUDE_CODE_SUBAGENT_MODEL: SUB_MODEL },
-      modelSettings: nightModelSettings(prev.modelSettings, lowerSettings(repo), { opus: fableMode ? MAIN_EFFORT.opus : run.effort || MAIN_EFFORT.opus, fable: fableMode ? run.effort || MAIN_EFFORT.fable : MAIN_EFFORT.fable, ...levels }),
+      modelSettings: nightModelSettings(prev.modelSettings, lowerSettings(repo), { opus: premiumMode ? MAIN_EFFORT.opus : run.effort || MAIN_EFFORT.opus,
+        ...(premiumMode ? { [main]: run.effort || MAIN_EFFORT[main] } : {}), ...levels }, runModelIds(run)),
     }, null, 2));
   };
   writeSettings();
@@ -446,8 +464,9 @@ async function runChain(opt) {
   // a row ended without a turn (a conversation that cannot be resumed).
   let streak = 0, streakStart = 0, deadResumes = 0;
 
-  // Fable for the sessions that ask for it (MODEL: fable): <state>/fable.json keeps the chain's Fable
-  // sessions, the allowance's last known share and, once it ran out, until when (effort.mjs, fableGate).
+  // Fable or Mythos for the sessions that ask for it (MODEL: fable, MODEL: mythos): one weekly allowance,
+  // so one <state>/fable.json keeps the chain's sessions of the two, the allowance's last known share,
+  // once it ran out until when, and a name the account was found unable to run (effort.mjs, fableGate).
   const fableFile = path.join(state, "fable.json");
   const readFable = () => parseOr(read(fableFile), {});
   const writeFable = (patch) => fs.writeFileSync(fableFile, JSON.stringify({ ...readFable(), ...patch }, null, 2));
@@ -468,9 +487,12 @@ async function runChain(opt) {
     }
     return rulesBlock({ global: ruleMemo.global.text, project: ruleMemo.project.text });
   };
+  // Why the gate refused a session, after "asked for <Model>, but" or "<Model> is the main model, but".
+  // The count is of Fable and Mythos sessions together: they draw on one allowance.
   const whyText = (g) => (g.why === "out" ? `its allowance is used up until ${stamp(g.until)}`
     : g.why === "ceiling" ? `its allowance is at ${pct(g.ratio)}, at or over the ${pct(g.ceiling)} ceiling`
-      : `${g.sessions} Fable sessions already ran in this chain while its allowance's share is unknown`);
+      : g.why === "unavailable" ? "this account cannot run it (found earlier in this chain)"
+        : `${g.sessions} session${g.sessions === 1 ? "" : "s"} on its allowance already ran in this chain while the allowance's share is unknown`);
 
   // In this process, so `wait` (which waits for it to exit) goes on through a limit. A STOP request ends it early.
   // NIGHT_SHIFT_LIMIT_TICK_MS: a shorter look at the clock for night-chain.test.mjs.
@@ -480,9 +502,9 @@ async function runChain(opt) {
     while (Date.now() < until && !fs.existsSync(stopFile)) await new Promise((r) => setTimeout(r, tick));
   };
 
-  log(`chain starts in ${repo}${reloaded ? " (runner reloaded)" : ""}, until ${run.until || "the work is done"}, from session ${session}${run.maxSessions ? ` to ${run.maxSessions}` : ""}, ${run.model || MAIN_MODEL} at ${run.effort || "xhigh"}, subagents ${SUB_MODEL} (${subEffortText()}), ${fableMode
-    ? `Fable as the main model under ${pct(fableCeiling)} of its allowance, else ${opusModel} at ${MAIN_EFFORT.opus}`
-    : `Fable on request under ${pct(fableCeiling)} of its allowance (${fableSessions} sessions while unknown)`}`);
+  log(`chain starts in ${repo}${reloaded ? " (runner reloaded)" : ""}, until ${run.until || "the work is done"}, from session ${session}${run.maxSessions ? ` to ${run.maxSessions}` : ""}, ${run.model || MAIN_MODEL} at ${run.effort || "xhigh"}, subagents ${SUB_MODEL} (${subEffortText()}), ${premiumMode
+    ? `${modelName(main)} as the main model under ${pct(fableCeiling)} of its allowance, else ${opusModel} at ${MAIN_EFFORT.opus}`
+    : `Fable or Mythos on request under ${pct(fableCeiling)} of their shared allowance (${fableSessions} sessions while unknown)`}`);
   while (!run.maxSessions || session <= run.maxSessions) {
     if (fs.existsSync(stopFile)) finish("stop requested");
     if (fs.existsSync(reloadFile)) handOver(); // returns only when the hand-over failed
@@ -501,22 +523,26 @@ async function runChain(opt) {
     const before = fs.statSync(next).mtimeMs;
     const resume = pendingResume();
     // A resumed session goes on as it ran (resume.json, or the runs line of a session the last runner
-    // left). A new one that asks for Fable gets it while the gate allows; a resumed one unless the
-    // allowance is used up.
+    // left). A new one that asks for Fable or Mythos gets it while the gate allows; a resumed one unless
+    // the allowance is used up or the account cannot run that model.
     let plan = resume?.model ? { ...asked, model: resume.model, family: familyOf(resume.model), effort: resume.effort || asked.effort } : asked;
-    if (plan.family === "fable") {
-      // Fable mode: no count rule, and the stand-in runs at xhigh (or the level its prompt asked), never at max on its own.
-      const g = fableMode ? mainGate(readFable(), { ceiling: fableCeiling }) : fableGate(readFable(), { ceiling: fableCeiling, maxSessions: fableSessions });
-      if (!g.ok && (!resume || g.why === "out")) plan = { ...plan, model: opusModel, family: "opus", effort: fableMode ? asked.askedEffort || MAIN_EFFORT.opus : "max", downgrade: g, why: whyText(g) };
+    if (isPremium(plan.family)) {
+      // Fable or mythos mode: no count rule, and the stand-in runs at xhigh (or the level its prompt asked), never at max on its own.
+      const g = premiumMode ? mainGate(readFable(), { ceiling: fableCeiling })
+        : fableGate(readFable(), { ceiling: fableCeiling, maxSessions: fableSessions, family: plan.family });
+      if (!g.ok && (!resume || g.why === "out" || g.why === "unavailable")) {
+        plan = { ...plan, model: opusModel, family: "opus", effort: premiumMode ? asked.askedEffort || MAIN_EFFORT.opus : "max", downgrade: g, wanted: plan.family, why: whyText(g) };
+      }
     }
     log(resume ? `session ${nn} resumes ${resume.sessionId} ${resume.why === "stopped" ? "where the last runner stopped" : resume.why === "error" ? "after the error" : "after the usage limit"}`
       : `session ${nn} starts: ${asked.body.split("\n")[0].slice(0, 120)}`);
     if (asked.note && !resume) log(`session ${nn}: ${asked.note}`);
-    if (plan.downgrade) log(fableMode ? `session ${nn}: Fable is the main model, but ${whyText(plan.downgrade)}; it runs on Opus at ${plan.effort}`
-      : `session ${nn} asked for Fable, but ${whyText(plan.downgrade)}; it runs on Opus at max`);
+    if (plan.downgrade) log(premiumMode ? `session ${nn}: ${modelName(main)} is the main model, but ${plan.why}; it runs on Opus at ${plan.effort}`
+      : `session ${nn} asked for ${modelName(plan.wanted)}, but ${plan.why}; it runs on Opus at max`);
     // night-report.mjs and cutOffSession read this line back.
-    log(`session ${nn} runs ${modelText(plan)} at ${plan.effort}${plan.effort === "max" && asked.effort === "max" && (!plan.downgrade || fableMode) ? " (its prompt asks for it)" : ""}`);
-    if (plan.family === "fable" && !resume && !fableMode) writeFable({ sessions: (readFable().sessions || 0) + 1 });
+    log(`session ${nn} runs ${modelText(plan)} at ${plan.effort}${plan.effort === "max" && asked.effort === "max" && (!plan.downgrade || premiumMode) ? " (its prompt asks for it)" : ""}`);
+    // Fable and Mythos sessions count together: one allowance.
+    if (isPremium(plan.family) && !resume && !premiumMode) writeFable({ sessions: (readFable().sessions || 0) + 1 });
     writeSettings({ [plan.family]: plan.effort });
     const result = await runSession(run, session, plan, nn, resume, readRules());
     log(`session ${nn} ends: ${result.summary}`);
@@ -526,22 +552,23 @@ async function runChain(opt) {
     log(`session ${nn} limits: ${windowSpan(result.windows)}; it ran on ${ran}`);
     const fw = result.windows.last?.seven_day_overage_included;
     if (fw?.utilization != null) writeFable({ ratio: fw.utilization, ratioResetsAt: fw.resetsAt ?? null, ratioAt: Date.now() });
-    if (plan.family === "fable" && (result.switchedTo || result.mainModels.some((m) => familyOf(m) !== "fable")))
-      log(`session ${nn} was to run on Fable, but ${result.switchedTo ? `the CLI switched it to ${result.switchedTo}` : `its turns ran on ${ran}`}`);
+    if (isPremium(plan.family) && (result.switchedTo || result.mainModels.some((m) => familyOf(m) !== plan.family)))
+      log(`session ${nn} was to run on ${modelName(plan.family)}, but ${result.switchedTo ? `the CLI switched it to ${result.switchedTo}` : `its turns ran on ${ran}`}`);
 
-    // Fable's allowance cut the session off: its piece goes on from its prompt on Opus at max (a new
-    // conversation, so a session of its own), unless it already wrote the next prompt. Every
-    // MODEL: fable prompt runs on Opus at max until the allowance resets (fableGate).
-    if (plan.family === "fable" && result.fableOut) {
+    // The allowance cut a Fable or Mythos session off: its piece goes on from its prompt on Opus at max
+    // (a new conversation, so a session of its own), unless it already wrote the next prompt. Every
+    // MODEL: fable or MODEL: mythos prompt runs on Opus at max until the allowance resets (fableGate).
+    if (isPremium(plan.family) && result.fableOut) {
       streak = streakStart = deadResumes = 0; // the API answered: a streak must not span this wait
       const until = result.fableResetAt || Date.now() + 24 * 3_600_000;
+      const name = modelName(plan.family);
       writeFable({ outUntil: until });
-      log(`session ${nn}: Fable's allowance is used up (${result.apiError || result.limitType || "refused"}) until ${stamp(until)}${result.fableResetAt ? "" : " (a guess: the CLI gave no reset time)"}; limit record ${JSON.stringify(result.limitInfo)}`);
+      log(`session ${nn}: ${name}'s allowance is used up (${result.apiError || result.limitType || "refused"}) until ${stamp(until)}${result.fableResetAt ? "" : " (a guess: the CLI gave no reset time)"}; limit record ${JSON.stringify(result.limitInfo)}`);
       fs.rmSync(resumeFile, { force: true });
       if (!wrote) {
-        // Fable mode: no EFFORT line unless the piece's own prompt had one; Fable takes the piece back by itself after the reset.
-        const level = fableMode ? asked.askedEffort || MAIN_EFFORT.opus : "max";
-        fs.writeFileSync(next, `${fableMode ? (asked.askedEffort ? `EFFORT: ${level}\n` : "") : "EFFORT: max\n"}The previous Fable session (${nn}) was cut off because the Fable allowance ran out; this piece goes on at Opus ${fableMode ? level : "max"}. ` +
+        // Fable or mythos mode: no EFFORT line unless the piece's own prompt had one; the main model takes the piece back by itself after the reset.
+        const level = premiumMode ? asked.askedEffort || MAIN_EFFORT.opus : "max";
+        fs.writeFileSync(next, `${premiumMode ? (asked.askedEffort ? `EFFORT: ${level}\n` : "") : "EFFORT: max\n"}The previous ${name} session (${nn}) was cut off because the ${name} allowance ran out; this piece goes on at Opus ${premiumMode ? level : "max"}. ` +
           `First look at git status and git diff: unfinished work may be there; do not redo finished work.\n\n${plan.body}`);
         log(`session ${nn}'s piece goes on in the next session on Opus at ${level}`);
       }
@@ -569,6 +596,27 @@ async function runChain(opt) {
       fs.rmSync(path.join(state, "prompts", `${nn}.md`), { force: true });
       continue;
     }
+    // Opus mode: a Fable or Mythos session the account cannot run (refused as not found before any turn,
+    // session-outcome.mjs) does not end the chain. Its piece goes on from its prompt on Opus at max, and
+    // fable.json remembers the name, so a later ask for it is refused at the gate instead of tried again.
+    // It never had a turn: it is not counted as a session on the allowance. In fable or mythos mode the
+    // main model that cannot run ends the chain below: only the user can change the mode.
+    if (result.modelUnavailable && isPremium(plan.family) && !premiumMode) {
+      streak = streakStart = deadResumes = 0;
+      const f = readFable(), name = modelName(plan.family);
+      writeFable({ unavailable: [...new Set([...(Array.isArray(f.unavailable) ? f.unavailable : []), plan.family])],
+        ...(resume ? {} : { sessions: Math.max(0, (f.sessions || 0) - 1) }) });
+      log(`session ${nn}: this account cannot run ${name} (${result.errorText}); MODEL: ${plan.family} runs on Opus at max for the rest of this chain`);
+      fs.rmSync(resumeFile, { force: true });
+      if (!wrote) {
+        fs.writeFileSync(next, `EFFORT: max\nThe previous session (${nn}) could not run on ${name}: this account cannot run it (refused as not found before its first turn). ` +
+          `This piece goes on at Opus max. ${resume ? "First look at git status and git diff: the conversation it resumed may have left unfinished work; do not redo finished work."
+            : "Nothing of it was done in that session."}\n\n${plan.body}`);
+        log(`session ${nn}'s piece goes on in the next session on Opus at max`);
+      }
+      session++;
+      continue;
+    }
     // The session cannot run (a refused login, a bad request): the next one would fail the same way.
     if (result.fatal) finish(`session ${nn} cannot run: ${result.errorText}`);
     let retryHandover = false;
@@ -587,7 +635,7 @@ async function runChain(opt) {
         // conversation: it waits out the outage and resumes the same one.
         const outage = result.apiError != null || result.apiErrorStatus != null || /^API Error\b|\b(?:ENOTFOUND|ECONN\w*|ETIMEDOUT|EAI_AGAIN)\b/.test(result.errorText);
         if (!outage && ++deadResumes >= 2) { fs.rmSync(resumeFile, { force: true }); retryHandover = true; }
-      } else if (plan.family === "fable" && !fableMode && result.mainModels.length === 0) writeFable({ sessions: Math.max(0, (readFable().sessions || 0) - 1) }); // it never had a turn: the retry is not a second Fable session
+      } else if (isPremium(plan.family) && !premiumMode && result.mainModels.length === 0) writeFable({ sessions: Math.max(0, (readFable().sessions || 0) - 1) }); // it never had a turn: the retry is not a second session on the allowance
       if (!retryHandover) {
         const ms = Number(process.env.NIGHT_SHIFT_BACKOFF_MS) || [1, 2, 5, 10, 20, 30][Math.min(streak, 6) - 1] * 60_000;
         const until = Math.min(Date.now() + ms, run.deadline || Infinity);
@@ -622,7 +670,8 @@ async function runChain(opt) {
   } catch (e) { die(e); }
 }
 
-// plan: sessionPlan's { model, family, effort, body }, with downgrade (and why, its words) when Fable was refused.
+// plan: sessionPlan's { model, family, effort, body }, with downgrade (the gate's answer), wanted (the
+// family it asked for) and why (the gate's answer in words) when Fable or Mythos was refused.
 // rules: the user's rulesBlock ("" for none), the header's last part (a new session's before its separator, a resumed one's after an empty line).
 function runSession(run, session, plan, nn, resume, rules = "") {
   const resumeId = resume?.sessionId;
@@ -642,9 +691,11 @@ function runSession(run, session, plan, nn, resume, rules = "") {
     `The user reads ${LANG_NAMES[langOf(run)]}: write the night report's own text and its Waits-for-you items in that language, and keep the report's fixed words as the skill gives them.`,
     `Mode: ${run.mode}.`,
     `Skill folder: ${SKILL_DIR}. Continuation file: ${path.join(run.state, "next-prompt.md")}. Night report: ${run.report}.`,
-    ...(plan.family === "fable" && run.mode !== "fable" ? [FABLE_NOTE] : []),
-    ...(plan.downgrade && run.mode === "fable" ? [fallbackNote(plan.why, { asked: plan.askedEffort })] : []),
-    ...(plan.downgrade && run.mode !== "fable" ? ["The prompt asked for MODEL: fable, but Fable's weekly allowance does not cover it tonight; this piece runs on Opus at max."] : []),
+    // Opus mode: a Fable or Mythos session is for its one piece, and a refused one is told why. Fable or
+    // mythos mode: the stand-in is told the main model cannot run it and why.
+    ...(isPremium(plan.family) && !isPremium(run.mode) ? [premiumNote(plan.family)] : []),
+    ...(plan.downgrade && isPremium(run.mode) ? [fallbackNote(plan.why, { asked: plan.askedEffort, family: run.mode })] : []),
+    ...(plan.downgrade && !isPremium(run.mode) ? [deniedNote(plan.wanted, plan.downgrade.why)] : []),
     ...(effort === "max" ? [MAX_NOTE] : []),
     ...(rules ? ["", rules] : []),
     "",
@@ -678,10 +729,10 @@ function runSession(run, session, plan, nn, resume, rules = "") {
       // Every Node process of the session hides the windows of what it starts (hide-windows.cjs).
       env: { ...withoutEffortEnv(process.env), PATH: run.path, NIGHT_SHIFT: "1", NIGHT_SHIFT_STATE: run.state, NIGHT_SHIFT_SKILL: SKILL_DIR, NIGHT_SHIFT_REPO: run.repo,
         NIGHT_SHIFT_SESSION: String(session), NIGHT_SHIFT_UNTIL: run.until || "", CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0",
-        // A Fable session whose allowance runs out would go on, on another model, on its own; this
-        // ends it instead (model_substitution_disabled), so the runner hands the piece to Opus at max.
-        // Only for Fable: it also turns off the overload fallback and compaction's model choice.
-        ...(plan.family === "fable" ? { CLAUDE_CODE_NO_MODEL_FALLBACK: "1" } : {}),
+        // A Fable or Mythos session whose allowance runs out would go on, on another model, on its own;
+        // this ends it instead (model_substitution_disabled), so the runner hands the piece to Opus.
+        // Only for those two: it also turns off the overload fallback and compaction's model choice.
+        ...(isPremium(plan.family) ? { CLAUDE_CODE_NO_MODEL_FALLBACK: "1" } : {}),
         // Forward slashes: NODE_OPTIONS reads a backslash inside quotes as an escape.
         NODE_OPTIONS: [`--require "${HIDE.replace(/\\/g, "/")}"`, ...String(process.env.NODE_OPTIONS || "").split(/\s+(?=--)/).filter((o) => o && !o.includes("hide-windows.cjs"))].join(" ") },
       // A resumed session appends to its stream, so the report counts both parts.
