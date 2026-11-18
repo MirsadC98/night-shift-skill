@@ -66,19 +66,23 @@ export default {
   retriedNoPrompt: (nn) => `#${nn} wrote no continuation prompt, retried`,
   runnerGone: "The runner is not running and the chain did not say it ended (the window may have been closed or restarted)",
   effortOff: (got, want) => `level ${got} (should be ${want})`,
-  // what the runner said about a session's model or handover
+  // what the runner said about a session's model or handover. `model` is the name of the model in play
+  // (Fable or Mythos, which share one weekly allowance): the one a session asked for or the run's main model.
   note: {
-    fableAsked: (why) => `asked for Fable, ran on Opus at max (${why})`,
-    fableUntil: (t) => `Fable's share is used up until ${t}`,
-    fableAt: (share, ceiling) => `Fable's share is ${share}, at the ${ceiling} ceiling`,
-    fableCount: (n) => `the chain already ran ${n} Fable session${s(n)}, the share is unknown`,
-    fableCut: "cut off because Fable's share ran out; the rest goes on Opus at max",
-    mainFell: (why, level) => `Fable is the main model, but ran on Opus at ${level} (${why})`,
-    mainCut: "cut off because Fable's share ran out; the rest goes on Opus at xhigh",
-    fableNot: (why) => `did not run on Fable: ${why}`,
+    fableAsked: (why, model) => `asked for ${model}, ran on Opus at max (${why})`,
+    fableUntil: (t, model) => `${model}'s share is used up until ${t}`,
+    fableAt: (share, ceiling, model) => `${model}'s share is ${share}, at the ${ceiling} ceiling`,
+    fableCount: (n, model) => `the chain already ran ${n} session${s(n)} on ${model}'s allowance, the share is unknown`,
+    cannotRunWhy: (model) => `this account cannot run ${model}, found earlier in this chain`,
+    cannotRun: (model, family) => `this account cannot run ${model}; MODEL: ${family} runs on Opus at max for the rest of the chain`,
+    fableCut: (model) => `cut off because ${model}'s share ran out; the rest goes on Opus at max`,
+    mainFell: (why, level, model) => `${model} is the main model, but ran on Opus at ${level} (${why})`,
+    mainCut: (model) => `cut off because ${model}'s share ran out; the rest goes on Opus at xhigh`,
+    fableNot: (why, model) => `did not run on ${model}: ${why}`,
     bigPrompt: (kb) => `continuation prompt is ${kb} KB (over 30 KB; every call reads it again)`,
     badModel: (m) => `MODEL: ${m} not recognised, ran on Opus`,
-    badModelFable: (m) => `MODEL: ${m} not recognised, ran on Fable`,
+    badModelFable: (m, model) => `MODEL: ${m} not recognised, ran on ${model}`,
+    sameModel: (asked, model) => `MODEL: ${asked} is ${model} under another name, ran on ${model}`,
   },
 
   // the full report (`show`, `status`, /report's source)

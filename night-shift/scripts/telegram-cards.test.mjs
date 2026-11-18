@@ -134,6 +134,21 @@ test("/status answers with what runs now and the limits", () => {
   ]);
 });
 
+test("the share Fable and Mythos have in common is named after the model in play on every card, Fable when unnamed", () => {
+  const facts = { five: "72%", seven: "56%", fable: "40%" };
+  const lines = (fableName) => [
+    sessionCard({ ...done, ...facts, fableName }, en).text,
+    chainCard({ project: "demo-app", reason: "STOP: done", jobs: [], ...facts, fableName }, en).text,
+    reportCard({ project: "demo-app", state: "running", at: "01:00", jobs: [], ...facts, fableName }, en).text,
+    statusCard({ project: "demo-app", running: true, ...facts, fableName }, en).text,
+  ];
+  for (const text of lines("Mythos")) {
+    assert.match(text, /7d 56% · Mythos 40%/);
+    assert.doesNotMatch(text, /Fable/);
+  }
+  for (const text of lines(undefined)) assert.match(text, /7d 56% · Fable 40%/);
+});
+
 const report = [
   "## 2026-10-30 · session 7 (08:25–08:50) · R7 T1 (Effects)",
   "", "**Next:** something from run 1.",

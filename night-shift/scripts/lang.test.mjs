@@ -64,8 +64,10 @@ test("the user's table is found and used, and a key it lacks or gives the wrong 
   assert.equal(T.noProblems, en.noProblems);
   assert.equal(T.ev.limit, en.ev.limit);
   assert.equal(T.cli.noRun, en.cli.noRun);
-  assert.deepEqual(T.note, en.note);
+  assert.equal(T.note.mainCut, en.note.mainCut);
+  assert.equal(T.note.fableAsked("why", "Mythos"), "xx·asked Mythos (why)");
   assert.equal(T.pct(40), "40%", "a string where English has a function reads English");
+  assert.equal(T.note.fableCut("Mythos"), en.note.fableCut("Mythos"), "so does a nested one (a note from before it named the model)");
   // the result has English's shape: every key, each of English's kind
   assert.deepEqual(shape(T), shape(en));
 });

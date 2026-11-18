@@ -431,6 +431,8 @@ for (const [k, v] of Object.entries(step.rules || {})) {
 }
 if (step.fable != null) console.log(JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "allowed",
   unifiedWindows: { five_hour: { utilization: 0.4 }, seven_day: { utilization: 0.3 }, seven_day_overage_included: { utilization: step.fable, resetsAt: step.resets } } } }));
+// step.model: one main-conversation turn on that model, at step.effort, as the CLI reports a turn.
+if (step.model) console.log(JSON.stringify({ type: "assistant", perTurnEffort: step.effort, message: { model: step.model, usage: { input_tokens: 1, output_tokens: 1 }, content: [] } }));
 if (step.next != null) fs.writeFileSync(path.join(st, "next-prompt.md"), step.next);
 console.log(JSON.stringify(step.refuse
   ? { type: "result", subtype: "success", is_error: true, api_error: step.refuse, num_turns: 1, total_cost_usd: 0, session_id: "fake-" + n, result: "refused" }
@@ -723,12 +725,18 @@ test("Fable and Mythos share one allowance: the count, the share and a used-up a
   assert.match(count.seen(3).input, /The prompt asked for MODEL: mythos, but Mythos's weekly allowance does not cover it tonight; this piece runs on Opus at max\./);
   assert.match(count.log, /session 03 asked for Mythos, but 2 sessions on its allowance already ran in this chain while the allowance's share is unknown; it runs on Opus at max\n/);
   assert.equal(count.fable().sessions, 2);
+  // The cards name the model each line is about, and the allowance as the asked model's.
+  const { sessionMessage } = await import("./night-report.mjs");
+  const card = (r, nn) => sessionMessage(r.state, nn, process.pid).text;
+  assert.match(card(count, "03"), /asked for Mythos, ran on Opus at max \(the chain already ran 2 sessions on Mythos's allowance, the share is unknown\)/);
 
   const resets = Math.floor(Date.now() / 1000) + 3 * 86_400;
   const share = await fableRun("MODEL: mythos\nfirst", { 1: { fable: 0.65, resets, next: "MODEL: fable\nsecond" }, 2: { next: "STOP: done" } });
   assert.equal(share.flag(share.seen(2), "--model"), "opus");
   assert.match(share.log, /session 01 limits: .* · fable 65%→65%/);
   assert.match(share.log, /session 02 asked for Fable, but its allowance is at 65%, at or over the 60% ceiling; it runs on Opus at max\n/);
+  assert.match(card(share, "01"), /7d 30% · Mythos 65%/, "a Mythos session's share is Mythos's");
+  assert.match(card(share, "02"), /asked for Fable, ran on Opus at max \(Fable's share is 65%, at the 60% ceiling\)/);
 
   const out = await fableRun("MODEL: mythos\nhard piece", {
     1: { fable: 1, resets, refuse: "model_requires_usage_credits" }, 2: { next: "MODEL: fable\nanother hard piece" }, 3: { next: "STOP: done" } });
@@ -740,11 +748,34 @@ test("Fable and Mythos share one allowance: the count, the share and a used-up a
   assert.match(out.log, /session 01's piece goes on in the next session on Opus at max/);
   assert.equal(out.flag(out.seen(3), "--model"), "opus");
   assert.match(out.log, /session 03 asked for Fable, but its allowance is used up until \S+ \S+; it runs on Opus at max\n/);
+  assert.match(card(out, "01"), /cut off because Mythos's share ran out; the rest goes on Opus at max/);
+  assert.match(card(out, "03"), /asked for Fable, ran on Opus at max \(Fable's share is used up until \S+ \S+\)/);
+});
+
+test("opus mode: a Mythos session's card and report name Mythos: its share, its level, and turns on another model", async () => {
+  const resets = Math.floor(Date.now() / 1000) + 3 * 86_400;
+  const { state, log } = await fableRun("MODEL: mythos\nhard piece", {
+    1: { fable: 0.2, resets, model: MYTHOS, effort: "high", next: "MODEL: mythos\nsecond hard piece" },
+    2: { model: "claude-opus-5-5", effort: "high", next: "STOP: done" } });
+  assert.match(log, /session 01 runs Mythos \(claude-mythos-5-2\) at high\n/);
+  assert.match(log, /session 02 was to run on Mythos, but its turns ran on claude-opus-5-5\n/);
+  const { sessionMessage, buildReport } = await import("./night-report.mjs");
+  const one = sessionMessage(state, "01", process.pid).text;
+  assert.doesNotMatch(one, /should be|Fable/);
+  assert.match(one, /7d 30% · Mythos 20%/);
+  const two = sessionMessage(state, "02", process.pid).text;
+  assert.match(two, /did not run on Mythos: its turns ran on claude-opus-5-5/);
+  assert.doesNotMatch(two, /should be/);
+  const plain = buildReport(state, { focus: "all", pid: 0 }).plain;
+  assert.match(plain, /limit 5h 40%→40% · 7d 30%→30% · Mythos 20%→20%/);
+  assert.match(plain, /#01 start 5h 40%  7d 30%  M 20%/);
+  assert.match(plain, /resets: .* · Mythos [A-Z][a-z]{2} \d{1,2} \d\d:\d\d/);
+  assert.doesNotMatch(plain, /Fable/);
 });
 
 test("mythos mode: every session runs on Mythos's id at high, past the count; MODEL: fable stays on it", async () => {
   const resets = Math.floor(Date.now() / 1000) + 3 * 86_400;
-  const { log, seen, flag, fable } = await fableRun("MODEL: fable\nfirst piece", {
+  const { state, log, seen, flag, fable } = await fableRun("MODEL: fable\nfirst piece", {
     1: { fable: 0.2, resets, next: "second" }, 2: { next: "third" }, 3: { next: "STOP: done" } }, { ...MM, fableSessions: 1 });
   for (const n of [1, 2, 3]) {
     const s = seen(n);
@@ -759,6 +790,10 @@ test("mythos mode: every session runs on Mythos's id at high, past the count; MO
   assert.match(log, /session 01: MODEL: fable is the same model as Mythos, this run's main model; it runs on claude-mythos-5-2\n/);
   assert.match(log, /session 01 runs Mythos \(claude-mythos-5-2\) at high\n/);
   assert.equal(fable().sessions, undefined);
+  const { sessionMessage } = await import("./night-report.mjs");
+  const one = sessionMessage(state, "01", process.pid).text;
+  assert.match(one, /MODEL: fable is Mythos under another name, ran on Mythos/);
+  assert.match(one, /7d 30% · Mythos 20%/, "the main model's share is named after it");
 });
 
 test("mythos mode: at the ceiling, and when the allowance is used up, the session runs on Opus at xhigh and says why", async () => {
@@ -773,6 +808,10 @@ test("mythos mode: at the ceiling, and when the allowance is used up, the sessio
   assert.match(two.input, /goes back to Mythos when it can/);
   assert.doesNotMatch(two.input, /\bmax\b|Fable/);
   assert.match(ceiling.log, /session 02: Mythos is the main model, but its allowance is at 65%, at or over the 60% ceiling; it runs on Opus at xhigh\n/);
+  const { sessionMessage } = await import("./night-report.mjs");
+  const fell = sessionMessage(ceiling.state, "02", process.pid).text;
+  assert.match(fell, /Mythos is the main model, but ran on Opus at xhigh \(Mythos's share is 65%, at the 60% ceiling\)/);
+  assert.doesNotMatch(fell, /Fable|\bmax\b|should be/);
 
   const out = await fableRun("hard piece", { 1: { fable: 1, resets, refuse: "model_requires_usage_credits" }, 2: { next: "STOP: done" } }, MM);
   const next = out.seen(2);
@@ -782,6 +821,10 @@ test("mythos mode: at the ceiling, and when the allowance is used up, the sessio
   assert.match(next.input, /The previous Mythos session \(01\) was cut off because the Mythos allowance ran out; this piece goes on at Opus xhigh\./);
   assert.match(out.log, /session 01: Mythos's allowance is used up \(model_requires_usage_credits\)/);
   assert.match(out.log, /session 01's piece goes on in the next session on Opus at xhigh/);
+  const cut = sessionMessage(out.state, "01", process.pid).text;
+  assert.match(cut, /cut off because Mythos's share ran out; the rest goes on Opus at xhigh/);
+  assert.match(cut, /Mythos 100%/);
+  assert.doesNotMatch(cut, /Fable|\bmax\b/);
 });
 
 test("a run.json from before modes with Mythos's id runs as mythos mode", async () => {
@@ -816,6 +859,10 @@ test("opus mode: a Mythos session the account cannot run hands its piece to Opus
   assert.equal(flag(seen(4), "--model"), "fable");
   assert.deepEqual([fable().unavailable, fable().sessions], [["mythos"], 1]);
   assert.match(log, /chain ends: STOP: done/);
+  // The cards say it in a few words: the finding on the session that found it, the reason on a later ask.
+  const { sessionMessage } = await import("./night-report.mjs");
+  assert.match(sessionMessage(state, "01", process.pid).text, /this account cannot run Mythos; MODEL: mythos runs on Opus at max for the rest of the chain/);
+  assert.match(sessionMessage(state, "03", process.pid).text, /asked for Mythos, ran on Opus at max \(this account cannot run Mythos, found earlier in this chain\)/);
 });
 
 test("opus mode: a resumed Mythos session goes on on Opus at max once the account is found unable to run Mythos", async () => {
@@ -1146,7 +1193,7 @@ test("a session its prompt put at max is not flagged for running at max; one at 
   assert.match(sessionMessage(state, "02", process.pid).text, /level high \(should be xhigh\)/);
 });
 
-test("an unknown MODEL's card says which model the session ran on: Opus in opus mode, Fable in fable mode", async () => {
+test("an unknown MODEL's card says which model the session ran on: Opus in opus mode, the main model in fable or mythos mode", async () => {
   const { sessionMessage } = await import("./night-report.mjs");
   const cardFor = (patch) => {
     const { state } = setup();
@@ -1162,6 +1209,100 @@ test("an unknown MODEL's card says which model the session ran on: Opus in opus 
   };
   assert.match(cardFor({ lang: "en" }), /MODEL: sonnet not recognised, ran on Opus/);
   assert.match(cardFor({ ...FM, lang: "en" }), /MODEL: sonnet not recognised, ran on Fable/);
+  assert.match(cardFor({ ...MM, lang: "en" }), /MODEL: sonnet not recognised, ran on Mythos/);
+  assert.match(cardFor({ model: MYTHOS, lang: "en" }), /MODEL: sonnet not recognised, ran on Mythos/, "a run.json from before modes");
+});
+
+// chain.log from before 2026-11-18 names only Fable, in shapes the runner no longer writes; old state folders keep them.
+test("an old chain.log's Fable lines still give their notes on the cards, in opus mode and in fable mode", async () => {
+  const { sessionMessage } = await import("./night-report.mjs");
+  const cardsOf = (patch, lines) => {
+    const { state } = setup();
+    const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+    fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, ...patch }));
+    const nnOf = (i) => String(i + 1).padStart(2, "0");
+    fs.writeFileSync(path.join(state, "chain.log"), ["[2026-11-15 22:00:00] chain starts in x, until the work is done, from session 1",
+      ...lines.flatMap((l, i) => [`[2026-11-15 22:0${i}:00] session ${nnOf(i)} starts: piece`, `[2026-11-15 22:0${i}:10] session ${nnOf(i)}${l}`,
+        `[2026-11-15 22:0${i}:30] session ${nnOf(i)} ends: success, 2 turns, $1.00`])].join("\n") + "\n");
+    return lines.map((_, i) => sessionMessage(state, nnOf(i), process.pid).text);
+  };
+  const opus = cardsOf({ lang: "en" }, [
+    " asked for Fable, but 2 Fable sessions already ran in this chain while its allowance's share is unknown; it runs on Opus at max",
+    " asked for Fable, but its allowance is at 65%, at or over the 60% ceiling; it runs on Opus at max",
+    " asked for Fable, but its allowance is used up until 2026-11-18 10:00; it runs on Opus at max",
+    ": Fable's allowance is used up (model_requires_usage_credits) until 2026-11-18 10:00; limit record null",
+    " was to run on Fable, but the CLI switched it to Opus",
+  ]);
+  assert.match(opus[0], /asked for Fable, ran on Opus at max \(the chain already ran 2 sessions on Fable's allowance, the share is unknown\)/);
+  assert.match(opus[1], /asked for Fable, ran on Opus at max \(Fable's share is 65%, at the 60% ceiling\)/);
+  assert.match(opus[2], /asked for Fable, ran on Opus at max \(Fable's share is used up until 2026-11-18 10:00\)/);
+  assert.match(opus[3], /cut off because Fable's share ran out; the rest goes on Opus at max/);
+  assert.match(opus[4], /did not run on Fable: the CLI switched it to Opus/);
+  const fable = cardsOf(FM, [
+    ": Fable is the main model, but its allowance is used up until 2026-11-18 10:00; it runs on Opus at xhigh",
+    ": Fable's allowance is used up (model_requires_usage_credits) until 2026-11-18 10:00; limit record null",
+  ]);
+  assert.match(fable[0], /Fable is the main model, but ran on Opus at xhigh \(Fable's share is used up until 2026-11-18 10:00\)/);
+  assert.match(fable[1], /cut off because Fable's share ran out; the rest goes on Opus at xhigh/);
+});
+
+// The shared allowance is named after the model whose calls reported it: the session's runs line, else its
+// prompt (a log from before the runs line), else the run's main model, else Fable; a mixed chain names both.
+test("the shared allowance's label: from the runs line, the prompt or the run's mode, and both names in a mixed chain", async () => {
+  const { sessionMessage, chainMessage, buildReport } = await import("./night-report.mjs");
+  const event = (u) => JSON.stringify({ type: "rate_limit_event", rate_limit_info: { unifiedWindows: { five_hour: { utilization: 0.4 },
+    seven_day: { utilization: 0.3 }, seven_day_overage_included: { utilization: u, resetsAt: 1795300000 } } } });
+  const ok = JSON.stringify({ type: "result", subtype: "success", is_error: false, session_id: "x" });
+  const chain = (patch, sessions) => {
+    const { state } = setup();
+    const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+    fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, ...patch }));
+    fs.writeFileSync(path.join(state, "chain.log"), ["[2026-11-15 22:00:00] chain starts in x, until the work is done, from session 1",
+      ...sessions.flatMap((s, i) => [`[2026-11-15 22:0${i}:00] session 0${i + 1} starts: piece`, ...(s.runs ? [`[2026-11-15 22:0${i}:00] session 0${i + 1} runs ${s.runs}`] : []),
+        `[2026-11-15 22:0${i}:30] session 0${i + 1} ends: success, 2 turns, $1.00`])].join("\n") + "\n");
+    sessions.forEach((s, i) => {
+      fs.writeFileSync(path.join(state, "prompts", `0${i + 1}.md`), s.prompt || "piece");
+      fs.writeFileSync(path.join(state, `session-0${i + 1}.jsonl`), `${event(s.share)}\n${ok}\n`);
+    });
+    return state;
+  };
+  const card = (state, nn) => sessionMessage(state, nn, process.pid).text;
+  // No runs line: the prompt's MODEL says which model ran; a prompt without one falls back to Fable in opus mode.
+  assert.match(card(chain({}, [{ prompt: "MODEL: mythos\nhard piece", share: 0.4 }]), "01"), /7d 30% · Mythos 40%/);
+  assert.match(card(chain({}, [{ share: 0.4 }]), "01"), /7d 30% · Fable 40%/);
+  // A share on a session that ran on the stand-in is the run's main model's.
+  assert.match(card(chain(MM, [{ runs: "Opus at xhigh", share: 0.4 }]), "01"), /7d 30% · Mythos 40%/);
+  // A chain that ran both names: each session's own, both on what spans the chain.
+  const mixed = chain({}, [{ runs: "Fable at high", share: 0.2 }, { runs: "Mythos (claude-mythos-5-2) at high", share: 0.3 }]);
+  assert.match(card(mixed, "01"), /7d 30% · Fable 20%/);
+  assert.match(card(mixed, "02"), /7d 30% · Mythos 30%/);
+  assert.match(chainMessage(mixed, "STOP: done", process.pid).text, /Fable\/Mythos 20%→30%/);
+  const plain = buildReport(mixed, { focus: "all", pid: 0 }).plain;
+  assert.match(plain, /limit 5h 40%→40% · 7d 30%→30% · Fable\/Mythos 20%→30%/);
+  assert.match(plain, /#01 start 5h 40%  7d 30%  F 20%/);
+  assert.match(plain, /#02 start 5h 40%  7d 30%  M 30%/);
+});
+
+// A table written before the notes named the model: its functions get the name as one more argument, and a note
+// that was a string there (now a function) reads English (lang/index.mjs merges by kind).
+test("a user table's notes get the model's name, and a note of an older kind reads English", async () => {
+  const { sessionMessage } = await import("./night-report.mjs");
+  const { loadLang } = await import("./lang/index.mjs");
+  const { state, home } = setup();
+  putTable(home);
+  setLang(state, "xx");
+  assert.equal((await loadLang("xx", home)).error, undefined);
+  fs.writeFileSync(path.join(state, "chain.log"), [
+    "[2026-11-19 01:00:00] chain starts in x, until the work is done, from session 1",
+    "[2026-11-19 01:00:00] session 01 starts: hard piece",
+    "[2026-11-19 01:00:10] session 01: Mythos's allowance is used up (model_requires_usage_credits) until 2026-11-20 10:00; limit record null",
+    "[2026-11-19 01:30:00] session 01 ends: success, 2 turns, $1.00",
+    "[2026-11-19 01:30:00] session 02 starts: hard piece",
+    "[2026-11-19 01:30:00] session 02 asked for Mythos, but its allowance is used up until 2026-11-20 10:00; it runs on Opus at max",
+    "[2026-11-19 02:00:00] session 02 ends: success, 2 turns, $1.00",
+  ].join("\n") + "\n");
+  assert.match(sessionMessage(state, "01", process.pid).text, /cut off because Mythos's share ran out/);
+  assert.match(sessionMessage(state, "02", process.pid).text, /xx·asked Mythos \(Mythos's share is used up until 2026-11-20 10:00\)/);
 });
 
 test("a Fable session at high is not flagged, an Opus one at high is, and the cards show Fable's share", async () => {

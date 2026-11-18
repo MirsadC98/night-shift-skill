@@ -100,8 +100,10 @@ function card(head, blocks, silent = false) {
   return { text: `${top}${open}${inner}${close}`, silent };
 }
 
-// Fable's share shows only once a Fable call of the night reported it.
-const numbers = (f, T) => [f.took, f.cost, f.five && `${T.five} ${f.five}`, f.seven && `${T.seven} ${f.seven}`, f.fable && `Fable ${f.fable}`].filter(Boolean).join(" · ");
+// Fable's share shows only once a Fable or Mythos call of the night reported it. The two share one weekly
+// allowance; it is named after the model in play (f.fableName: Fable, Mythos or both), Fable when not given.
+const share = (f) => f.fable && `${esc(f.fableName || "Fable")} ${f.fable}`;
+const numbers = (f, T) => [f.took, f.cost, f.five && `${T.five} ${f.five}`, f.seven && `${T.seven} ${f.seven}`, share(f)].filter(Boolean).join(" · ");
 
 // How far the chain is and when it should end. jobs: this run's jobs in order, each
 // { ok, ended, workMs, remaining }, where remaining is its report's "**Remaining:**" count
@@ -162,7 +164,7 @@ export function chainCard(f, T = strings()) {
   return card([
     `🏁 <b>${T.chainEnded} · ${esc(f.project)}</b>`,
     esc(String(f.reason ?? "").replace(/^STOP:\s*/i, "")),
-    [T.jobCount(f.jobs.length), f.took, f.cost, f.seven && `${T.seven} ${f.seven}`, f.fable && `Fable ${f.fable}`].filter(Boolean).join(" · "),
+    [T.jobCount(f.jobs.length), f.took, f.cost, f.seven && `${T.seven} ${f.seven}`, share(f)].filter(Boolean).join(" · "),
     f.waits ? `🙋 ${T.waitsLine(f.waits)}` : null,
   ], [
     { name: T.waitsHead, count: true, lines: (f.waitList || []).map((w) => `• ${w}`) },
@@ -180,7 +182,7 @@ export function reportCard(f, T = strings()) {
     : `${mark(j.ok)} #${j.nn}${j.title ? ` ${esc(j.title)}` : ""} · ${j.took}`);
   const parts = [
     [`🌙 <b>${esc(f.project)}</b> · ${esc(f.state)} · ${f.at}`, f.progress && `📊 ${esc(f.progress)}`,
-      [f.five && `${T.five} ${f.five}`, f.seven && `${T.seven} ${f.seven}`, f.fable && `Fable ${f.fable}`, f.cost].filter(Boolean).join(" · ")].filter(Boolean).join("\n"),
+      [f.five && `${T.five} ${f.five}`, f.seven && `${T.seven} ${f.seven}`, share(f), f.cost].filter(Boolean).join(" · ")].filter(Boolean).join("\n"),
     jobs.length && [`<b>${T.jobsHead}</b>`, ...(jobs.length > REPORT_JOBS ? [T.moreJobs(jobs.length - REPORT_JOBS)] : []), ...jobs.slice(-REPORT_JOBS).map(line)].join("\n"),
     f.problems?.length && [`<b>${T.problemsHead}</b>`, ...f.problems].join("\n"),
     f.waits?.length && [`<b>${T.waitsHead}</b> · ${f.waits.length}`, ...f.waits.map((w) => `• ${esc(w)}`)].join("\n"),
@@ -205,7 +207,7 @@ export function statusCard(f, T = strings()) {
     `🌙 <b>${esc(f.project)}</b> · ${f.running ? T.stateRunning : esc(f.state || T.stateStopped)}`,
     f.running && f.nn && `#${f.nn} · ${f.took}${f.effort ? ` · ${esc(f.effort)}` : ""}${f.step ? ` · ${T.lastStep}: ${esc(f.step)}` : ""}`,
     f.progress && `📊 ${esc(f.progress)}`,
-    f.five && `${T.five} ${f.five}${f.fiveReset ? ` (${T.resetsAt(f.fiveReset)})` : ""} · ${T.seven} ${f.seven}${f.fable ? ` · Fable ${f.fable}` : ""}`,
+    f.five && `${T.five} ${f.five}${f.fiveReset ? ` (${T.resetsAt(f.fiveReset)})` : ""} · ${T.seven} ${f.seven}${f.fable ? ` · ${share(f)}` : ""}`,
     f.last && `${T.lastDone}: ${mark(f.last.ok)} #${f.last.nn}${f.last.title ? ` ${esc(f.last.title)}` : ""}`,
     f.next && `➡️ ${esc(f.next)}`,
   ], [], true);
