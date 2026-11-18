@@ -614,6 +614,9 @@ async function runChain(opt) {
     }
     session++;
   }
+  // The last allowed session may have written a STOP handover: that reason ends the chain, not the cap.
+  const last = read(next).trim();
+  if (last && isStop(sessionPlan(last, run).body)) finish(sessionPlan(last, run).body.split("\n")[0]);
   finish(`reached ${run.maxSessions} sessions`);
   } catch (e) { die(e); }
 }

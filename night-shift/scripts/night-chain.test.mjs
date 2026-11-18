@@ -207,6 +207,43 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
   assert.equal(s.outputStyle, "default");
 });
 
+test("a STOP handover written by the last session --max-sessions allows ends the chain with the STOP reason, not the session cap", async () => {
+  const { state, env, root } = setup();
+  const fake = path.join(root, "fake-cap-stop.mjs");
+  fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path";
+const st = process.env.NIGHT_SHIFT_STATE, n = process.env.NIGHT_SHIFT_SESSION;
+for await (const c of process.stdin);
+fs.writeFileSync(path.join(st, "next-prompt.md"), n === "1" ? "plain piece" : "STOP: both pieces done");
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-" + n, result: "ok" }));
+`);
+  const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+  fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake, maxSessions: 2 }));
+  fs.writeFileSync(path.join(state, "next-prompt.md"), "first piece");
+  const { code } = await runOnce(["--state", state, "--headless"], env, root);
+  const log = fs.readFileSync(path.join(state, "chain.log"), "utf8");
+  assert.equal(code, 0, log);
+  assert.match(log, /chain ends: STOP: both pieces done/);
+  assert.doesNotMatch(log, /reached 2 sessions/);
+});
+
+test("without a STOP handover the session cap still ends the chain", async () => {
+  const { state, env, root } = setup();
+  const fake = path.join(root, "fake-cap-plain.mjs");
+  fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path";
+const st = process.env.NIGHT_SHIFT_STATE, n = process.env.NIGHT_SHIFT_SESSION;
+for await (const c of process.stdin);
+fs.writeFileSync(path.join(st, "next-prompt.md"), "piece after " + n);
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-" + n, result: "ok" }));
+`);
+  const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+  fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake, maxSessions: 2 }));
+  fs.writeFileSync(path.join(state, "next-prompt.md"), "first piece");
+  const { code } = await runOnce(["--state", state, "--headless"], env, root);
+  const log = fs.readFileSync(path.join(state, "chain.log"), "utf8");
+  assert.equal(code, 0, log);
+  assert.match(log, /chain ends: reached 2 sessions/);
+});
+
 test("the runner picks model and effort: Opus unless a prompt asks for Fable, max only for a prompt that opens with EFFORT: max", async () => {
   const { state, env, root, home, repo } = setup();
   const fake = path.join(root, "fake-effort.mjs");
