@@ -1,7 +1,11 @@
 // node --test effort.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { promptEffort, promptDirectives, sessionPlan, directiveLines, fableGate, nightModelSettings, familyOf, resolveMode, mainGate, fallbackNote } from "./effort.mjs";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { promptEffort, promptDirectives, sessionPlan, directiveLines, fableGate, nightModelSettings, familyOf, resolveMode, mainGate, fallbackNote,
+  MODELS, MAIN_EFFORT, cliModel, isPremium, modelName, runModelIds, premiumNote, deniedNote, FABLE_NOTE } from "./effort.mjs";
 
 test("promptEffort reads a first-line EFFORT line and keeps the rest of the prompt", () => {
   assert.deepEqual(promptEffort("EFFORT: max\n\nFix the drift."), { effort: "max", body: "Fix the drift." });
@@ -132,4 +136,111 @@ test("fallbackNote for a prompt with its own level names no level and leaves the
   assert.match(n, /Opus at the level its prompt asked for/); assert.match(n, /without a MODEL line/);
   assert.doesNotMatch(n, /xhigh|EFFORT|\bmax\b/);
   assert.equal(fallbackNote("x", { asked: null }), fallbackNote("x"));
+});
+
+// ---------------------------------------------------------------- Mythos (2026-11-18)
+// Measured with claude 2.1.327: `--model mythos` is refused before any model call (there is no
+// such alias), `--model claude-mythos-5-2` runs and draws on Fable's weekly allowance, and only
+// modelSettings keyed by that id set its level. Mythos takes Fable's seat under another name.
+const MYTHOS = "claude-mythos-5-2";
+test("Mythos is a family of its own, a model the runner runs, and reaches the CLI by its id", () => {
+  assert.equal(familyOf(MYTHOS), "mythos");
+  assert.equal(familyOf("Mythos"), "mythos");
+  assert.ok(MODELS.includes("mythos"));
+  assert.deepEqual([cliModel("opus"), cliModel("fable"), cliModel("mythos")], ["opus", "fable", MYTHOS]);
+  assert.deepEqual([isPremium("fable"), isPremium("mythos"), isPremium("opus"), isPremium("sonnet")], [true, true, false, false]);
+  assert.deepEqual([modelName("mythos"), modelName("fable"), modelName("opus")], ["Mythos", "Fable", "Opus"]);
+  assert.equal(MAIN_EFFORT.mythos, "high");
+});
+test("the Mythos id is written in one place: effort.mjs's table of what --model gets", () => {
+  const dir = path.dirname(fileURLToPath(import.meta.url));
+  const hits = fs.readdirSync(dir).filter((f) => f.endsWith(".mjs") && !f.endsWith(".test.mjs"))
+    .flatMap((f) => (fs.readFileSync(path.join(dir, f), "utf8").match(/claude-mythos-[\w-]+/g) || []).map(() => f));
+  assert.deepEqual(hits, ["effort.mjs"]);
+});
+test("sessionPlan in opus mode: MODEL: mythos is MODEL: fable on the other name", () => {
+  const run = { mode: "opus", model: "opus", opusModel: "opus", effort: "xhigh" };
+  assert.deepEqual(pick(sessionPlan("MODEL: mythos\npiece", run)), { model: MYTHOS, family: "mythos", effort: "high", askedEffort: null });
+  assert.equal(sessionPlan("MODEL: Mythos\npiece", run).asked, "mythos");
+  assert.equal(sessionPlan("MODEL: mythos\nEFFORT: max\npiece", run).effort, "max");
+  assert.equal(sessionPlan("MODEL: mythos\npiece", run).note, null);
+  assert.match(sessionPlan("MODEL: sonnet\npiece", run).note, /\(opus, fable, mythos\)/);
+});
+test("sessionPlan in mythos mode: Mythos at the run's level, MODEL: opus on the stand-in, MODEL: fable stays on Mythos", () => {
+  const run = { mode: "mythos", model: MYTHOS, opusModel: "claude-opus-5-5", effort: "high" };
+  assert.deepEqual(pick(sessionPlan("piece", run)), { model: MYTHOS, family: "mythos", effort: "high", askedEffort: null });
+  assert.deepEqual(pick(sessionPlan("MODEL: mythos\npiece", run)), { model: MYTHOS, family: "mythos", effort: "high", askedEffort: null });
+  assert.deepEqual(pick(sessionPlan("MODEL: opus\npiece", run)), { model: "claude-opus-5-5", family: "opus", effort: "xhigh", askedEffort: null });
+  assert.deepEqual(pick(sessionPlan("EFFORT: max\npiece", run)), { model: MYTHOS, family: "mythos", effort: "max", askedEffort: "max" });
+  assert.equal(sessionPlan("piece", { ...run, effort: "xhigh" }).effort, "xhigh");
+  const fable = sessionPlan("MODEL: fable\npiece", run);
+  assert.deepEqual(pick(fable), { model: MYTHOS, family: "mythos", effort: "high", askedEffort: null });
+  assert.match(fable.note, /MODEL: fable.*same model as Mythos.*runs on claude-mythos-5-2/);
+  assert.match(sessionPlan("MODEL: sonnet\npiece", run).note, /MODEL: sonnet is not a model the runner runs.*it runs on claude-mythos-5-2/);
+  // A run.json that holds no main model gets the CLI's id, never the bare word.
+  assert.equal(sessionPlan("piece", { mode: "mythos" }).model, MYTHOS);
+});
+test("sessionPlan in fable mode: MODEL: mythos stays on Fable and says why", () => {
+  const p = sessionPlan("MODEL: mythos\npiece", { mode: "fable", model: "fable", opusModel: "opus", effort: "high" });
+  assert.deepEqual(pick(p), { model: "fable", family: "fable", effort: "high", askedEffort: null });
+  assert.match(p.note, /MODEL: mythos.*same model as Fable.*runs on fable/);
+});
+test("resolveMode: a Mythos model means mode mythos; each premium mode refuses the other's model by name", () => {
+  assert.deepEqual(resolveMode({ model: MYTHOS }), { mode: "mythos", model: MYTHOS, opusModel: "opus" });
+  assert.deepEqual(resolveMode({ mode: "mythos" }), { mode: "mythos", model: MYTHOS, opusModel: "opus" });
+  // The bare word is no model the CLI knows: it becomes the id.
+  assert.deepEqual(resolveMode({ model: "mythos" }), { mode: "mythos", model: MYTHOS, opusModel: "opus" });
+  assert.deepEqual(resolveMode({ mode: "mythos", model: "Mythos" }), { mode: "mythos", model: MYTHOS, opusModel: "opus" });
+  assert.deepEqual(resolveMode({ mode: "mythos", model: "claude-opus-5-5" }), { mode: "mythos", model: MYTHOS, opusModel: "claude-opus-5-5" });
+  assert.match(resolveMode({ mode: "opus", model: MYTHOS }).error, /mode "opus" cannot run on the Mythos model "claude-mythos-5-2"; use mode "mythos"/);
+  assert.match(resolveMode({ mode: "fable", model: MYTHOS }).error, /mode "fable" cannot use the Mythos model "claude-mythos-5-2"; use mode "mythos"/);
+  assert.match(resolveMode({ mode: "mythos", model: "claude-fable-5-2" }).error, /mode "mythos" cannot use the Fable model "claude-fable-5-2"; use mode "fable"/);
+  assert.match(resolveMode({ mode: "mythos", model: "sonnet" }).error, /mode "mythos" cannot use the model "sonnet"; it takes a Mythos model \(the main\) or an Opus model \(the stand-in\)/);
+  // What was there before stays.
+  assert.match(resolveMode({ mode: "opus", model: "fable" }).error, /use mode "fable"/);
+  // A mode the runner does not know is refused, never made into a model.
+  assert.deepEqual(resolveMode({ mode: "bogus" }), { error: 'mode "bogus" is not one of opus, fable, mythos' });
+  assert.deepEqual(resolveMode({ mode: "Mythos", model: MYTHOS }), { error: 'mode "Mythos" is not one of opus, fable, mythos' });
+});
+test("nightModelSettings levels Mythos keys and the exact ids the run starts sessions with", () => {
+  const lower = [{ modelSettings: { [MYTHOS]: { effortLevel: "low" } } }];
+  const out = nightModelSettings({}, lower, { opus: "xhigh", fable: "high", mythos: "high" }, ["claude-opus-5-5", "claude-opus-5-5"]);
+  assert.equal(out[MYTHOS].effortLevel, "high");
+  assert.equal(out["claude-opus-5-5"].effortLevel, "xhigh");
+  assert.equal(nightModelSettings({}, [], { mythos: "max" }, [MYTHOS])[MYTHOS].effortLevel, "xhigh");
+  assert.equal(nightModelSettings({}, [], {}, [MYTHOS])[MYTHOS].effortLevel, "high");
+  // An id of no family the night levels is left alone.
+  assert.equal(nightModelSettings({}, [], {}, ["other-model"])["other-model"], undefined);
+});
+test("runModelIds: the main model and the stand-in, and in opus mode what a MODEL line starts", () => {
+  assert.deepEqual(runModelIds({ mode: "opus", model: "claude-opus-5-5", opusModel: "claude-opus-5-5" }), ["claude-opus-5-5", "fable", MYTHOS]);
+  assert.deepEqual(runModelIds({ mode: "mythos", model: MYTHOS, opusModel: "opus" }), [MYTHOS, "opus"]);
+  assert.deepEqual(runModelIds({ mode: "fable", model: "fable", opusModel: "claude-opus-5-5" }), ["fable", "claude-opus-5-5"]);
+  // A run.json from before modes is an opus run.
+  assert.deepEqual(runModelIds({ model: "opus" }), ["opus", "fable", MYTHOS]);
+});
+test("fableGate refuses a family this chain found unavailable, before anything else, and only that family", () => {
+  const now = Date.parse("2026-11-18T22:00:00Z");
+  assert.deepEqual(fableGate({ unavailable: ["mythos"], ratio: 0.1 }, { now, family: "mythos" }), { ok: false, why: "unavailable", family: "mythos" });
+  assert.deepEqual(fableGate({ unavailable: ["mythos"] }, { now, family: "fable" }), { ok: true, ratio: null });
+  assert.deepEqual(fableGate({ unavailable: ["mythos"] }, { now }), { ok: true, ratio: null });
+  // One allowance: the count and the share serve both names.
+  assert.equal(fableGate({ sessions: 2 }, { now, family: "mythos" }).why, "count");
+  assert.equal(fableGate({ ratio: 0.7 }, { now, family: "mythos" }).why, "ceiling");
+});
+test("the header notes name the model in play", () => {
+  assert.equal(premiumNote("fable"), FABLE_NOTE);
+  assert.match(FABLE_NOTE, /^This session runs on Fable, only for this piece/);
+  const m = premiumNote("mythos");
+  assert.match(m, /^This session runs on Mythos, only for this piece/);
+  assert.match(m, /Mythos's weekly allowance/);
+  assert.match(m, /keeps MODEL: mythos/);
+  assert.doesNotMatch(m, /Fable|MODEL: fable/);
+  const f = fallbackNote("its allowance is at 65%, at or over the 60% ceiling", { family: "mythos" });
+  assert.match(f, /^This run's main model is Mythos, but/); assert.match(f, /goes back to Mythos when it can/);
+  assert.doesNotMatch(f, /Fable|\bmax\b/);
+  assert.equal(fallbackNote("x", { family: "fable" }), fallbackNote("x"));
+  assert.equal(deniedNote("fable"), "The prompt asked for MODEL: fable, but Fable's weekly allowance does not cover it tonight; this piece runs on Opus at max.");
+  assert.equal(deniedNote("mythos", "ceiling"), "The prompt asked for MODEL: mythos, but Mythos's weekly allowance does not cover it tonight; this piece runs on Opus at max.");
+  assert.match(deniedNote("mythos", "unavailable"), /^The prompt asked for MODEL: mythos, but this account cannot run Mythos .*; this piece runs on Opus at max\.$/);
 });

@@ -665,7 +665,7 @@ test("start works out the mode from --mode, the config and the model, and names 
   assert.doesNotMatch(bad.stderr, /launch refused/);
   const both = runOf(["--mode", "both"]);
   assert.equal(both.status, 1);
-  assert.match(both.stderr, /--mode must be one of opus, fable/);
+  assert.match(both.stderr, /--mode must be one of opus, fable, mythos \(got both\)/);
 });
 
 test("a runner in a visible console moves to a hidden one, and puts back the pointer its old parent marks finished", async () => {

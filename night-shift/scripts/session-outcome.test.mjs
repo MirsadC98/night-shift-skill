@@ -193,6 +193,33 @@ test("a rate-limit event that is not rejected clears the rejected one a later li
   assert.deepEqual([cleared.limited, cleared.limitInfo, cleared.resetAt], [true, null, null]);
 });
 
+// Mythos, measured 2026-11-18 with claude 2.1.327 (the two probe streams, cut to what is read here).
+test("a session the CLI refused its model (--model mythos: a 404, no turn on any model) is modelUnavailable and fatal", () => {
+  const o = sessionOutcome(fixture("session-mythos-word-2026-11-18.jsonl"), "", 1);
+  assert.deepEqual([o.modelUnavailable, o.fatal, o.transient, o.limited, o.fableOut], [true, true, false, false, false]);
+  assert.deepEqual([o.model, o.mainModels, o.apiErrorStatus], ["mythos", [], 404]);
+  assert.match(o.errorText, /^There's an issue with the selected model \(mythos\)/);
+  assert.equal(o.sessionId, "00000000-0000-4000-8000-000000000007");
+});
+test("a Mythos session by its id runs on Mythos and reports Fable's window", () => {
+  const o = sessionOutcome(fixture("session-mythos-id-2026-11-18.jsonl"), "", 0);
+  assert.deepEqual([o.modelUnavailable, o.fatal, o.transient, o.limited, o.fableOut], [false, false, false, false, false]);
+  assert.deepEqual([o.model, o.mainModels], ["claude-mythos-5-2", ["claude-mythos-5-2"]]);
+  assert.equal(o.windows.last.seven_day_overage_included.utilization, 0.59);
+  assert.equal(windowSpan(o.windows), "5h 13%→13% · 7d 73%→73% · fable 59%→59%");
+  assert.equal(o.summary, "success, 1 turns, $1.24");
+});
+test("a 404 after a turn on a model, a subagent's too, is no unavailable model", () => {
+  const notFound = result({ is_error: true, api_error_status: 404, num_turns: 2, result: "API Error: 404 not found" });
+  const main = sessionOutcome([turn("claude-opus-5-5"), notFound].join("\n"));
+  assert.deepEqual([main.modelUnavailable, main.fatal], [false, true]);
+  assert.equal(sessionOutcome([turn("claude-sonnet-5-5", "toolu_1"), notFound].join("\n")).modelUnavailable, false);
+  assert.equal(sessionOutcome([turn("<synthetic>"), notFound].join("\n")).modelUnavailable, true);
+  // Other statuses, and a session that finished, are not it.
+  assert.equal(sessionOutcome(result({ is_error: true, api_error_status: 403, num_turns: 1 })).modelUnavailable, false);
+  assert.equal(sessionOutcome(result({ is_error: false, api_error_status: 404 })).modelUnavailable, false);
+});
+
 test("with several rejected windows and no reset of its own, the smallest window's reset is used", () => {
   // Breaks if the fallback takes the largest, or the first, of the rejected windows' resets.
   const event = JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "rejected", unifiedWindows: {

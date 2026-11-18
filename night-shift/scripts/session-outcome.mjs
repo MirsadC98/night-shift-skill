@@ -19,6 +19,8 @@
 //   Fable requires usage credits", an informational system line), unless
 //   CLAUDE_CODE_NO_MODEL_FALLBACK is set, which ends the turn as model_substitution_disabled;
 //   consent_unanswered and no_allowed_fallback are the same refusal by other paths.
+// Mythos (claude 2.1.327, measured 2026-11-18) draws on the same allowance: its calls carry the same
+// window, and its refusal is taken to be Fable's (the CLI's code lists the two together; no sample).
 
 const FABLE_REFUSALS = new Set(["model_requires_usage_credits", "model_substitution_disabled", "consent_unanswered", "no_allowed_fallback"]);
 const FABLE_WINDOW = "seven_day_overage_included";
@@ -31,7 +33,7 @@ export function sessionOutcome(stream, errText = "", code = null, { timedOut = f
   // A resumed session appends to the same stream: a rejected event belongs to
   // the result that follows it, not to a later part of the conversation.
   let res = null, cost = 0, pending = null, rejected = null, lastRejected = null, sessionId = null, model = null, switchedTo = null;
-  let first = null, last = null;
+  let first = null, last = null, modelTurn = false;
   const mainModels = new Set();
   for (const line of String(stream).trim().split("\n")) {
     let j;
@@ -48,7 +50,10 @@ export function sessionOutcome(stream, errText = "", code = null, { timedOut = f
       if (w) { first ||= w; last = w; }
     } else if (j.type === "system" && j.subtype === "init") model = j.model || model;
     else if (j.type === "system" && /^Switched to /.test(String(j.content ?? ""))) switchedTo = /^Switched to (.+?)(?:,| for this session| ·)/.exec(j.content)?.[1] || "another model";
-    else if (j.type === "assistant" && !j.parent_tool_use_id && j.message?.model && j.message.model !== "<synthetic>") mainModels.add(j.message.model);
+    else if (j.type === "assistant" && j.message?.model && j.message.model !== "<synthetic>") {
+      modelTurn = true;
+      if (!j.parent_tool_use_id) mainModels.add(j.message.model);
+    }
   }
   if (!res) rejected = pending;
   const errTail = String(errText).slice(-2000), resText = res?.result ?? "";
@@ -62,6 +67,11 @@ export function sessionOutcome(stream, errText = "", code = null, { timedOut = f
   const fableOut = cut && (FABLE_REFUSALS.has(res?.api_error) || info?.rateLimitType === FABLE_WINDOW);
   const fableEpoch = (info?.rateLimitType === FABLE_WINDOW && info.resetsAt) || last?.[FABLE_WINDOW]?.resetsAt || null;
   const fatal = cut && !limited && !fableOut && ([400, 401, 403, 404].includes(res?.api_error_status) || /^\s*API Error: (?:400|401|403|404)\b|Please run \/login/.test(resText));
+  // The account cannot run the model it was started on: refused as not found before any turn on any
+  // model (`--model mythos` on 2026-11-18: no such alias; an account Mythos is not open to is taken to
+  // be refused the same way). Read from the fields, not the CLI's wording. Always fatal too: the runner
+  // decides whether the chain ends or the piece goes on on another model.
+  const modelUnavailable = cut && res?.api_error_status === 404 && !modelTurn;
   const transient = !timedOut && cut && !limited && !fableOut && !fatal && (!res || res.api_error != null || res.api_error_status != null || /^\s*API Error\b/.test(resText));
   const lastErrLine = errTail.split("\n").map((l) => l.trim()).filter(Boolean).pop();
   // A result with no text (is_error and nothing said) still names its error fields, else says there was none.
@@ -83,6 +93,7 @@ export function sessionOutcome(stream, errText = "", code = null, { timedOut = f
     apiErrorStatus: res?.api_error_status ?? null,
     fableOut,
     fableResetAt: fableEpoch ? fableEpoch * 1000 + 60_000 : null,
+    modelUnavailable,
     // The model the session started on, the ones its own turns ran on, and the one the CLI moved
     // it to when Fable's allowance ran out (null when it did not).
     model,

@@ -60,7 +60,8 @@ const under = (p, root) => root && (p === root || p.startsWith(root + "/"));
 
 const isStr = (v) => typeof v === "string";
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
-export const MODES = ["opus", "fable"];
+// The run's main model: Opus, or Fable or Mythos, which are one model under two names (effort.mjs, resolveMode).
+export const MODES = ["opus", "fable", "mythos"];
 export const LANGS = ["en", "tr"];
 // Each check returns null when the value is fine, else the text that follows the key's name.
 // `deny` is checked rule by rule in denyErrors.

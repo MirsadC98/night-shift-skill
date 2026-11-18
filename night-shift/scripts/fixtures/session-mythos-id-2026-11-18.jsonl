@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000008","model":"claude-mythos-5-2"}
+{"type":"assistant","session_id":"00000000-0000-4000-8000-000000000008","parent_tool_use_id":null,"message":{"model":"claude-mythos-5-2"}}
+{"type":"rate_limit_event","session_id":"00000000-0000-4000-8000-000000000008","rate_limit_info":{"status":"allowed","resetsAt":1795042800,"rateLimitType":"five_hour","unifiedWindows":{"five_hour":{"utilization":0.13,"resetsAt":1795042800,"status":"allowed"},"seven_day":{"utilization":0.73,"resetsAt":1795086000,"status":"allowed"},"seven_day_overage_included":{"utilization":0.59,"resetsAt":1795086000,"status":"allowed"}}}}
+{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":1.241264,"session_id":"00000000-0000-4000-8000-000000000008","api_error_status":null,"result":"OK"}
