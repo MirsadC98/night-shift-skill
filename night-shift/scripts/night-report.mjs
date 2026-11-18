@@ -308,6 +308,9 @@ const PREMIUM_WHY = [[/used up until (\S+ \S+)/, (m, T, model) => T.note.fableUn
   [/(\d+) (?:Fable sessions|sessions? on its allowance) already ran/, (m, T, model) => T.note.fableCount(m[1], model)],
   [/^this account cannot run it\b/, (m, T, model) => T.note.cannotRunWhy(model)]];
 const whyNote = (why, T, model) => PREMIUM_WHY.map(([re, say]) => { const w = re.exec(why); return w && say(w, T, model); }).find(Boolean) || why;
+// A MODEL note's tail names the model its session ran on (logged after the gate since 2026-11-19): an Opus there,
+// in fable or mythos mode, is the stand-in the gate moved the session to.
+const onStandIn = (text) => /; it runs on \S*opus\S*$/i.test(text);
 function runnerNote(text, T, main = null) {
   let m;
   if ((m = /^session \d+: (\w+) is the main model, but (.*); it runs on Opus at (\w+)$/.exec(text))) return T.note.mainFell(whyNote(m[2], T, m[1]), m[3], m[1]);
@@ -316,8 +319,8 @@ function runnerNote(text, T, main = null) {
   if ((m = /^session \d+ was to run on (\w+), but (.*)$/.exec(text))) return T.note.fableNot(m[2], m[1]);
   if ((m = /^session \d+: this account cannot run (\w+) \(.*\); MODEL: (\w+) runs on Opus at max for the rest of this chain$/.exec(text))) return T.note.cannotRun(m[1], m[2]);
   if ((m = /^session \d+ wrote a next-prompt\.md of (\d+) KB/.exec(text))) return T.note.bigPrompt(m[1]);
-  if ((m = /^session \d+: MODEL: (\S+) is not a model/.exec(text))) return main ? T.note.badModelFable(m[1], familyName(main)) : T.note.badModel(m[1]);
-  if ((m = /^session \d+: MODEL: (\S+) is the same model as (\w+), this run's main model/.exec(text))) return T.note.sameModel(m[1], m[2]);
+  if ((m = /^session \d+: MODEL: (\S+) is not a model/.exec(text))) return main && !onStandIn(text) ? T.note.badModelFable(m[1], familyName(main)) : T.note.badModel(m[1]);
+  if ((m = /^session \d+: MODEL: (\S+) is the same model as (\w+), this run's main model/.exec(text))) return T.note.sameModel(m[1], m[2], onStandIn(text) ? familyName("opus") : m[2]);
   return null;
 }
 

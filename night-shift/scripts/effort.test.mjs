@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promptEffort, promptDirectives, sessionPlan, directiveLines, fableGate, nightModelSettings, familyOf, resolveMode, mainGate, fallbackNote,
-  MODELS, MAIN_EFFORT, cliModel, isPremium, modelName, runModelIds, premiumNote, deniedNote, FABLE_NOTE } from "./effort.mjs";
+  MODELS, MAIN_EFFORT, cliModel, isPremium, modelName, runModelIds, premiumNote, deniedNote, FABLE_NOTE, runsOn } from "./effort.mjs";
 
 test("promptEffort reads a first-line EFFORT line and keeps the rest of the prompt", () => {
   assert.deepEqual(promptEffort("EFFORT: max\n\nFix the drift."), { effort: "max", body: "Fix the drift." });
@@ -73,6 +73,8 @@ test("fableGate: out until the reset, the ceiling while the share is known, the 
   assert.equal(fableGate({ sessions: 2, ratio: 0.9, ratioResetsAt: now / 1000 - 60 }, { now }).why, "count");
   assert.deepEqual(fableGate({ outUntil: now + 1000, ratio: 0.1 }, { now }), { ok: false, why: "out", until: now + 1000 });
   assert.equal(fableGate({ outUntil: now - 1000 }, { now }).ok, true);
+  // A count of 0 (fableSessions: 0) refuses the first ask, before any session wrote a count: none ran.
+  assert.deepEqual(fableGate({}, { now, maxSessions: 0 }), { ok: false, why: "count", sessions: 0, maxSessions: 0 });
 });
 
 test("nightModelSettings levels every Opus, Fable, Sonnet and Haiku key, the lower files' too, and leaves the rest", () => {
@@ -184,6 +186,15 @@ test("sessionPlan in fable mode: MODEL: mythos stays on Fable and says why", () 
   const p = sessionPlan("MODEL: mythos\npiece", { mode: "fable", model: "fable", opusModel: "opus", effort: "high" });
   assert.deepEqual(pick(p), { model: "fable", family: "fable", effort: "high", askedEffort: null });
   assert.match(p.note, /MODEL: mythos.*same model as Fable.*runs on fable/);
+});
+test("runsOn: a note's tail names the model the session runs on after the gate", () => {
+  const run = { mode: "mythos", model: MYTHOS, opusModel: "claude-opus-5-5", effort: "high" };
+  assert.equal(runsOn(sessionPlan("MODEL: fable\npiece", run).note, "claude-opus-5-5"),
+    "MODEL: fable is the same model as Mythos, this run's main model; it runs on claude-opus-5-5");
+  assert.equal(runsOn(sessionPlan("MODEL: sonnet\npiece", run).note, "opus"),
+    "MODEL: sonnet is not a model the runner runs (opus, fable, mythos); it runs on opus");
+  assert.equal(runsOn(sessionPlan("MODEL: fable\npiece", run).note, MYTHOS), sessionPlan("MODEL: fable\npiece", run).note);
+  assert.equal(runsOn(null, "opus"), null);
 });
 test("resolveMode: a Mythos model means mode mythos; each premium mode refuses the other's model by name", () => {
   assert.deepEqual(resolveMode({ model: MYTHOS }), { mode: "mythos", model: MYTHOS, opusModel: "opus" });

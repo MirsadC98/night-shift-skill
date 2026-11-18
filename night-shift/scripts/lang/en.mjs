@@ -82,7 +82,8 @@ export default {
     bigPrompt: (kb) => `continuation prompt is ${kb} KB (over 30 KB; every call reads it again)`,
     badModel: (m) => `MODEL: ${m} not recognised, ran on Opus`,
     badModelFable: (m, model) => `MODEL: ${m} not recognised, ran on ${model}`,
-    sameModel: (asked, model) => `MODEL: ${asked} is ${model} under another name, ran on ${model}`,
+    // ran: the model the session ran on, Opus when the gate moved it to the stand-in.
+    sameModel: (asked, model, ran = model) => `MODEL: ${asked} is ${model} under another name, ran on ${ran}`,
   },
 
   // the full report (`show`, `status`, /report's source)

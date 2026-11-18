@@ -92,6 +92,9 @@ export function sessionPlan(text, run = {}) {
   const own = isPremium(family) ? (premiumMode && run.effort) || MAIN_EFFORT[family] : premiumMode ? MAIN_EFFORT.opus : run.effort || MAIN_EFFORT.opus;
   return { model, family, effort: d.effort || own, body: d.body, asked: d.model, askedEffort: d.effort, note };
 }
+// A note ends with the model its session runs on. The runner's gate may move the session to the stand-in after
+// sessionPlan wrote the note, so the runner logs it with the model it starts (night-chain.mjs).
+export const runsOn = (note, model) => note && note.replace(/; it runs on \S+$/, `; it runs on ${model}`);
 
 // The mode, the main model and the Opus that stands in for it, from the config's mode and model.
 // An unset mode follows the model (a Fable model means fable mode, a Mythos model mythos mode); in
@@ -150,7 +153,7 @@ export function fableGate(f = {}, { ceiling = 0.6, maxSessions = 2, now = Date.n
   const stop = shareStop(f, ceiling, now);
   if (stop) return stop;
   const known = knownShare(f, now);
-  if (!known && (f.sessions || 0) >= maxSessions) return { ok: false, why: "count", sessions: f.sessions, maxSessions };
+  if (!known && (f.sessions || 0) >= maxSessions) return { ok: false, why: "count", sessions: f.sessions || 0, maxSessions };
   return { ok: true, ratio: known ? f.ratio : null };
 }
 

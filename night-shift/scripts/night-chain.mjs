@@ -59,7 +59,7 @@ import { sessionOutcome, windowSpan } from "./session-outcome.mjs";
 import { ruleFiles, readRuleFile, rulesBlock } from "./rules.mjs";
 import { MAIN_MODEL, SUB_MODEL, MAIN_EFFORT, subEffortText, MAX_NOTE, nightModelSettings, sessionPlan, promptDirectives,
   directiveLines, fableGate, mainGate, fallbackNote, resolveMode, familyOf, isPremium, modelName, runModelIds, premiumNote,
-  deniedNote } from "./effort.mjs";
+  deniedNote, runsOn } from "./effort.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const SKILL_DIR = path.dirname(path.dirname(SELF)); // the folder that holds SKILL.md
@@ -543,7 +543,8 @@ async function runChain(opt) {
     }
     log(resume ? `session ${nn} resumes ${resume.sessionId} ${resume.why === "stopped" ? "where the last runner stopped" : resume.why === "error" ? "after the error" : "after the usage limit"}`
       : `session ${nn} starts: ${asked.body.split("\n")[0].slice(0, 120)}`);
-    if (asked.note && !resume) log(`session ${nn}: ${asked.note}`);
+    // After the gate: a session it moved to the stand-in must not read as run on the main model.
+    if (asked.note && !resume) log(`session ${nn}: ${runsOn(asked.note, plan.model)}`);
     if (plan.downgrade) log(premiumMode ? `session ${nn}: ${modelName(main)} is the main model, but ${plan.why}; it runs on Opus at ${plan.effort}`
       : `session ${nn} asked for ${modelName(plan.wanted)}, but ${plan.why}; it runs on Opus at max`);
     // night-report.mjs and cutOffSession read this line back.

@@ -752,6 +752,16 @@ test("Fable and Mythos share one allowance: the count, the share and a used-up a
   assert.match(card(out, "03"), /asked for Fable, ran on Opus at max \(Fable's share is used up until \S+ \S+\)/);
 });
 
+test("--fable-sessions 0: the count refuses the first ask, and the log and the card count 0 sessions", async () => {
+  const { state, log, seen, flag } = await fableRun("MODEL: mythos\nhard piece", { 1: { next: "STOP: done" } }, { fableSessions: 0 });
+  assert.equal(flag(seen(1), "--model"), "opus");
+  assert.equal(flag(seen(1), "--effort"), "max");
+  assert.match(log, /\(0 sessions while unknown\)\n/);
+  assert.match(log, /session 01 asked for Mythos, but 0 sessions on its allowance already ran in this chain while the allowance's share is unknown; it runs on Opus at max\n/);
+  const { sessionMessage } = await import("./night-report.mjs");
+  assert.match(sessionMessage(state, "01", process.pid).text, /asked for Mythos, ran on Opus at max \(the chain already ran 0 sessions on Mythos's allowance, the share is unknown\)/);
+});
+
 test("opus mode: a Mythos session's card and report name Mythos: its share, its level, and turns on another model", async () => {
   const resets = Math.floor(Date.now() / 1000) + 3 * 86_400;
   const { state, log } = await fableRun("MODEL: mythos\nhard piece", {
@@ -827,11 +837,41 @@ test("mythos mode: at the ceiling, and when the allowance is used up, the sessio
   assert.doesNotMatch(cut, /Fable|\bmax\b/);
 });
 
+test("mythos mode at the ceiling: a MODEL line's note names Opus, the model the session runs on, in the log and the card", async () => {
+  const resets = Math.floor(Date.now() / 1000) + 3 * 86_400;
+  const { state, log, seen, flag } = await fableRun("MODEL: fable\nfirst piece", { 1: { next: "MODEL: sonnet\nsecond piece" }, 2: { next: "STOP: done" } }, MM,
+    (st) => fs.writeFileSync(path.join(st, "fable.json"), JSON.stringify({ ratio: 0.65, ratioResetsAt: resets })));
+  for (const n of [1, 2]) assert.equal(flag(seen(n), "--model"), "opus", `session ${n}`);
+  assert.match(log, /session 01: MODEL: fable is the same model as Mythos, this run's main model; it runs on opus\n/);
+  assert.match(log, /session 02: MODEL: sonnet is not a model the runner runs \(opus, fable, mythos\); it runs on opus\n/);
+  assert.match(log, /session 02: Mythos is the main model, but its allowance is at 65%, at or over the 60% ceiling; it runs on Opus at xhigh\n/);
+  assert.doesNotMatch(log, /it runs on claude-mythos-5-2/);
+  const { sessionMessage } = await import("./night-report.mjs");
+  const one = sessionMessage(state, "01", process.pid).text, two = sessionMessage(state, "02", process.pid).text;
+  assert.match(one, /MODEL: fable is Mythos under another name, ran on Opus/);
+  assert.match(two, /MODEL: sonnet not recognised, ran on Opus/);
+  for (const card of [one, two]) assert.doesNotMatch(card, /ran on Mythos/);
+});
+
 test("a run.json from before modes with Mythos's id runs as mythos mode", async () => {
   const { seen, flag } = await fableRun("first piece", { 1: { next: "STOP: done" } }, { model: MYTHOS });
   assert.equal(flag(seen(1), "--model"), MYTHOS);
   assert.equal(seen(1).settings[MYTHOS].effortLevel, "high");
   assert.match(seen(1).input, /Mode: mythos\./);
+});
+
+// high is Mythos's own level, so only another level shows that the run's and the session's level reach its id.
+test("a level other than high reaches Mythos's id: mode mythos at --effort xhigh, and MODEL: mythos with EFFORT: xhigh", async () => {
+  const mm = await fableRun("first piece", { 1: { next: "MODEL: opus\nmechanical piece" }, 2: { next: "STOP: done" } }, { ...MM, effort: "xhigh" });
+  assert.equal(mm.flag(mm.seen(1), "--model"), MYTHOS);
+  assert.equal(mm.seen(1).settings[MYTHOS].effortLevel, "xhigh");
+  // On the stand-in only the run's level for its main model keeps the id at xhigh.
+  assert.equal(mm.flag(mm.seen(2), "--model"), "opus");
+  assert.equal(mm.seen(2).settings[MYTHOS].effortLevel, "xhigh", "the run's level for its main model");
+  const asked = await fableRun("MODEL: mythos\nEFFORT: xhigh\nhard piece", { 1: { next: "STOP: done" } });
+  assert.equal(asked.flag(asked.seen(1), "--model"), MYTHOS);
+  assert.equal(asked.seen(1).settings[MYTHOS].effortLevel, "xhigh", "the session's own level");
+  assert.match(asked.log, /session 01 runs Mythos \(claude-mythos-5-2\) at xhigh\n/);
 });
 
 test("opus mode: a Mythos session the account cannot run hands its piece to Opus at max, and later asks are refused at the gate", async () => {
