@@ -305,7 +305,8 @@ test("words in text a command only reads or prints are not commands", () => {
 });
 test("shell keywords and builtins before cd do not hide where a delete stands", () => {
   for (const c of [`if cd /c/Users/u; then rm -rf Documents; fi`, `{ cd /c/Users/u; rm -rf Documents; }`, `builtin cd /c/Users/u && rm -rf Documents`,
-    `cd "/c/Users/u/Desktop/My Game/.." && rm -rf Documents`])
+    // A quoted folder name with letters outside ASCII, as real Windows homes have (escaped: the file stays ASCII).
+    `cd "/c/Users/u/R\u00e9sum\u00e9s/My Game/.." && rm -rf Documents`])
     assert.ok(bash(c), c);
   assert.equal(bash(`if cd app; then rm -rf dist; fi`), null);
 });
@@ -933,5 +934,21 @@ test("a home whose .claude is a link: its protected files are protected under th
     assert.match(bash(`rm -f "${t}"/settings.*`, inTarget) ?? "", /Claude settings/);
     assert.match(bash("find . -name rules.md -delete", inTarget) ?? "", /find delete/);
     assert.equal(bash("find . -name notes.md -delete", inTarget), null);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+test("a linked home known only by an MSYS HOME (no USERPROFILE) still knows the link's target", () => {
+  const base = mkdtempSync(join(tempRoot(), "night-linked-home-"));
+  const target = join(base, "settings-folder"), home = join(base, "home");
+  mkdirSync(target);
+  mkdirSync(home);
+  symlinkSync(target, join(home, ".claude"), "junction");
+  const t = target.replace(/\\/g, "/");
+  // Git Bash's HOME: /c/Users/u for C:\Users\u.
+  const e = { ...env, HOME: home.replace(/\\/g, "/").replace(/^([A-Za-z]):/, (_, d) => `/${d.toLowerCase()}`) };
+  delete e.USERPROFILE;
+  try {
+    assert.match(bash(`echo x > "${t}/settings.json"`, e) ?? "", /Claude settings/);
+    assert.match(bash(`echo x > "${t}/night-shift/rules.md"`, e) ?? "", /night-shift settings/);
+    assert.equal(bash(`echo x > "${t}/notes.md"`, e), null);
   } finally { rmSync(base, { recursive: true, force: true }); }
 });

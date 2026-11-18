@@ -24,10 +24,13 @@ const RUNNER_FILES = /^(night-settings\.json|run\.json|launch\.cmd|resume\.json|
 // ~/.claude may be a link (a junction to a folder elsewhere): a shell write can then name the files the
 // guard protects there by the link's target, a spelling norm() cannot know (on 2026-11-18 `echo x >
 // <target>/settings.json` passed). Each spelling of the folder, the home one first.
+// The home as the file system resolves it: on Windows an MSYS drive (Git Bash's HOME, /c/Users/u) is a drive path.
+// Not norm(): it lowercases, and a case-sensitive file system resolves a path only as typed.
+const fsHome = (home) => (process.platform === "win32" ? String(home).replace(/^\/([a-zA-Z])(?=\/)/, "$1:") : String(home));
 function claudeSpellings(home) {
   const c = `${norm(home)}/.claude`;
   let real = "";
-  try { real = norm(realpathSync.native(join(home, ".claude"))); } catch { /* no such folder */ }
+  try { real = norm(realpathSync.native(join(fsHome(home), ".claude"))); } catch { /* no such folder */ }
   return real && real !== c ? [c, real] : [c];
 }
 // p, and p under each other spelling of ~/.claude when it lies under one of them.
@@ -1275,7 +1278,10 @@ function linkedCases(env, bash, write) {
     symlinkSync(join(base, "folder"), join(base, "home", ".claude"), "junction");
     const lt = join(base, "folder").replace(/\\/g, "/");
     const linked = { ...env, USERPROFILE: join(base, "home") }, linkedRepo = { ...linked, NIGHT_SHIFT_REPO: lt };
+    // The home known only by Git Bash's HOME (/c/Users/u), with no USERPROFILE.
+    const msys = { ...env, USERPROFILE: undefined, HOME: join(base, "home").replace(/\\/g, "/").replace(/^([A-Za-z]):/, (_, d) => `/${d.toLowerCase()}`) };
     return [
+      [bash(`echo x > "${lt}/settings.json"`, msys), true],
       [bash(`echo x > "${lt}/settings.json"`, linked), true], [bash(`echo x >> "${lt}/CLAUDE.md"`, linked), true],
       [bash(`cp a.mjs "${lt}/skills/night-shift/scripts/guard.mjs"`, linked), true], [bash(`echo x > "${lt}/notes.md"`, linked), false],
       [write(`${lt}/night-shift/rules.md`, linkedRepo), true], [write(`${lt}/notes.md`, linkedRepo), false],
@@ -1318,6 +1324,7 @@ function selfTest() {
     [write("C:/temp/x-night/night-settings.json"), true], [write("C:/temp/x-night/run.json"), true],
     [write("C:/temp/../Users/u/.claude/skills/night-shift/scripts/guard.mjs"), true], [write("C:/work/repo/.claude/settings.json."), true],
     [bash("cd /c/Users/u && rm -rf Documents"), true], [bash("cd app && rm -rf dist"), false],
+    [bash(`cd "/c/Users/u/R\u00e9sum\u00e9s/My Game/.." && rm -rf Documents`), true],
     [bash("Remove-Item -r -fo C:\\Users\\u\\Documents"), true], [bash("Remove-Item -Recurse ~\\Documents"), true],
     [bash("rm -f /c/Users/u/Documents/a.docx"), true], [bash("rm -f src/old.ts"), false],
     [bash(`git push "--force" origin main`), true], [bash("git push -uf origin main"), true], [bash("git push -u origin night"), false],
