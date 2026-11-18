@@ -40,7 +40,7 @@ node ~/.claude/skills/night-shift/scripts/night-chain.mjs stop   --repo <dir> [-
 node ~/.claude/skills/night-shift/scripts/night-chain.mjs reload --repo <dir>
 ```
 
-`start` also takes `--until HH:MM`, `--max-sessions <n>`, `--model <m>`, `--effort <level>`, `--fable-ceiling <share>`, `--fable-sessions <n>`, `--mode opus|fable`, `--lang en|tr`, `--max-wait-hours <h>` (the longest wait for a usage limit or an outage, default 6; a value that is not a positive number stops `start`), `--state <dir>` (continue in an earlier run's folder) and `--window` (a visible console; closing it stops the chain). `start` without a prompt goes on from a session a limit or an error cut off, kept in `<state>/resume.json`.
+`start` also takes `--until HH:MM`, `--max-sessions <n>`, `--model <m>`, `--effort <level>`, `--fable-ceiling <share>`, `--fable-sessions <n>`, `--mode opus|fable`, `--lang <code>`, `--max-wait-hours <h>` (the longest wait for a usage limit or an outage, default 6; a value that is not a positive number stops `start`), `--state <dir>` (continue in an earlier run's folder) and `--window` (a visible console; closing it stops the chain). `start` without a prompt goes on from a session a limit or an error cut off, kept in `<state>/resume.json`.
 
 While a chain runs, write new work or changed rules into `<state>/inbox.md`. The next session reads that file first.
 
@@ -71,7 +71,7 @@ Put a `.claude/night-shift.json` in the target repository. Every key is optional
 - `report`: the night report. The default is `NIGHT_RUNS.md`.
 - `lessons`: the notes file where sessions keep lessons that outlast one session.
 - `mode`: `"opus"` (the default) or `"fable"` (see "Modes").
-- `lang`: `"en"` (the default) or `"tr"` (see "Language").
+- `lang`: the language of what you read; `"en"` is the default (see "Language").
 - `model`, `effort`: what a session runs on when its prompt names neither. What `model` means depends on the mode (see "Modes").
 - `fableCeiling`, `fableSessions`: in mode `opus`, the share of Fable's weekly allowance above which a `MODEL: fable` prompt runs on Opus at `max` instead, and how many Fable sessions a chain may run while that share is unknown. In mode `fable`, `fableCeiling` is the share at or over which sessions run on Opus at `xhigh` until the reset, and `fableSessions` does not apply.
 - `maxWaitHours`: the longest the chain waits for a usage limit to reset or for an outage to pass (see "When a session fails"). The default is 6.
@@ -107,7 +107,7 @@ Each file is at most 8 KB (UTF-8 bytes) and is read again at every session start
 
 ### Language
 
-`lang` (`"en"` by default, or `"tr"`; `--lang` on `start`) sets the language of what you read: the Telegram cards, the `/status` and `/report` answers, the `status` and `wait` output, dates and units. `/durum` and `/rapor` still work. Everything the model reads (prompts, headers, notes) stays English.
+`lang` (`--lang` on `start`) sets the language of what you read: the Telegram cards, the `/status` and `/report` answers, the `status` and `wait` output, dates and units. It names one of the language tables in `night-shift/scripts/lang/`; `en` is the default. To add a language, copy `en.mjs`, translate its strings, and list the new table in `lang/index.mjs` and in `LANGS` in `config.mjs`. Everything the model reads (prompts, headers, notes) stays English.
 
 ### Global settings
 
