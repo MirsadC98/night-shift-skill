@@ -6,7 +6,9 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { readProjectConfig, readGlobalConfig, mergedConfig, globalConfigFile, CONFIG_KEYS, stateDirProblem, tempRoot, norm, isMain } from "./config.mjs";
+import { readProjectConfig, readGlobalConfig, mergedConfig, globalConfigFile, CONFIG_KEYS, stateDirProblem, tempRoot, norm, isMain, isLangCode } from "./config.mjs";
+
+const LANG_ERR = "must be a language code in lowercase, such as en or pt-br (a table at ~/.claude/night-shift/lang/<code>.mjs)";
 
 const repoWith = (text) => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "night-config-test-"));
@@ -68,11 +70,11 @@ test("a misspelt key and a wrong type are named", () => {
 });
 
 test("a state folder may not be a drive, the home folder, the repository, temp itself, .git or ~/.claude", () => {
-  const where = { home: "C:\\Users\\u", repo: "C:/Users/u/Masaüstü/My Game", temp: "C:/Users/u/AppData/Local/Temp" };
-  for (const bad of ["C:/", "C:\\temp", "D:/x", "C:/Users/u", "C:/Users", "C:/Users/u/Masaüstü/My Game", "C:/Users/u/Masaüstü",
-    "C:/Users/u/Masaüstü/My Game/.git/night", "C:/Users/u/.claude/night", "C:/Users/u/AppData/Local/Temp"])
+  const where = { home: "C:\\Users\\u", repo: "C:/Users/u/Desktop/My Game", temp: "C:/Users/u/AppData/Local/Temp" };
+  for (const bad of ["C:/", "C:\\temp", "D:/x", "C:/Users/u", "C:/Users", "C:/Users/u/Desktop/My Game", "C:/Users/u/Desktop",
+    "C:/Users/u/Desktop/My Game/.git/night", "C:/Users/u/.claude/night", "C:/Users/u/AppData/Local/Temp"])
     assert.ok(stateDirProblem(bad, where), bad);
-  for (const good of ["C:/temp/my-game-night-20261116", "C:/Users/u/AppData/Local/Temp/night-shift-My Game-20261116", "C:/Users/u/Masaüstü/My Game/.night"])
+  for (const good of ["C:/temp/my-game-night-20261116", "C:/Users/u/AppData/Local/Temp/night-shift-My Game-20261116", "C:/Users/u/Desktop/My Game/.night"])
     assert.equal(stateDirProblem(good, where), null, good);
 });
 
@@ -106,20 +108,20 @@ test("tempRoot is the temp folder in long form: a short-form TEMP resolves, one 
 });
 
 test("the global file holds only run-wide keys", () => {
-  const home = tmpHome({ lang: "tr", stateDir: "C:/x/y", nope: 1 });
+  const home = tmpHome({ lang: "xx", stateDir: "C:/x/y", nope: 1 });
   const { config, errors } = readGlobalConfig(home);
-  assert.deepEqual(config, { lang: "tr" });
+  assert.deepEqual(config, { lang: "xx" });
   assert.deepEqual(errors, ['"stateDir" belongs in a project\x27s .claude/night-shift.json', 'unknown key "nope"']);
 });
 test("a missing global file is no error", () => assert.deepEqual(readGlobalConfig(emptyHome()), { config: {}, errors: [] }));
 test("the project file wins over the global one, key by key", () => {
-  const home = tmpHome({ lang: "tr", effort: "high" }), repo = repoWith({ effort: "max" });
-  assert.deepEqual(mergedConfig(repo, home).config, { lang: "tr", effort: "max" });
+  const home = tmpHome({ lang: "xx", effort: "high" }), repo = repoWith({ effort: "max" });
+  assert.deepEqual(mergedConfig(repo, home).config, { lang: "xx", effort: "max" });
 });
 test("mergedConfig names the file each error is in", () => {
   const home = tmpHome({ lang: "TR" }), repo = repoWith({ mode: "sonnet" });
   assert.deepEqual(mergedConfig(repo, home).errors, [
-    `${globalConfigFile(home)}: "lang" must be one of en, tr`,
+    `${globalConfigFile(home)}: "lang" ${LANG_ERR}`,
     `${path.join(repo, ".claude", "night-shift.json")}: "mode" must be one of opus, fable, mythos`]);
 });
 test("mode takes mythos next to opus and fable", () => {
@@ -128,13 +130,16 @@ test("mode takes mythos next to opus and fable", () => {
   assert.deepEqual(readGlobalConfig(tmpHome({ mode: "mythos" })), { config: { mode: "mythos" }, errors: [] });
 });
 test("mergedConfig keeps which file each value came from, the project winning", () => {
-  const home = tmpHome({ mode: "opus", lang: "tr" }), repo = repoWith({ model: "fable", lang: "en" });
+  const home = tmpHome({ mode: "opus", lang: "xx" }), repo = repoWith({ model: "fable", lang: "en" });
   assert.deepEqual(mergedConfig(repo, home).from, {
     mode: globalConfigFile(home), lang: path.join(repo, ".claude", "night-shift.json"), model: path.join(repo, ".claude", "night-shift.json") });
 });
-test("lang takes only its listed values", () => {
-  for (const v of ["TR", "tr-TR", "Türkçe", "", 5]) assert.equal(CONFIG_KEYS.lang(v), "must be one of en, tr");
-  for (const v of ["en", "tr"]) assert.equal(CONFIG_KEYS.lang(v), null);
+// Only the code's shape: whether its table exists is start's to check (this module also runs inside the guard).
+test("lang takes a language code of the right shape, with or without a table", () => {
+  for (const v of ["XX", "xx-XX", "Deutsch", "x", "", "../xx", "xx/yy", "xx.mjs", 5, null]) assert.equal(CONFIG_KEYS.lang(v), LANG_ERR, String(v));
+  for (const v of ["en", "xx", "pt-br", "zh-hant", "fil"]) assert.equal(CONFIG_KEYS.lang(v), null, v);
+  assert.equal(isLangCode("xx"), true);
+  assert.equal(isLangCode("XX"), false);
 });
 
 // ---------------------------------------------------------------- a linked ~/.claude (2026-11-18)

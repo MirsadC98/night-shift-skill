@@ -305,7 +305,7 @@ test("words in text a command only reads or prints are not commands", () => {
 });
 test("shell keywords and builtins before cd do not hide where a delete stands", () => {
   for (const c of [`if cd /c/Users/u; then rm -rf Documents; fi`, `{ cd /c/Users/u; rm -rf Documents; }`, `builtin cd /c/Users/u && rm -rf Documents`,
-    `cd "/c/Users/u/Masaüstü/My Game/.." && rm -rf Documents`])
+    `cd "/c/Users/u/Desktop/My Game/.." && rm -rf Documents`])
     assert.ok(bash(c), c);
   assert.equal(bash(`if cd app; then rm -rf dist; fi`), null);
 });

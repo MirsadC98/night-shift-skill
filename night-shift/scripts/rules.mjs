@@ -18,7 +18,7 @@ export const ruleFiles = (repo, home = os.homedir()) => ({
 });
 
 // What an editor may have saved: UTF-8 with or without a BOM, or Notepad's "Unicode" (UTF-16). Anything
-// else (an ANSI file with Turkish letters) would reach the header as replacement characters, so it is refused.
+// else (an ANSI file with letters outside ASCII) would reach the header as replacement characters, so it is refused.
 function decode(bytes) {
   if (bytes[0] === 0xFF && bytes[1] === 0xFE) return bytes.subarray(2).toString("utf16le");
   if (bytes[0] === 0xFE && bytes[1] === 0xFF) return Buffer.from(bytes.subarray(2)).swap16().toString("utf16le");

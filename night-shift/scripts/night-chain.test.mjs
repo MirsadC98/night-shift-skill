@@ -11,6 +11,18 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const CHAIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "night-chain.mjs");
+// A made-up language table, "xx", copied into a throwaway home as the user's own (lang/index.mjs).
+const XX = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "lang-xx.mjs");
+const putTable = (home, code = "xx", text) => {
+  const file = path.join(home, ".claude", "night-shift", "lang", `${code}.mjs`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (text === undefined) fs.copyFileSync(XX, file); else fs.writeFileSync(file, text);
+  return file;
+};
+const setLang = (state, lang) => {
+  const f = path.join(state, "run.json");
+  fs.writeFileSync(f, JSON.stringify({ ...JSON.parse(fs.readFileSync(f, "utf8")), lang }));
+};
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
 // Session 1 waits for the watcher, asks for a reload with the real command, and hands over;
@@ -31,7 +43,7 @@ if (n === 1) {
     if (w && w !== first) { fs.writeFileSync(path.join(st, "watcher-2.txt"), w); break; }
     await new Promise((r) => setTimeout(r, 100));
   }
-  fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done\\n\\nKullanıcıyı bekleyenler:\\n\\n1. **Push.** 12 commit yerel\\n2. Fiziksel kabul");
+  fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done\\n\\nWaiting for the user:\\n\\n1. **Push.** 12 local commits\\n2. Physical acceptance");
 }
 console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-" + n, result: "ok" }));
 `;
@@ -46,7 +58,7 @@ function setup() {
   fs.writeFileSync(fake, FAKE);
   fs.writeFileSync(path.join(state, "next-prompt.md"), "first");
   fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ repo, state, until: null, deadline: null, maxSessions: 4,
-    sessionHours: 1, model: null, effort: "xhigh", lang: "tr", claude: fake, report: "NIGHT_RUNS.md", path: process.env.PATH, startedAt: "test" }));
+    sessionHours: 1, model: null, effort: "xhigh", lang: "en", claude: fake, report: "NIGHT_RUNS.md", path: process.env.PATH, startedAt: "test" }));
   const env = { ...process.env, USERPROFILE: home, HOME: home, TEST_CHAIN: CHAIN, NIGHT_SHIFT_LAUNCH: "direct" };
   delete env.NIGHT_SHIFT_RELOADED;
   return { root, home, repo, state, env };
@@ -150,7 +162,9 @@ test("cutOffSession: only a session that started (or resumed) and never ended co
 
 test("a resumed session's header is English throughout, for every reason it resumes", async () => {
   for (const why of ["stopped", "limit", "error"]) {
-    const { state, env, root } = setup();
+    const { state, env, root, home } = setup();
+    putTable(home);
+    setLang(state, "xx");
     const fake = path.join(root, "fake-resume-header.mjs");
     fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path";
 const st = process.env.NIGHT_SHIFT_STATE; let input = "";
@@ -166,7 +180,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     assert.equal(code, 0, fs.readFileSync(path.join(state, "chain.log"), "utf8"));
     const { input } = JSON.parse(fs.readFileSync(path.join(state, "seen.json"), "utf8"));
     assert.match(input, /\(commit, night report, .*next-prompt\.md\)\./, why);
-    assert.doesNotMatch(input, /gece|vardiya/i, why);   // the run is in Turkish; what the model reads is not
+    assert.doesNotMatch(input, /xx·|Xxish/, why);   // the run is in the user's own language; what the model reads is not
   }
 });
 
@@ -439,8 +453,11 @@ async function fableRun(first, script, runPatch = {}, before = null) {
   return { state, log, seen, flag, fable };
 }
 
-test("a session's header opens with the marker and names the user's language and the skill folder", async () => {
-  const { root, state, env } = setup();
+// One headless session of a run in lang, its home prepared by prep; what the session read and chain.log.
+async function headerOf(lang, prep = () => {}) {
+  const { root, state, env, home } = setup();
+  prep(home);
+  setLang(state, lang);
   const fake = path.join(root, "fake-marker.mjs");
   fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path";
 const st = process.env.NIGHT_SHIFT_STATE; let input = "";
@@ -453,14 +470,32 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
   fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake, maxSessions: null }));
   fs.writeFileSync(path.join(state, "next-prompt.md"), "hard piece");
   const { code } = await runOnce(["--state", state, "--headless"], env, root);
-  assert.equal(code, 0, fs.readFileSync(path.join(state, "chain.log"), "utf8"));
-  const one = JSON.parse(fs.readFileSync(path.join(state, "seen-1.json"), "utf8"));
+  const log = fs.readFileSync(path.join(state, "chain.log"), "utf8");
+  assert.equal(code, 0, log);
+  return { ...JSON.parse(fs.readFileSync(path.join(state, "seen-1.json"), "utf8")), log };
+}
+
+test("a session's header opens with the marker and names the user's language and the skill folder", async () => {
+  const one = await headerOf("xx", (home) => putTable(home));
   const skillDir = path.dirname(path.dirname(CHAIN));
   assert.match(one.input, /^Night shift \(night-shift\), session 1, \d{4}-\d\d-\d\d /);
-  assert.match(one.input, /The user reads Turkish: /);
+  assert.match(one.input, /The user reads Xxish: /, "the language's name comes from the user's table");
   assert.ok(one.input.includes(`Skill folder: ${skillDir}.`));
   assert.equal(one.skill, skillDir);
   assert.ok(one.input.endsWith("\n---\nhard piece\n"));
+  assert.doesNotMatch(one.log, /language table/);
+  assert.match((await headerOf("en")).input, /The user reads English: /);
+});
+
+test("a runner whose language table is gone reads English and says so once in chain.log", async () => {
+  const gone = await headerOf("xx");
+  assert.match(gone.input, /The user reads English: /);
+  const lines = gone.log.split("\n").filter((l) => /language table/.test(l));
+  assert.equal(lines.length, 1, gone.log);
+  assert.match(lines[0], /^\[[^\]]+\] language table: no language table at .*lang[\\/]xx\.mjs; what the user reads is in English$/);
+  const broken = await headerOf("xx", (home) => putTable(home, "xx", "export default {,};\n"));
+  assert.match(broken.input, /The user reads English: /);
+  assert.match(broken.log, /language table: .*xx\.mjs does not load: .*; what the user reads is in English/);
 });
 
 test("a MODEL: fable prompt runs that session on Fable at high without the model fallback; the next one on Opus", async () => {
@@ -514,9 +549,9 @@ test("a Fable session its allowance cuts off goes on from its prompt on Opus at 
   assert.match(log, /session 03 asked for Fable, but its allowance is used up until \S+ \S+; it runs on Opus at max\n/);
   assert.match(log, /session 03 runs Opus at max\n/);
   const { sessionMessage } = await import("./night-report.mjs");
-  assert.match(sessionMessage(state, "01", process.pid).text, /Fable payı bittiği için kesildi/);
-  assert.match(sessionMessage(state, "03", process.pid).text, /Fable istedi, Opus max'te çalıştı \(Fable payı \S+ \S+'e kadar bitti\)/);
-  assert.doesNotMatch(sessionMessage(state, "03", process.pid).text, /olmalı/);
+  assert.match(sessionMessage(state, "01", process.pid).text, /cut off because Fable's share ran out/);
+  assert.match(sessionMessage(state, "03", process.pid).text, /asked for Fable, ran on Opus at max \(Fable's share is used up until \S+ \S+\)/);
+  assert.doesNotMatch(sessionMessage(state, "03", process.pid).text, /should be/);
 });
 
 test("over the Fable ceiling, or past the count while the share is unknown, a Fable request runs on Opus at max", async () => {
@@ -561,7 +596,7 @@ test("a retry keeps both MODEL and EFFORT; a resume goes on on the model it ran 
 });
 
 // Fable mode: Fable is every session's model, Opus at xhigh stands in only while Fable is out or over the ceiling.
-const FM = { mode: "fable", model: "fable", opusModel: "opus", effort: "high", lang: "tr" };
+const FM = { mode: "fable", model: "fable", opusModel: "opus", effort: "high", lang: "en" };
 
 test("fable mode: every session runs on Fable at high, past the count, with no only-this-piece note", async () => {
   const resets = Math.floor(Date.now() / 1000) + 3 * 86_400;
@@ -595,7 +630,7 @@ test("fable mode: at the ceiling the next session runs on Opus at xhigh and says
   const { sessionMessage } = await import("./night-report.mjs");
   const card = sessionMessage(state, "02", process.pid).text;
   assert.match(card, /xhigh/);
-  assert.doesNotMatch(card, /olmalı/);
+  assert.doesNotMatch(card, /should be/);
   assert.doesNotMatch(card, /max/);
 });
 
@@ -903,7 +938,7 @@ test("report: a job resumed after a restart shows its working time and the gap a
     said("2026-11-05T16:40:00", "c"), said("2026-11-05T18:53:00", "d"),
     JSON.stringify({ type: "result", subtype: "success", is_error: false, session_id: "cb61ff92-x" }),
   ].join("\n") + "\n");
-  assert.match(buildReport(state, { pid: 0 }).plain, /#35 11-01 19:26–11-05 18:53 · 4 sa 11 dk \(\+91 sa 16 dk ara\) · ✅/);
+  assert.match(buildReport(state, { pid: 0 }).plain, /#35 11-01 19:26–11-05 18:53 · 4 h 11 min \(\+91 h 16 min idle\) · ✅/);
 });
 
 // ---------------------------------------------------------------- wait
@@ -912,7 +947,7 @@ test("report: a job resumed after a restart shows its working time and the gap a
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const lit = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const startChain = (repo, state, env, cwd) =>
-  execFileSync(process.execPath, [CHAIN, "start", "--repo", repo, "--state", state, "--prompt", "first", "--lang", "tr"], { env, cwd, encoding: "utf8" });
+  execFileSync(process.execPath, [CHAIN, "start", "--repo", repo, "--state", state, "--prompt", "first"], { env, cwd, encoding: "utf8" });
 const waitFor = (repo, env, cwd) => {
   const proc = spawn(process.execPath, [CHAIN, "wait", "--repo", repo], { env, cwd, stdio: ["ignore", "pipe", "pipe"] });
   let out = "";
@@ -933,12 +968,13 @@ test("wait follows a reload to the next runner, then prints status's first lines
   assert.equal(code, 0, out);
   const runners = fs.readFileSync(path.join(state, "fake.log"), "utf8").trim().split("\n").map((l) => l.split(" ")[1]);
   assert.equal(runners.length, 2);
-  assert.match(out, new RegExp(`runner devretti: pid ${runners[0]} → ${runners[1]}`));
+  assert.match(out, new RegExp(`runner handed over: pid ${runners[0]} → ${runners[1]}`));
   assert.match(out, /^finished .*: STOP: done$/m);
   assert.match(out, new RegExp(`^state: ${lit(state)}$`, "m"));
-  assert.match(out, /Sorunlar\n✅ Sorun yok/);
-  assert.match(out, /Kullanıcıyı bekleyenler:\n1\. \*\*Push\.\*\* 12 commit yerel\n2\. Fiziksel kabul/);
-  assert.doesNotMatch(out, /zincir çöktü/);
+  assert.match(out, /Problems\n✅ No problems/);
+  // the STOP prompt's own heading gives way to wait's label
+  assert.match(out, /\nWaiting for the user:\n1\. \*\*Push\.\*\* 12 local commits\n2\. Physical acceptance/);
+  assert.doesNotMatch(out, /the chain crashed/);
   // A chain already over is answered at once; a state that is not the repo's last run is refused.
   assert.match(execFileSync(process.execPath, [CHAIN, "wait", "--repo", repo], { env: e, cwd: root, encoding: "utf8" }), /^finished .*: STOP: done$/m);
   assert.throws(() => execFileSync(process.execPath, [CHAIN, "wait", "--repo", repo, "--state", root], { env: e, cwd: root, stdio: "pipe" }),
@@ -985,7 +1021,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
   startChain(repo, state, e, root);
   const { code, out } = await waitFor(repo, e, root).done;
   assert.equal(code, 2, out);
-  assert.match(out, /^zincir çöktü: /m);
+  assert.match(out, /^the chain crashed: /m);
   assert.doesNotMatch(fs.readFileSync(path.join(state, "chain.log"), "utf8"), /chain ends: /);
   assert.match(out, /session 01 starts: first/, "the end of chain.log is shown");
   assert.match(out, new RegExp(`start --repo "${lit(repo)}" --state "${lit(state)}"`));
@@ -1018,23 +1054,23 @@ test("report and job card: the progress counts only this run's jobs, from the re
     "## 2026-11-10 · run 5 · session 6 (13:13–14:13) · D3a", "**Remaining:** 2 sessions", "**Next:** D3b.",
   ].join("\n"));
   // Live, from the real clock: one job left at the mean of 45 min, which late in the evening
-  // falls on the next day ("yarın ~00:15"; telegram-cards.test.mjs pins the label with a fixed clock).
-  assert.match(buildReport(state, { pid: process.pid }).plain, /Çalışıyor · iş 07\/4 · 2\/4 iş bitti · tahmini bitiş (?:yarın )?~\d\d:\d\d · /);
+  // falls on the next day ("tomorrow ~00:15"; telegram-cards.test.mjs pins the label with a fixed clock).
+  assert.match(buildReport(state, { pid: process.pid }).plain, /Running · job 07\/4 · 2\/4 jobs done · estimated end (?:tomorrow )?~\d\d:\d\d · /);
   // As at the job's end: two left at the mean of 45 min from 14:13.
-  assert.match(sessionMessage(state, "06", process.pid).text, /\n📊 2\/4 iş bitti · tahmini bitiş ~15:45\n/);
+  assert.match(sessionMessage(state, "06", process.pid).text, /\n📊 2\/4 jobs done · estimated end ~15:45\n/);
 });
 
-test("/rapor's message lists only this run's jobs, each under its report title", async () => {
+test("/report's message lists only this run's jobs, each under its report title", async () => {
   const { reportMessage } = await import("./night-report.mjs");
   const { repo, state } = setup();
   const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
   fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, startedAt: "2026-11-10 12:42:18" }));
   fs.writeFileSync(path.join(state, "chain.log"), [
-    "[2026-11-10 00:39:00] session 01 starts: Gece vardiyası (night-shift). Önce.",
+    "[2026-11-10 00:39:00] session 01 starts: Night shift (night-shift). First.",
     "[2026-11-10 03:51:00] session 01 ends: success, 9 turns, $1.00",
-    "[2026-11-10 12:42:18] session 05 starts: Gece vardiyası (night-shift). Önce.",
+    "[2026-11-10 12:42:18] session 05 starts: Night shift (night-shift). First.",
     "[2026-11-10 13:12:18] session 05 ends: success, 25 turns, $11.48",
-    "[2026-11-10 13:13:00] session 06 starts: Gece vardiyası (night-shift). Önce.",
+    "[2026-11-10 13:13:00] session 06 starts: Night shift (night-shift). First.",
   ].join("\n") + "\n");
   const ok = JSON.stringify({ type: "result", subtype: "success", is_error: false, session_id: "x", total_cost_usd: 11.48 });
   for (const nn of ["01", "05"]) fs.writeFileSync(path.join(state, `session-${nn}.jsonl`), `${ok}\n`);
@@ -1043,9 +1079,51 @@ test("/rapor's message lists only this run's jobs, each under its report title",
     "## 2026-11-10 · run 5 · session 5 (12:42–13:12) · D3 plan", "**Waits for you**", "- New: none.", "**Remaining:** 3 sessions",
   ].join("\n"));
   const { text } = reportMessage(state, process.pid);
-  assert.match(text, /\n✅ #05 D3 plan · 30 dk\n⏳ #06 sürüyor · /);
-  assert.match(text, /📊 1\/4 iş bitti · tahmini bitiş /);
-  assert.doesNotMatch(text, /#01|Gece vardiyası|Token|Commit/);
+  assert.match(text, /\n✅ #05 D3 plan · 30 min\n⏳ #06 running · /);
+  assert.match(text, /📊 1\/4 jobs done · estimated end /);
+  assert.doesNotMatch(text, /#01|night-shift\)|Token|Commit/);
+});
+
+test("a job's card leaves out night-report commits, by the English phrase and by the one of the run's own table", async () => {
+  const { sessionMessage } = await import("./night-report.mjs");
+  const { loadLang } = await import("./lang/index.mjs");
+  const { repo, state, home } = setup();
+  putTable(home);
+  setLang(state, "xx");
+  assert.equal((await loadLang("xx", home)).error, undefined);
+  fs.writeFileSync(path.join(state, "chain.log"), [
+    "[2026-11-10 12:00:00] chain starts in x, until the work is done, from session 1",
+    "[2026-11-10 12:00:00] session 01 starts: piece",
+    "[2026-11-10 13:00:00] session 01 ends: success, 2 turns, $1.00",
+  ].join("\n") + "\n");
+  fs.writeFileSync(path.join(state, "session-01.jsonl"), JSON.stringify({ type: "result", subtype: "success", is_error: false, session_id: "x" }) + "\n");
+  const commit = (subject, at) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", subject],
+    { cwd: repo, env: { ...process.env, GIT_AUTHOR_DATE: at, GIT_COMMITTER_DATE: at } });
+  commit("feat: the real work", "2026-11-10T12:30:00");
+  commit("docs: xx·report, session 1", "2026-11-10T12:40:00");
+  commit("docs: night report, session 1", "2026-11-10T12:50:00");
+  assert.match(sessionMessage(state, "01", process.pid).text, /^✅ <b>#01 · feat: the real work<\/b>/);
+});
+
+test("a STOP prompt's list loses a line that is only its heading, never an item that starts with the heading's words", async () => {
+  const { userWaits } = await import("./night-report.mjs");
+  const { loadLang } = await import("./lang/index.mjs");
+  const { state, home } = setup();
+  putTable(home);
+  setLang(state, "xx");
+  assert.equal((await loadLang("xx", home)).error, undefined);
+  const waits = (body) => { fs.writeFileSync(path.join(state, "next-prompt.md"), `STOP: done\n\n${body}`); return userWaits(state); };
+  for (const head of ["**Waits for you**", "## Waits for you:", "Waiting for the user:", "xx·waits:", "**xx·waits**"])
+    assert.deepEqual(waits(`${head}\n- a\n- b`), ["- a", "- b"], head);
+  assert.deepEqual(waits("- Waiting for the user's decision on X\n- b"), ["- Waiting for the user's decision on X", "- b"]);
+  assert.deepEqual(waits("Waiting for the user to merge #12"), ["Waiting for the user to merge #12"]);
+  assert.deepEqual(waits("Waits for you to merge #12\n- b"), ["Waits for you to merge #12", "- b"]);
+  assert.deepEqual(waits("xx·waits to merge\n- b"), ["xx·waits to merge", "- b"]);
+  // a table whose own list label throws still leaves the English headings to match
+  putTable(home, "xt", "export default { name: 'Xt', cli: { userWaits: () => { throw new Error('boom'); } } };\n");
+  setLang(state, "xt");
+  assert.equal((await loadLang("xt", home)).error, undefined);
+  assert.deepEqual(waits("**Waits for you**\n- a"), ["- a"]);
 });
 
 test("a session its prompt put at max is not flagged for running at max; one at high is", async () => {
@@ -1064,8 +1142,8 @@ test("a session its prompt put at max is not flagged for running at max; one at 
   const ok = JSON.stringify({ type: "result", subtype: "success", is_error: false, session_id: "x" });
   fs.writeFileSync(path.join(state, "session-01.jsonl"), `${turn("max")}\n${ok}\n`);
   fs.writeFileSync(path.join(state, "session-02.jsonl"), `${turn("high")}\n${ok}\n`);
-  assert.doesNotMatch(sessionMessage(state, "01", process.pid).text, /olmalı/);
-  assert.match(sessionMessage(state, "02", process.pid).text, /düzey high \(xhigh olmalı\)/);
+  assert.doesNotMatch(sessionMessage(state, "01", process.pid).text, /should be/);
+  assert.match(sessionMessage(state, "02", process.pid).text, /level high \(should be xhigh\)/);
 });
 
 test("an unknown MODEL's card says which model the session ran on: Opus in opus mode, Fable in fable mode", async () => {
@@ -1082,9 +1160,7 @@ test("an unknown MODEL's card says which model the session ran on: Opus in opus 
     ].join("\n") + "\n");
     return sessionMessage(state, "01", process.pid).text;
   };
-  assert.match(cardFor({ lang: "tr" }), /MODEL: sonnet tanınmadı, Opus'ta çalıştı/);
   assert.match(cardFor({ lang: "en" }), /MODEL: sonnet not recognised, ran on Opus/);
-  assert.match(cardFor({ ...FM, lang: "tr" }), /MODEL: sonnet tanınmadı, Fable'da çalıştı/);
   assert.match(cardFor({ ...FM, lang: "en" }), /MODEL: sonnet not recognised, ran on Fable/);
 });
 
@@ -1110,14 +1186,14 @@ test("a Fable session at high is not flagged, an Opus one at high is, and the ca
   fs.writeFileSync(path.join(state, "session-02.jsonl"), [event({ five_hour: { utilization: 0.45 }, seven_day: { utilization: 0.31 } }),
     turn("high", "claude-opus-5-5"), ok].join("\n") + "\n");
   const one = sessionMessage(state, "01", process.pid).text;
-  assert.doesNotMatch(one, /olmalı/);
-  assert.match(one, /7g %30 · Fable %25/);
-  assert.match(sessionMessage(state, "02", process.pid).text, /düzey high \(xhigh olmalı\)/);
+  assert.doesNotMatch(one, /should be/);
+  assert.match(one, /7d 30% · Fable 25%/);
+  assert.match(sessionMessage(state, "02", process.pid).text, /level high \(should be xhigh\)/);
   assert.doesNotMatch(sessionMessage(state, "02", process.pid).text, /Fable %/);
   const plain = buildReport(state, { focus: "all", pid: 0 }).plain;
-  assert.match(plain, /limit 5s %40→%40 · 7g %30→%30 · Fable %25→%25/);
-  assert.match(plain, /#01 başı  5s %40  7g %30  F %25/);
-  assert.match(plain, /sıfırlanma: .* · Fable \d\d\.\d\d \d\d:\d\d/);
+  assert.match(plain, /limit 5h 40%→40% · 7d 30%→30% · Fable 25%→25%/);
+  assert.match(plain, /#01 start 5h 40%  7d 30%  F 25%/);
+  assert.match(plain, /resets: .* · Fable [A-Z][a-z]{2} \d{1,2} \d\d:\d\d/);
 });
 
 test("a Telegram request that never answers gives up after its own timeout", { timeout: 15_000 }, async () => {
@@ -1570,8 +1646,10 @@ test("start takes --max-wait-hours from the command line, else the config, else 
 });
 
 // The language: --lang, else the project file, else the global file (under the case's home), else en.
-const langOf = ({ global, project }, extra = []) => {
+// table: the user's xx table in the case's home (the made-up one when true, this text, or none when false).
+const langOf = ({ global, project, table = true }, extra = []) => {
   const c = pointerCase();
+  if (table) putTable(c.home, "xx", table === true ? undefined : table);
   const write = (file, cfg) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(cfg)); };
   if (global) write(path.join(c.home, ".claude", "night-shift", "config.json"), global);
   if (project) write(path.join(c.repo, ".claude", "night-shift.json"), project);
@@ -1580,30 +1658,45 @@ const langOf = ({ global, project }, extra = []) => {
 };
 
 test("start takes the language from --lang, else the project file, else the global file, else en", () => {
-  assert.equal(langOf({ global: { lang: "tr" } }).lang, "tr");
-  assert.equal(langOf({ global: { lang: "tr" }, project: { lang: "en" } }).lang, "en");
-  assert.equal(langOf({ global: { lang: "en" }, project: { lang: "en" } }, ["--lang", "tr"]).lang, "tr");
+  assert.equal(langOf({ global: { lang: "xx" } }).lang, "xx");
+  assert.equal(langOf({ global: { lang: "xx" }, project: { lang: "en" } }).lang, "en");
+  assert.equal(langOf({ global: { lang: "en" }, project: { lang: "en" } }, ["--lang", "xx"]).lang, "xx");
   assert.equal(langOf({}).lang, "en");
+  assert.equal(langOf({ table: false }).lang, "en", "en needs no table");
 });
 
-test("start refuses a language it has no table for, on the command line or in a file", () => {
-  for (const v of ["TR", "tr-TR", "Türkçe"]) {
+test("start refuses a language code of the wrong shape, on the command line or in a file", () => {
+  for (const v of ["XX", "xx-XX", "Deutsch", "../xx"]) {
     const r = langOf({}, ["--lang", v]);
     assert.equal(r.status, 1, v);
-    assert.match(r.stderr, /--lang must be one of en, tr/, v);
+    assert.match(r.stderr, /--lang must be a language code in lowercase, such as en or pt-br \(got /, v);
     assert.doesNotMatch(r.stderr, /launch refused/);
   }
   const noValue = langOf({}, ["--lang"]);
   assert.equal(noValue.status, 1);
-  assert.match(noValue.stderr, /--lang must be one of en, tr/);
-  const g = langOf({ global: { lang: "tr-TR" } });
+  assert.match(noValue.stderr, /--lang must be a language code .*\(got no value\)/);
+  const g = langOf({ global: { lang: "xx-XX" } });
   assert.equal(g.status, 1);
-  assert.match(g.stderr, /config.json: "lang" must be one of en, tr/);
+  assert.match(g.stderr, /config.json: "lang" must be a language code in lowercase/);
   assert.match(g.stderr, /.claude[\\/]night-shift[\\/]config.json/);
   assert.doesNotMatch(g.stderr, /launch refused/);
-  const p = langOf({ project: { lang: "Türkçe" } });
+  const p = langOf({ project: { lang: "Deutsch" } });
   assert.equal(p.status, 1);
-  assert.match(p.stderr, /night-shift.json: "lang" must be one of en, tr/);
+  assert.match(p.stderr, /night-shift.json: "lang" must be a language code in lowercase/);
+});
+
+test("start refuses a language whose table is missing or does not load, and names the file", () => {
+  const flag = langOf({ table: false }, ["--lang", "xx"]);
+  assert.equal(flag.status, 1);
+  assert.match(flag.stderr, /--lang xx: no language table at .*\.claude[\\/]night-shift[\\/]lang[\\/]xx\.mjs/);
+  assert.doesNotMatch(flag.stderr, /launch refused/);
+  const g = langOf({ global: { lang: "yy" } });
+  assert.equal(g.status, 1);
+  assert.match(g.stderr, /lang yy from .*config\.json: no language table at .*lang[\\/]yy\.mjs/);
+  const broken = langOf({ table: "export default {,};\n" }, ["--lang", "xx"]);
+  assert.equal(broken.status, 1);
+  assert.match(broken.stderr, /--lang xx: .*xx\.mjs does not load: /);
+  assert.doesNotMatch(broken.stderr, /launch refused/);
 });
 
 // Which file a mode/model conflict came from: the layers can disagree, and the message names each.
@@ -1659,31 +1752,44 @@ test("status on a run.json from before the language was a setting exits 0 and pr
   assert.match(r.stdout, /Problems\n/, "no lang and no config file: English");
 });
 
-test("status and wait print the run's language: Turkish under lang tr, English under lang en", () => {
-  const tr = finishedRun("tr"), en = finishedRun("en");
-  const trStatus = tr.run("status").stdout, enStatus = en.run("status").stdout;
-  assert.match(trStatus, /^finished 2026-11-16 03:30:00: STOP: done\n/);
-  assert.match(trStatus, /Gece vardiyası · /);
-  assert.match(trStatus, /Bitti: STOP: done/);
+test("status and wait print the run's language: the user's table under its code, English under lang en", () => {
+  const xx = finishedRun("xx"), en = finishedRun("en");
+  putTable(xx.home);
+  const xxStatus = xx.run("status"), enStatus = en.run("status").stdout;
+  assert.equal(xxStatus.stderr, "");
+  assert.match(xxStatus.stdout, /^finished 2026-11-16 03:30:00: STOP: done\n/);
+  assert.match(xxStatus.stdout, /xx·title · /);
+  assert.match(xxStatus.stdout, /xx·ended: STOP: done/);
+  assert.match(xxStatus.stdout, /\nProblems\n/, "a key the table lacks reads English");
   assert.match(enStatus, /^finished 2026-11-16 03:30:00: STOP: done\n/);
   assert.match(enStatus, /Night shift · /);
   assert.match(enStatus, /Ended: STOP: done/);
-  assert.doesNotMatch(enStatus, /Gece|Sorun|Bitti/);
-  const trWait = tr.run("wait"), enWait = en.run("wait");
-  assert.equal(trWait.status, 0, trWait.stderr);
+  assert.doesNotMatch(enStatus, /xx·/);
+  const xxWait = xx.run("wait"), enWait = en.run("wait");
+  assert.equal(xxWait.status, 0, xxWait.stderr);
   assert.equal(enWait.status, 0, enWait.stderr);
-  assert.match(trWait.stdout, /Kullanıcıyı bekleyenler: listede madde yok/);
-  assert.match(trWait.stdout, /^Rapor: /m);
+  assert.match(xxWait.stdout, /xx·waits: none/);
+  assert.match(xxWait.stdout, /^xx·report: /m);
   assert.match(enWait.stdout, /Waiting for the user: no items listed/);
   assert.match(enWait.stdout, /^Report: .* · full status: node /m);
-  assert.doesNotMatch(enWait.stdout, /Kullanıcı|Rapor|bekleyen/);
+  assert.doesNotMatch(enWait.stdout, /xx·/);
+});
+
+test("status and wait on a run whose table is gone print English and say why on stderr", () => {
+  const c = finishedRun("xx");
+  for (const cmd of ["status", "wait"]) {
+    const r = c.run(cmd);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, cmd === "status" ? /Night shift · / : /Waiting for the user: no items listed/, cmd);
+    assert.match(r.stderr, /^language table: no language table at .*lang[\\/]xx\.mjs; what the user reads is in English\n$/, cmd);
+  }
 });
 
 test("a global config's lang picks the language of a run.json that names none", () => {
   const c = finishedRun(null);
-  fs.mkdirSync(path.join(c.home, ".claude", "night-shift"), { recursive: true });
-  fs.writeFileSync(path.join(c.home, ".claude", "night-shift", "config.json"), JSON.stringify({ lang: "tr" }));
-  assert.match(c.run("status").stdout, /Gece vardiyası · /);
+  putTable(c.home);
+  fs.writeFileSync(path.join(c.home, ".claude", "night-shift", "config.json"), JSON.stringify({ lang: "xx" }));
+  assert.match(c.run("status").stdout, /xx·title · /);
 });
 
 // ---------------------------------------------------------------- the user's rule files
@@ -1762,7 +1868,7 @@ test("a rules file removed mid-chain drops out of the header, and the log says s
 
 test("a rules file over the limit from the start is left out, and the log says so once", async () => {
   const { log, seen } = await fableRun("first", { 1: { next: "second" }, 2: { next: "STOP: done" } }, {},
-    (state, { home, repo }) => { putRules(globalRules(home), "ş".repeat(4097)); putRules(projectRules(repo), "keep commits small"); });
+    (state, { home, repo }) => { putRules(globalRules(home), "é".repeat(4097)); putRules(projectRules(repo), "keep commits small"); });
   for (const n of [1, 2]) {
     assert.doesNotMatch(seen(n).input, /Global:/);
     assert.ok(seen(n).input.includes("This project:\nkeep commits small\n"));
@@ -1795,7 +1901,7 @@ test("start refuses a rules file over the limit and status names the files in fo
   assert.match(c.run("start", ["--prompt", "x"]).stderr, /[\\/]night-shift[\\/]rules\.md is 8193 bytes, over the 8192 limit/);
   // The launch is refused (NIGHT_SHIFT_LAUNCH=fail), so the lines start prints on success are checked through status, which prints the same.
   fs.rmSync(projectRules(c.repo));
-  putRules(globalRules(c.home), "ş".repeat(10));
+  putRules(globalRules(c.home), "é".repeat(10));
   fs.writeFileSync(path.join(c.state, "chain.log"), "[2026-11-16 03:00:00] chain starts\n[2026-11-16 03:30:00] chain ends: STOP: done\n");
   c.write({ finished: true, finishedAt: "2026-11-16 03:30:00", reason: "STOP: done" });
   assert.match(c.run("status").stdout, /^finished .*\nstate: .*\n {2}rules: {2}.*[\\/]night-shift[\\/]rules\.md \(20 bytes\)\n\n/);
@@ -1823,7 +1929,7 @@ const startPrints = async (setupRules) => {
 };
 
 test("start prints the rule files in force: each with its bytes, or none", async () => {
-  const some = await startPrints(({ home, repo }) => { putRules(globalRules(home), "ş".repeat(10)); putRules(projectRules(repo), "keep commits small"); });
+  const some = await startPrints(({ home, repo }) => { putRules(globalRules(home), "é".repeat(10)); putRules(projectRules(repo), "keep commits small"); });
   assert.match(some, /^ {2}rules: {2}.*[\\/]night-shift[\\/]rules\.md \(20 bytes\)$/m);
   assert.match(some, /^ {2}rules: {2}.*[\\/]night-shift-rules\.md \(18 bytes\)$/m);
   assert.doesNotMatch(some, /rules: {2}none/);

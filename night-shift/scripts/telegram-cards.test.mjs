@@ -5,85 +5,85 @@ import { readFileSync } from "node:fs";
 import { sessionCard, eventLine, chainCard, statusCard, reportSection, reportCard, splitHtml } from "./telegram-cards.mjs";
 import { strings } from "./lang/index.mjs";
 
-const tr = strings("tr"), en = strings("en");
+const en = strings("en");
 
 const done = {
-  nn: "13", ok: true, took: "1 sa 21 dk", cost: "$19.24", five: "%56", seven: "%47",
+  nn: "13", ok: true, took: "1 h 21 min", cost: "$19.24", five: "56%", seven: "47%",
   title: "R11 closure (Presets) — R11 done", next: "R12 plan (Settings)", problems: [],
-  commits: ["5cf8e41 ui: R11 kapanışı — Presets"], rows: ["ana opus 5.5 · 221 çağrı · $15.11"], waits: [],
+  commits: ["5cf8e41 ui: R11 closure — Presets"], rows: ["main opus 5.5 · 221 calls · $15.11"], waits: [],
 };
 
 test("a finished job is a short card: title, one numbers line, what comes next", () => {
-  const { text, silent } = sessionCard(done, tr);
+  const { text, silent } = sessionCard(done, en);
   const head = text.split("<blockquote")[0].trim().split("\n");
   assert.deepEqual(head, [
     "✅ <b>#13 · R11 closure (Presets) — R11 done</b>",
-    "1 sa 21 dk · $19.24 · 5s %56 · 7g %47",
+    "1 h 21 min · $19.24 · 5h 56% · 7d 47%",
     "➡️ R12 plan (Settings)",
   ]);
   assert.equal(silent, false);
 });
 
 test("the card is short: no commit hashes and no token rows, only what waits in one collapsed quote", () => {
-  const { text } = sessionCard(done, tr);
-  assert.doesNotMatch(text, /blockquote|Commit|Token|5cf8e41|çağrı/);
-  const waiting = sessionCard({ ...done, waits: ["R65's physical acceptance"] }, tr).text;
+  const { text } = sessionCard(done, en);
+  assert.doesNotMatch(text, /blockquote|Commit|Token|5cf8e41|calls/);
+  const waiting = sessionCard({ ...done, waits: ["R65's physical acceptance"] }, en).text;
   assert.equal(waiting.match(/<blockquote expandable>/g).length, 1);
-  assert.match(waiting, /<blockquote expandable><b>Seni bekleyen<\/b> · 1\n• R65's physical acceptance<\/blockquote>$/);
+  assert.match(waiting, /<blockquote expandable><b>Waits for you<\/b> · 1\n• R65's physical acceptance<\/blockquote>$/);
 });
 
 test("only this job's problems show, above the details", () => {
-  const { text } = sessionCard({ ...done, ok: false, problems: ["guard 1 kez reddetti: git clean"] }, tr);
+  const { text } = sessionCard({ ...done, ok: false, problems: ["guard refused 1 time: git clean"] }, en);
   assert.match(text, /^❌ <b>#13/);
-  assert.match(text.split("<blockquote")[0], /⚠️ guard 1 kez reddetti: git clean/);
+  assert.match(text.split("<blockquote")[0], /⚠️ guard refused 1 time: git clean/);
 });
 
 test("a job with no report section falls back to its commits, then to its number", () => {
-  assert.match(sessionCard({ ...done, title: null }, tr).text, /^✅ <b>#13 · ui: R11 kapanışı — Presets<\/b>/);
-  assert.match(sessionCard({ ...done, title: null, commits: [] }, tr).text, /^✅ <b>#13<\/b>/);
+  assert.match(sessionCard({ ...done, title: null }, en).text, /^✅ <b>#13 · ui: R11 closure — Presets<\/b>/);
+  assert.match(sessionCard({ ...done, title: null, commits: [] }, en).text, /^✅ <b>#13<\/b>/);
 });
 
 test("text from files is escaped", () => {
-  const { text } = sessionCard({ ...done, title: "a <b> & c", commits: [] }, tr);
+  const { text } = sessionCard({ ...done, title: "a <b> & c", commits: [] }, en);
   assert.match(text, /#13 · a &lt;b&gt; &amp; c/);
 });
 
 test("a long card stays under Telegram's 4096 characters and closes its quote", () => {
   const waits = Array.from({ length: 400 }, (_, i) => `item ${i}: a long thing that waits for the user and keeps going on`);
-  const { text } = sessionCard({ ...done, waits }, tr);
+  const { text } = sessionCard({ ...done, waits }, en);
   assert.ok(text.length <= 4096, `${text.length}`);
   assert.match(text, /<\/blockquote>$/);
 });
 
 test("small events are one line; the ones that need nothing from the user are silent", () => {
-  assert.deepEqual(eventLine("limit", { until: "11:20" }, tr), { text: "⏳ Limit doldu · 11:20'de sürer", silent: true });
-  assert.deepEqual(eventLine("resume", { nn: "07" }, tr), { text: "▶️ #07 kaldığı yerden sürüyor", silent: true });
-  assert.equal(eventLine("retry", { nn: "18" }, tr).silent, false);
-  assert.equal(eventLine("quiet", { nn: "12", minutes: 30, step: "Wait <x>" }, tr).text, "⚠️ #12 30 dakikadır sessiz · son adım: Wait &lt;x&gt;");
-  assert.deepEqual(eventLine("effort", { nn: "21", got: "high", want: "xhigh" }, tr), { text: "⚠️ #21 high düzeyde çalışıyor (xhigh olmalı)", silent: false });
+  assert.deepEqual(eventLine("limit", { until: "11:20" }, en), { text: "⏳ Usage limit reached · resumes at 11:20", silent: true });
+  assert.deepEqual(eventLine("resume", { nn: "07" }, en), { text: "▶️ #07 is going on where it left off", silent: true });
+  assert.equal(eventLine("retry", { nn: "18" }, en).silent, false);
+  assert.equal(eventLine("quiet", { nn: "12", minutes: 30, step: "Wait <x>" }, en).text, "⚠️ #12 quiet for 30 minutes · last step: Wait &lt;x&gt;");
+  assert.deepEqual(eventLine("effort", { nn: "21", got: "high", want: "xhigh" }, en), { text: "⚠️ #21 is running at high (should be xhigh)", silent: false });
 });
 
 test("a transient error is one silent line with the retry time", () => {
-  assert.deepEqual(eventLine("error", { nn: "07", until: "03:12" }, tr),
-    { text: "🔌 #07 bağlantı ya da API hatası · 03:12'de yeniden denenecek", silent: true });
+  assert.deepEqual(eventLine("error", { nn: "07", until: "03:12" }, en),
+    { text: "🔌 #07 connection or API error · retrying at 03:12", silent: true });
 });
 
 test("the chain's end card counts the jobs and what waits, with each job one line in the details", () => {
   const { text } = chainCard({
-    reason: "STOP: plan bitti", project: "demo-app", jobs: [
-      { nn: "01", ok: true, title: "R7 closure", took: "1 sa 2 dk" },
-      { nn: "02", ok: false, title: "R8 plan", took: "20 dk" },
-    ], took: "23 sa 25 dk", cost: "$44.09", seven: "%24→%57", waits: 3, rows: ["ana opus 5.5 · 9 çağrı · $1"], problems: ["guard 1 kez reddetti"],
-  }, tr);
+    reason: "STOP: plan done", project: "demo-app", jobs: [
+      { nn: "01", ok: true, title: "R7 closure", took: "1 h 2 min" },
+      { nn: "02", ok: false, title: "R8 plan", took: "20 min" },
+    ], took: "23 h 25 min", cost: "$44.09", seven: "24%→57%", waits: 3, rows: ["main opus 5.5 · 9 calls · $1"], problems: ["guard refused 1 time"],
+  }, en);
   const head = text.split("<blockquote")[0].trim().split("\n");
   assert.deepEqual(head, [
-    "🏁 <b>Zincir bitti · demo-app</b>",
-    "plan bitti",
-    "2 iş · 23 sa 25 dk · $44.09 · 7g %24→%57",
-    "🙋 Seni bekleyen 3 madde",
+    "🏁 <b>Chain ended · demo-app</b>",
+    "plan done",
+    "2 jobs · 23 h 25 min · $44.09 · 7d 24%→57%",
+    "🙋 3 items waiting for you",
   ]);
-  assert.match(text, /✅ #01 R7 closure · 1 sa 2 dk\n❌ #02 R8 plan · 20 dk/);
-  assert.doesNotMatch(text, /Token|çağrı/);
+  assert.match(text, /✅ #01 R7 closure · 1 h 2 min\n❌ #02 R8 plan · 20 min/);
+  assert.doesNotMatch(text, /Token|calls/);
 });
 
 test("the next step drops its technical tail: an unclosed bracket, code and hashes", () => {
@@ -93,44 +93,44 @@ test("the next step drops its technical tail: an unclosed bracket, code and hash
   assert.equal(reportSection(text("fix `ab12cd3` in the walk."), "7", "14:10").next, "fix in the walk");
 });
 
-test("/rapor is a short card: this run's jobs one line each, the progress, problems and what waits", () => {
+test("/report is a short card: this run's jobs one line each, the progress, problems and what waits", () => {
   const { text, silent } = reportCard({
-    project: "demo-app", state: "çalışıyor", at: "15:54", progress: "3/5 iş bitti · tahmini bitiş ~17:20",
-    five: "%39", seven: "%50", cost: "$40.72",
+    project: "demo-app", state: "running", at: "15:54", progress: "3/5 jobs done · estimated end ~17:20",
+    five: "39%", seven: "50%", cost: "$40.72",
     jobs: [
-      { nn: "05", ok: true, title: "D3 design and plan", took: "31 dk" },
-      { nn: "06", ok: true, title: "D3a, type scale", took: "58 dk" },
-      { nn: "08", running: true, took: "55 dk", step: "D3 closure fix wave" },
+      { nn: "05", ok: true, title: "D3 design and plan", took: "31 min" },
+      { nn: "06", ok: true, title: "D3a, type scale", took: "58 min" },
+      { nn: "08", running: true, took: "55 min", step: "D3 closure fix wave" },
     ],
     problems: [], waits: ["R65's physical acceptance"],
-  }, tr);
+  }, en);
   assert.equal(silent, true);
   assert.deepEqual(text.split("\n"), [
-    "🌙 <b>demo-app</b> · çalışıyor · 15:54",
-    "📊 3/5 iş bitti · tahmini bitiş ~17:20",
-    "5s %39 · 7g %50 · $40.72",
+    "🌙 <b>demo-app</b> · running · 15:54",
+    "📊 3/5 jobs done · estimated end ~17:20",
+    "5h 39% · 7d 50% · $40.72",
     "",
-    "<b>İşler</b>",
-    "✅ #05 D3 design and plan · 31 dk",
-    "✅ #06 D3a, type scale · 58 dk",
-    "⏳ #08 sürüyor · 55 dk · son adım: D3 closure fix wave",
+    "<b>Jobs</b>",
+    "✅ #05 D3 design and plan · 31 min",
+    "✅ #06 D3a, type scale · 58 min",
+    "⏳ #08 running · 55 min · last step: D3 closure fix wave",
     "",
-    "<b>Seni bekleyen</b> · 1",
+    "<b>Waits for you</b> · 1",
     "• R65's physical acceptance",
   ]);
-  const many = reportCard({ project: "x", state: "durdu", at: "01:00", jobs: Array.from({ length: 30 }, (_, i) => ({ nn: String(i), ok: true, title: "t", took: "1 dk" })), problems: ["❌ #3 hata"], waits: [] }, tr);
-  assert.match(many.text, /<b>İşler<\/b>\n… 18 iş daha\n✅ #18 t/);
-  assert.match(many.text, /<b>Sorunlar<\/b>\n❌ #3 hata/);
+  const many = reportCard({ project: "x", state: "stopped", at: "01:00", jobs: Array.from({ length: 30 }, (_, i) => ({ nn: String(i), ok: true, title: "t", took: "1 min" })), problems: ["❌ #3 error"], waits: [] }, en);
+  assert.match(many.text, /<b>Jobs<\/b>\n… 18 more jobs\n✅ #18 t/);
+  assert.match(many.text, /<b>Problems<\/b>\n❌ #3 error/);
 });
 
-test("/durum answers with what runs now and the limits", () => {
-  const { text } = statusCard({ project: "demo-app", running: true, nn: "19", took: "59 dk", step: "Wait for T4", effort: "xhigh",
-    five: "%72", fiveReset: "11:20", seven: "%56", last: { nn: "18", ok: true, title: "R13 T1" } }, tr);
+test("/status answers with what runs now and the limits", () => {
+  const { text } = statusCard({ project: "demo-app", running: true, nn: "19", took: "59 min", step: "Wait for T4", effort: "xhigh",
+    five: "72%", fiveReset: "11:20", seven: "56%", last: { nn: "18", ok: true, title: "R13 T1" } }, en);
   assert.deepEqual(text.split("\n"), [
-    "🌙 <b>demo-app</b> · çalışıyor",
-    "#19 · 59 dk · xhigh · son adım: Wait for T4",
-    "5s %72 (11:20'de sıfırlanır) · 7g %56",
-    "Son biten: ✅ #18 R13 T1",
+    "🌙 <b>demo-app</b> · running",
+    "#19 · 59 min · xhigh · last step: Wait for T4",
+    "5h 72% (resets at 11:20) · 7d 56%",
+    "Last finished: ✅ #18 R13 T1",
   ]);
 });
 
@@ -163,8 +163,8 @@ test("only the new waits are listed; the carried ones are counted", () => {
   const s = reportSection(nested, "13", "03:07");
   assert.deepEqual(s.waits, ["decisions 1–5 above", "an orphan Edge is still running"]);
   assert.equal(s.older, 2);
-  const { text } = sessionCard({ ...done, waits: s.waits, older: s.older }, tr);
-  assert.match(text, /<b>Seni bekleyen<\/b> · 2\n• decisions 1–5 above\n• an orphan Edge is still running\n\+ 2 eski madde/);
+  const { text } = sessionCard({ ...done, waits: s.waits, older: s.older }, en);
+  assert.match(text, /<b>Waits for you<\/b> · 2\n• decisions 1–5 above\n• an orphan Edge is still running\n\+ 2 older items/);
 });
 
 // Sessions also write each item on one line, "- New: <item>" and "- Still waiting (…): <item>"
@@ -177,10 +177,10 @@ test("a one-line '- New: …' is one waiting item and a one-line '- Still waitin
   };
   const trial = fixture("report-inline-waits-trial.md");
   const t1 = reportSection(trial, "01", "19:02");
-  starts(t1, "Lisans seçimi (MIT ya da Apache-2.0).");
+  starts(t1, "License choice (MIT or Apache-2.0).");
   assert.equal(t1.older, 0);
   const t2 = reportSection(trial, "02", "19:13");
-  starts(t2, "slugify şapkalı ve aksanlı harfleri ASCII'ye mi çevirsin");
+  starts(t2, "should slugify turn accented letters into ASCII");
   assert.equal(t2.older, 1);
   const r5 = reportSection(fixture("report-inline-waits-run5-s09.md"), "9", "16:49");
   starts(r5, "your feedback on D3.", "R66's physical acceptance, using R65's list");
@@ -234,7 +234,7 @@ test("between two jobs: the jobs left at this run's mean working time, from now"
   const p = chainProgress([job(30), job(60), job(45, 2)], { now: at(15) });
   assert.deepEqual({ done: p.done, total: p.total, left: p.left }, { done: 3, total: 5, left: 2 });
   assert.deepEqual(p.eta, at(16, 30));
-  assert.equal(progressText(p, at(15), tr), "3/5 iş bitti · tahmini bitiş ~16:30");
+  assert.equal(progressText(p, at(15), en), "3/5 jobs done · estimated end ~16:30");
 });
 
 test("a running job counts as one of the jobs left, with only its rest still to come", () => {
@@ -264,14 +264,14 @@ test("while a job runs, at least that job is left, even when the last count ran 
 test("no report has said what remains: the jobs done, without a total or an estimate", () => {
   const p = chainProgress([job(40), job(50)], { now: at(15) });
   assert.deepEqual(p, { done: 2, total: null, left: null, eta: null });
-  assert.equal(progressText(p, at(15), tr), "2 iş bitti");
+  assert.equal(progressText(p, at(15), en), "2 jobs done");
   assert.equal(chainProgress([], { now: at(15) }), null);
 });
 
 test("nothing left: the count without an estimate", () => {
   const p = chainProgress([job(40, 1), job(50, 0)], { now: at(15) });
   assert.equal(p.eta, null);
-  assert.equal(progressText(p, at(15), tr), "2/2 iş bitti");
+  assert.equal(progressText(p, at(15), en), "2/2 jobs done");
 });
 
 test("a usage-limit wait moves the estimate to when the chain goes on", () => {
@@ -280,19 +280,19 @@ test("a usage-limit wait moves the estimate to when the chain goes on", () => {
 });
 
 test("the estimate is rounded to five minutes and says when it falls on another day", () => {
-  assert.equal(progressText({ done: 1, total: 3, left: 2, eta: at(23, 58) }, at(22), tr), "1/3 iş bitti · tahmini bitiş yarın ~00:00");
-  assert.equal(progressText({ done: 1, total: 3, left: 2, eta: at(16, 12) }, at(15), tr), "1/3 iş bitti · tahmini bitiş ~16:10");
-  assert.equal(progressText({ done: 1, total: 9, left: 8, eta: at(9, 0, 12) }, at(15), tr), "1/9 iş bitti · tahmini bitiş 12.11 ~09:00");
+  assert.equal(progressText({ done: 1, total: 3, left: 2, eta: at(23, 58) }, at(22), en), "1/3 jobs done · estimated end tomorrow ~00:00");
+  assert.equal(progressText({ done: 1, total: 3, left: 2, eta: at(16, 12) }, at(15), en), "1/3 jobs done · estimated end ~16:10");
+  assert.equal(progressText({ done: 1, total: 9, left: 8, eta: at(9, 0, 12) }, at(15), en), "1/9 jobs done · estimated end Nov 12 ~09:00");
 });
 
-test("the job card, /durum and the limit line carry the progress", () => {
-  const head = sessionCard({ ...done, progress: "3/5 iş bitti · tahmini bitiş ~16:30" }, tr).text.split("<blockquote")[0].trim().split("\n");
-  assert.deepEqual(head.slice(1, 4), ["1 sa 21 dk · $19.24 · 5s %56 · 7g %47", "📊 3/5 iş bitti · tahmini bitiş ~16:30", "➡️ R12 plan (Settings)"]);
-  const status = statusCard({ project: "demo-app", running: true, nn: "19", took: "59 dk", progress: "3/5 iş bitti · tahmini bitiş ~16:30" }, tr);
-  assert.deepEqual(status.text.split("\n").slice(1, 3), ["#19 · 59 dk", "📊 3/5 iş bitti · tahmini bitiş ~16:30"]);
-  assert.equal(eventLine("limit", { until: "17:00", progress: "3/5 iş bitti · tahmini bitiş ~18:40" }, tr).text,
-    "⏳ Limit doldu · 17:00'de sürer · 3/5 iş bitti · tahmini bitiş ~18:40");
-  assert.equal(eventLine("limit", { until: "17:00" }, tr).text, "⏳ Limit doldu · 17:00'de sürer");
+test("the job card, /status and the limit line carry the progress", () => {
+  const head = sessionCard({ ...done, progress: "3/5 jobs done · estimated end ~16:30" }, en).text.split("<blockquote")[0].trim().split("\n");
+  assert.deepEqual(head.slice(1, 4), ["1 h 21 min · $19.24 · 5h 56% · 7d 47%", "📊 3/5 jobs done · estimated end ~16:30", "➡️ R12 plan (Settings)"]);
+  const status = statusCard({ project: "demo-app", running: true, nn: "19", took: "59 min", progress: "3/5 jobs done · estimated end ~16:30" }, en);
+  assert.deepEqual(status.text.split("\n").slice(1, 3), ["#19 · 59 min", "📊 3/5 jobs done · estimated end ~16:30"]);
+  assert.equal(eventLine("limit", { until: "17:00", progress: "3/5 jobs done · estimated end ~18:40" }, en).text,
+    "⏳ Usage limit reached · resumes at 17:00 · 3/5 jobs done · estimated end ~18:40");
+  assert.equal(eventLine("limit", { until: "17:00" }, en).text, "⏳ Usage limit reached · resumes at 17:00");
 });
 
 // ---------------------------------------------------------------- tolerant markers, safe splitting
@@ -311,11 +311,11 @@ test("the markers are read with the colon inside or outside the bold, and an app
   assert.equal(a.waits.length, 1);
 });
 test("a card whose head alone is too long is cut, never over Telegram's limit", () => {
-  const c = sessionCard({ ...done, title: "x".repeat(6000) }, tr);
+  const c = sessionCard({ ...done, title: "x".repeat(6000) }, en);
   assert.ok(c.text.length <= 4096);
   // the cut keeps the bold tag closed, and an entity is never cut in half
   assert.match(c.text, /…<\/b>$/);
-  const e = sessionCard({ ...done, title: "&".repeat(6000) }, tr).text;
+  const e = sessionCard({ ...done, title: "&".repeat(6000) }, en).text;
   assert.ok(e.length <= 4096);
   assert.doesNotMatch(e.replace(/&amp;/g, ""), /&/);
 });
@@ -344,7 +344,7 @@ test("a single line longer than the limit is cut hard, but not inside a tag or a
 test("a head that nearly fills the message never leaves a half tag or an open one, for any title length", () => {
   const waits = ["w1", `w2 ${"z".repeat(300)}`];
   for (let n = 3900; n <= 4060; n++) {
-    const { text } = sessionCard({ ...done, title: "x".repeat(n), waits }, tr);
+    const { text } = sessionCard({ ...done, title: "x".repeat(n), waits }, en);
     assert.ok(text.length <= 4096, `length at ${n}`);
     for (const tag of ["b", "blockquote", "pre"]) {
       assert.equal((text.match(new RegExp(`<${tag}[ >]`, "g")) || []).length, (text.match(new RegExp(`</${tag}>`, "g")) || []).length, `<${tag}> at ${n}`);
@@ -370,12 +370,14 @@ test("a builder without a table reads English", () => {
   assert.equal(progressText({ done: 3, total: 5, eta: null }), "3/5 jobs done");
 });
 
-test("every event has an English line, and the silent ones are the same in both languages", () => {
-  const d = { project: "p", until: "11:20", nn: "07", minutes: 30, step: "s", got: "high", want: "xhigh", progress: "3/5 jobs done" };
-  for (const kind of ["start", "limit", "resume", "error", "retry", "quiet", "died", "effort"]) {
-    const e = eventLine(kind, d, en), t = eventLine(kind, d, tr);
-    assert.equal(e.silent, t.silent, kind);
-    assert.doesNotMatch(e.text, /[çğıöşüÇĞİÖŞÜ]|undefined/, kind);
+test("every event has an English line, and only the ones that need nothing from the user are silent", () => {
+  const d = { project: "p", until: "11:20", nn: "07", minutes: 30, step: "s", got: "high", want: "xhigh", progress: "3/5 jobs done", text: "r" };
+  const silent = { start: true, limit: true, resume: true, error: true, retry: false, quiet: false, died: false, effort: false, rules: false };
+  for (const kind of Object.keys(silent)) {
+    const e = eventLine(kind, d, en);
+    assert.equal(e.silent, silent[kind], kind);
+    assert.ok(e.text.length > 0, kind);
+    assert.doesNotMatch(e.text, /[^\P{L}a-zA-Z]|undefined/u, kind);
   }
   assert.equal(eventLine("limit", d, en).text, "⏳ Usage limit reached · resumes at 11:20 · 3/5 jobs done");
 });

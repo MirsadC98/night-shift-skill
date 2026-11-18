@@ -1,5 +1,5 @@
 // Telegram messages for the night shift: a short card per event, with the details
-// in one collapsed quote. The full report stays behind /rapor (/report) and `status`.
+// in one collapsed quote. The full report stays behind /report and `status`.
 // Each function takes plain facts and the language table (lang/index.mjs; English when
 // none is given) and returns { text, silent } (silent: no sound).
 
@@ -171,7 +171,7 @@ export function chainCard(f, T = strings()) {
   ]);
 }
 
-// /rapor (/report): the run at a glance, shown open (the user asked for it). Problems arrive HTML-safe.
+// /report: the run at a glance, shown open (the user asked for it). Problems arrive HTML-safe.
 const REPORT_JOBS = 12;
 export function reportCard(f, T = strings()) {
   const jobs = f.jobs || [];

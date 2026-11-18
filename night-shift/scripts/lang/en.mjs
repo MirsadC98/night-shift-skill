@@ -1,10 +1,15 @@
 // What the user reads, in English: the Telegram cards, the report that `show` and /report print, and
-// the lines of `status` and `wait`. Same keys as tr.mjs, which holds the text the tool had first.
-// The code around them (HTML tags, emoji, separators) is the same in both languages; a function
-// takes already-escaped values.
+// the lines of `status` and `wait`. Every other language is a table the user owns, with these keys
+// (lang/index.mjs); a key it lacks reads the text here. The code around the strings (HTML tags, emoji,
+// separators) is the same in every language; a function takes already-escaped values.
 const s = (n) => (n === 1 ? "" : "s");
 
 export default {
+  // the language's English name, for the header line "The user reads …" of every night session
+  name: "English",
+  // the phrase that marks a night-report commit (`docs: night report …`), left out of a job's commits
+  reportCommit: "night report",
+
   // units and number formats
   five: "5h", seven: "7d",
   pct: (n) => `${n}%`,
@@ -109,7 +114,8 @@ export default {
   reportLabel: "Report",
   olderInReport: (n, nn) => `and ${n} older item${s(n)} (in #${nn}'s report)`,
 
-  // Telegram commands: the name shown in the bot's menu and what it does
+  // Telegram commands: the name shown in the bot's menu and what it does; the bot answers that name
+  // besides /status and /report
   cmdStatus: "status", cmdStatusDesc: "What is running now",
   cmdReport: "report", cmdReportDesc: "The full report",
   preview: "preview",

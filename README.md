@@ -107,7 +107,7 @@ Each file is at most 8 KB (UTF-8 bytes) and is read again at every session start
 
 ### Language
 
-`lang` (`--lang` on `start`) sets the language of what you read: the Telegram cards, the `/status` and `/report` answers, the `status` and `wait` output, dates and units. It names one of the language tables in `night-shift/scripts/lang/`; `en` is the default. To add a language, copy `en.mjs`, translate its strings, and list the new table in `lang/index.mjs` and in `LANGS` in `config.mjs`. Everything the model reads (prompts, headers, notes) stays English.
+`lang` (`--lang` on `start`) sets the language of what you read: the Telegram cards, the `/status` and `/report` answers, the `status` and `wait` output, dates and units. The skill ships English, `en`, the default. Any other language is a table you own: copy `night-shift/scripts/lang/en.mjs` to `~/.claude/night-shift/lang/<code>.mjs` (a lowercase code such as `de` or `pt-br`), translate its strings, and set `lang` to that code. Besides the strings, the table gives the language's English name (`name`; each session is told the language the night report is written in, and a table without one is named by its code), names for the two bot commands in that language (`cmdStatus`, `cmdReport`: up to 32 lowercase letters, digits or `_`, as Telegram takes them, else both read English; `/status` and `/report` always answer) and the phrase that follows `docs: ` in a night-report commit (`reportCommit`; `night report` always counts). A key the table lacks reads English, so a table written for an older version keeps working after an update. `start` refuses a code whose table is missing or does not load, and names the file; a runner or watcher that cannot load it later reads English and says so once in its log. Earlier versions shipped a `tr` table in the skill folder; a config that names `tr` now needs that table in `~/.claude/night-shift/lang/tr.mjs` (it is in this repository's history: `git show 4a566e4:night-shift/scripts/lang/tr.mjs`). A language table is code that the runner and the watcher import and run, like a hook. Everything the model reads (prompts, headers, notes) stays English.
 
 ### Global settings
 
@@ -156,7 +156,7 @@ The runner can send a short card to Telegram when each session ends, plus one li
 2. Save `{ "token": "<bot token>" }` to `~/.claude/night-shift/telegram.json`. This file stays outside the skill folder; never commit it.
 3. Press Start in the bot's chat, then run `node ~/.claude/skills/night-shift/scripts/night-report.mjs telegram-setup`. It prints the chat it saved, by name; check that it is yours. Reports go only to that chat, and only that chat's commands are answered. If someone else has written to the bot as well, setup saves nothing and lists the chats: run it again with `--chat <id>`.
 
-In the bot's chat, `/durum` shows what is running and `/rapor` lists this run's jobs.
+In the bot's chat, `/status` shows what is running and `/report` lists this run's jobs. A language table may give the two commands names in its language as well (see "Language").
 
 ## Tests
 

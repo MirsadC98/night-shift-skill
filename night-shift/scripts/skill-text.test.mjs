@@ -11,7 +11,7 @@ const interactive = fs.readFileSync(path.join(root, "references", "interactive.m
 
 test("the skill's texts carry nothing of one person's setup", () => {
   for (const t of [skill, interactive]) {
-    assert.doesNotMatch(t, /[çğıöşüÇĞİÖŞÜ]/);
+    assert.doesNotMatch(t, /[^\P{L}a-zA-Z]/u);
     assert.doesNotMatch(t, /\bRun \d/);
     assert.doesNotMatch(t, /~\/\.claude\/CLAUDE\.md/);
     assert.doesNotMatch(t, /~\/\.claude\/skills\/night-shift/);

@@ -5,16 +5,17 @@
 //
 //   node night-report.mjs show   --state <dir>
 //   node night-report.mjs notify --state <dir> [--headline <text>] [--dry]
-//   node night-report.mjs card   --state <dir> [--nn <n> | --chain [reason]] [--send]   (default: the /durum (/status) card)
+//   node night-report.mjs card   --state <dir> [--nn <n> | --chain [reason]] [--send]   (default: the /status card)
 //   node night-report.mjs watch  --state <dir> --pid <runner pid> [--announce] [--dry]
 //   node night-report.mjs telegram-setup [--chat <id>]   (after pressing Start in the bot's chat)
 //
 // watch follows chain.log and sends a short card (telegram-cards.mjs) when a
 // session ends, a line when the chain waits for a usage limit, resumes or
 // retries a session, or a session goes quiet for 30 minutes, and a summary
-// when the chain ends or its runner dies. In the bot's chat, /durum (/status) answers
-// with what runs now and /rapor (/report) with the full report that `show` prints; the
-// cards and the report are in the run's language (run.json "lang", lang/index.mjs).
+// when the chain ends or its runner dies. In the bot's chat, /status answers with what
+// runs now and /report with the full report that `show` prints; the cards and the report
+// are in the run's language (run.json "lang", lang/index.mjs), whose table may name the two
+// commands in that language too.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -23,7 +24,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { sessionCard, eventLine, chainCard, statusCard, reportCard, reportSection, chainProgress, progressText, splitHtml } from "./telegram-cards.mjs";
 import { sessionPlan, resolveMode } from "./effort.mjs";
-import { strings, langOf } from "./lang/index.mjs";
+import { strings, langOf, loadLang } from "./lang/index.mjs";
 import { isMain } from "./config.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
@@ -316,8 +317,13 @@ function runnerNote(text, T, fableMode = false) {
   return null;
 }
 
-// The table of a state folder's run, for what has no collect(): the watcher, the card command, `status`.
-export const stateStrings = (state, repo) => strings(langOf({ repo, ...readJson(path.join(state, "run.json")) }));
+// The language of a state folder's run, and its table, for what has no collect(): the watcher, the card command, `status`.
+export const stateLang = (state, repo) => langOf({ repo, ...readJson(path.join(state, "run.json")) });
+export const stateStrings = (state, repo) => strings(stateLang(state, repo));
+
+// A night-report commit (`docs: night report …`, or the phrase of the run's own language) is no job's work.
+const reText = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const reportCommit = (T) => new RegExp(`^\\S+ docs: (?:${[...new Set([strings("en").reportCommit, T.reportCommit])].filter(Boolean).map(reText).join("|")})`);
 
 // A job's night-report section, read once per collect (the report runs to thousands of lines).
 function sectionOf(c, s) {
@@ -468,8 +474,9 @@ function jobFacts(c, s) {
   const { T } = c;
   const section = sectionOf(c, s);
   const range = [`--since=${s.start}`, ...(s.end ? [`--until=${s.end}`] : [])];
+  const isReport = reportCommit(T);
   const commits = c.run.repo ? git(c.run.repo, ["log", ...range, "--format=%h %s"]).split("\n")
-    .filter((l) => l && !/^\S+ docs: (?:gece raporu|night report)/.test(l)) : [];
+    .filter((l) => l && !isReport.test(l)) : [];
   const w = s.limits.at(-1)?.unifiedWindows || {};
   return {
     nn: s.nn, ok: okOf(s), took: minutes(workMs(s), T),
@@ -526,7 +533,7 @@ export function chainMessage(state, reason, pid) {
   }, T);
 }
 
-// /rapor (/report): this run's jobs one line each, with the progress, the limits, problems and what waits.
+// /report: this run's jobs one line each, with the progress, the limits, problems and what waits.
 export function reportMessage(state, pid) {
   const c = collect(state, pid);
   const { T } = c;
@@ -554,10 +561,26 @@ export function userWaits(state) {
   return waitsOf(collect(state, 0));
 }
 
+// The label `wait` gives the list, from a table's own function, which may throw or return something else.
+function waitsLabel(t) {
+  try {
+    const text = t.cli.userWaits(["-"]);
+    return typeof text === "string" ? text.split("\n")[0].replace(/:\s*$/, "") : "";
+  } catch { return ""; }
+}
+
+// The heading a STOP prompt's list may open with: the skill's **Waits for you**, or the label the cards or
+// `wait` give that list, in English or in the run's own language. The whole line, markup and a colon aside, is
+// the heading: an item that starts with the same words stays.
+function isWaitsHead(line = "", T) {
+  const text = line.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "").toLowerCase();
+  return [strings("en"), T].flatMap((t) => [t.waitsHead, waitsLabel(t)]).some((h) => h && text === h.toLowerCase());
+}
+
 function waitsOf(c) {
   if (/^STOP\b/i.test(c.nextPrompt)) {
     const body = c.nextPrompt.split("\n").slice(1).join("\n").trim().split("\n");
-    if (/^\W*(kullanıcıyı bekleyenler|waits for you)\b/i.test(body[0])) body.shift();
+    if (isWaitsHead(body[0], c.T)) body.shift();
     return body.join("\n").trim() ? body.join("\n").trim().split("\n") : [];
   }
   const last = c.parsed.findLast((s) => s.end);
@@ -586,7 +609,7 @@ export function statusMessage(state, pid) {
 
 // ---------------------------------------------------------------- telegram
 // Every request has its own deadline: fetch would wait 300 s for the headers of a connection
-// that dropped without a word, and the watcher, with /durum and /rapor behind it, with it.
+// that dropped without a word, and the watcher, with /status and /report behind it, with it.
 export async function telegram(method, cfg, body, { graceMs = 10_000 } = {}) {
   const api = process.env.NIGHT_SHIFT_TELEGRAM_API || "https://api.telegram.org";
   let r;
@@ -681,7 +704,7 @@ async function watch(opt) {
   const markFile = path.join(state, "notified.json");
   const mark = { lines: 0, quiet: {}, ...readJson(markFile) };
   const save = () => fs.writeFileSync(markFile, JSON.stringify(mark));
-  // Each event is one short card; status.md keeps the full report for `status` and /rapor.
+  // Each event is one short card; status.md keeps the full report for `status` and /report.
   // A card is sent until Telegram takes it or the give-up time passes; the caller counts its log line after that.
   const retryMs = Number(process.env.NIGHT_SHIFT_SEND_RETRY_MS) || 30_000, giveUpMs = Number(process.env.NIGHT_SHIFT_SEND_GIVEUP_MS) || 1_800_000;
   const say = async (message) => {
@@ -778,7 +801,7 @@ async function watch(opt) {
         await say(eventLine("died", {}, T));
         return fs.rmSync(lock, { force: true });
       }
-      await commands(state, pid, mark, save, started, opt.dry ? 0 : 20);
+      await commands(state, pid, mark, save, started, opt.dry ? 0 : 20, T);
     } catch (e) {
       watchLog(state, `watch loop: ${e.message}`);
       await sleep(Number(process.env.NIGHT_SHIFT_WATCH_RETRY_MS) || 5_000); // the env variable is for the tests: a poison line takes three of these
@@ -786,9 +809,9 @@ async function watch(opt) {
   }
 }
 
-// /durum and /rapor from the user's own chat, read by long polling in place of the
+// /status and /report from the user's own chat, read by long polling in place of the
 // loop's wait. Two runs watching the same bot take turns (Telegram answers 409).
-async function commands(state, pid, mark, save, started, seconds) {
+async function commands(state, pid, mark, save, started, seconds, T = strings()) {
   const cfg = readJson(TELEGRAM, null);
   if (!seconds || !cfg?.token || !cfg.chatId) return sleep(20_000);
   let j = null;
@@ -803,8 +826,8 @@ async function commands(state, pid, mark, save, started, seconds) {
     // telegram.json may hold the id as text; String() on both keeps it matching either way.
     if (String(msg?.chat?.id) !== String(cfg.chatId) || msg.date * 1000 < started - 60_000) continue;
     const cmd = /^\/(\w+)/.exec(msg.text || "")?.[1];
-    // Either language's name answers, whatever the run's own language is.
-    const reply = cmd === "durum" || cmd === "status" ? statusMessage(state, pid) : cmd === "rapor" || cmd === "report" ? reportMessage(state, pid) : null;
+    // The English name always answers; the run's table may add a name in its own language.
+    const reply = cmd === "status" || cmd === T.cmdStatus ? statusMessage(state, pid) : cmd === "report" || cmd === T.cmdReport ? reportMessage(state, pid) : null;
     if (!reply) continue;
     const outcome = await send([reply]);
     watchLog(state, `/${cmd}: ${outcome}, ${Math.round((Date.now() - msg.date * 1000) / 1000)} s after the message`);
@@ -825,6 +848,14 @@ function parseArgs(argv) {
 
 if (isMain(import.meta)) {
   const opt = parseArgs(process.argv.slice(2));
+  // The run's language table, loaded once before anything reads it; one that is gone or does not load reads
+  // English and says so once: in watch.log for the watcher, on stderr for a command the user typed.
+  if (typeof opt.state === "string") {
+    const lang = await loadLang(stateLang(path.resolve(opt.state)));
+    const why = lang.error && `language table: ${lang.error}; what the user reads is in English`;
+    if (why && opt.cmd === "watch") watchLog(path.resolve(opt.state), why);
+    else if (why) console.error(why);
+  }
   if (opt.cmd === "show") console.log(buildReport(opt.state).plain);
   else if (opt.cmd === "notify") console.log(await notify(path.resolve(opt.state), typeof opt.headline === "string" ? opt.headline : "", opt));
   else if (opt.cmd === "card") {

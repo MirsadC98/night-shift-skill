@@ -7,7 +7,7 @@
 //   node night-chain.mjs start  --repo <dir> (--prompt-file <f> | --prompt <text>) [--until HH:MM]
 //                               [--max-sessions <n>] [--session-hours 4] [--model <m>] [--allow-dirty]
 //                               [--effort xhigh] [--fable-ceiling 0.6] [--fable-sessions 2]
-//                               [--max-wait-hours 6] [--mode opus|fable|mythos] [--lang en|tr]
+//                               [--max-wait-hours 6] [--mode opus|fable|mythos] [--lang <code>]
 //                               [--state <dir>] [--window]
 //   (without --until and --max-sessions the chain goes on until a session writes STOP,
 //    two handovers fail in a row, or stop is called; a usage limit pauses it, and the
@@ -52,9 +52,9 @@ import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { buildReport, userWaits, stateStrings } from "./night-report.mjs";
-import { strings, langOf, LANG_NAMES } from "./lang/index.mjs";
-import { mergedConfig, LANGS, MODES, stateDirProblem, tempRoot, isMain } from "./config.mjs";
+import { buildReport, userWaits, stateLang } from "./night-report.mjs";
+import { strings, langOf, loadLang } from "./lang/index.mjs";
+import { mergedConfig, isLangCode, MODES, stateDirProblem, tempRoot, isMain } from "./config.mjs";
 import { sessionOutcome, windowSpan } from "./session-outcome.mjs";
 import { ruleFiles, readRuleFile, rulesBlock } from "./rules.mjs";
 import { MAIN_MODEL, SUB_MODEL, MAIN_EFFORT, subEffortText, MAX_NOTE, nightModelSettings, sessionPlan, promptDirectives,
@@ -221,7 +221,7 @@ function scheduleRun(run, extra = []) {
 
 // ---------------------------------------------------------------- start
 const HANDOVER_MS = 180_000;
-function start(opt) {
+async function start(opt) {
   const repo = repoRoot(opt.repo || process.cwd());
   const ptr = readPointer(repo);
   if (ptr && !ptr.finished) {
@@ -237,8 +237,8 @@ function start(opt) {
   if (waitArg !== undefined && !(typeof waitArg === "string" && Number.isFinite(Number(waitArg)) && Number(waitArg) > 0)) {
     fail(`--max-wait-hours must be a positive number of hours (got ${waitArg === true ? "no value" : waitArg})`);
   }
-  // A language is never guessed from "TR" or "tr-TR": a night in English that was asked for in Turkish is worse than a refusal.
-  if (opt.lang !== undefined && !LANGS.includes(opt.lang)) fail(`--lang must be one of ${LANGS.join(", ")} (got ${opt.lang === true ? "no value" : opt.lang})`);
+  // A language is never guessed from "PT" or "pt-BR": a night in English that was asked for in another language is worse than a refusal.
+  if (opt.lang !== undefined && !isLangCode(opt.lang)) fail(`--lang must be a language code in lowercase, such as en or pt-br (got ${opt.lang === true ? "no value" : opt.lang})`);
   if (opt.mode !== undefined && !MODES.includes(opt.mode)) fail(`--mode must be one of ${MODES.join(", ")} (got ${opt.mode === true ? "no value" : opt.mode})`);
   const picked = resolveMode({ mode: opt.mode ?? cfg.mode, model: typeof opt.model === "string" ? opt.model : cfg.model });
   if (picked.error) {
@@ -247,6 +247,10 @@ function start(opt) {
       .filter(([, s]) => s).map(([k, s]) => `${k} from ${s}`);
     fail(src.length ? `${picked.error} (${src.join(", ")})` : picked.error);
   }
+  // The user's language table (lang/index.mjs) must load now, for the same reason.
+  const lang = opt.lang ?? cfg.lang ?? "en";
+  const table = await loadLang(lang);
+  if (table.error) fail(`${opt.lang !== undefined ? `--lang ${lang}` : `lang ${lang} from ${from.lang}`}: ${table.error}`);
   // A file the runner would have to leave out is refused here, while the user is at the keyboard.
   const badRules = ruleStatus(repo).filter((f) => f.error);
   if (badRules.length) fail(badRules.map((f) => `${f.file} ${f.error}`).join("; "));
@@ -301,7 +305,7 @@ function start(opt) {
     maxWaitHours: waitArg !== undefined ? Number(waitArg) : cfg.maxWaitHours > 0 ? cfg.maxWaitHours : 6,
     // "none", "inherit" or the list of servers the guard lets through (the guard reads the same file).
     mcp: cfg.mcp ?? "none",
-    lang: opt.lang ?? cfg.lang ?? "en",
+    lang,
     claude: findClaude(),
     report: cfg.report || "NIGHT_RUNS.md",
     path: sessionPath,
@@ -505,6 +509,9 @@ async function runChain(opt) {
   log(`chain starts in ${repo}${reloaded ? " (runner reloaded)" : ""}, until ${run.until || "the work is done"}, from session ${session}${run.maxSessions ? ` to ${run.maxSessions}` : ""}, ${run.model || MAIN_MODEL} at ${run.effort || "xhigh"}, subagents ${SUB_MODEL} (${subEffortText()}), ${premiumMode
     ? `${modelName(main)} as the main model under ${pct(fableCeiling)} of its allowance, else ${opusModel} at ${MAIN_EFFORT.opus}`
     : `Fable or Mythos on request under ${pct(fableCeiling)} of their shared allowance (${fableSessions} sessions while unknown)`}`);
+  // The user's language table, loaded once by this runner; one that is gone or does not load reads English (lang/index.mjs).
+  const langLoad = await loadLang(langOf(run));
+  if (langLoad.error) log(`language table: ${langLoad.error}; what the user reads is in English`);
   while (!run.maxSessions || session <= run.maxSessions) {
     if (fs.existsSync(stopFile)) finish("stop requested");
     if (fs.existsSync(reloadFile)) handOver(); // returns only when the hand-over failed
@@ -688,7 +695,7 @@ function runSession(run, session, plan, nn, resume, rules = "") {
     `Night shift (night-shift), session ${session}${run.maxSessions ? `/${run.maxSessions}` : ""}, ${now()}.`,
     `The user is away ${run.until ? `until ${run.until}` : "until the chain ends"} and cannot answer any question.`,
     `First invoke the night-shift skill and follow its "Inside a night session" part.`,
-    `The user reads ${LANG_NAMES[langOf(run)]}: write the night report's own text and its Waits-for-you items in that language, and keep the report's fixed words as the skill gives them.`,
+    `The user reads ${strings(langOf(run)).name}: write the night report's own text and its Waits-for-you items in that language, and keep the report's fixed words as the skill gives them.`,
     `Mode: ${run.mode}.`,
     `Skill folder: ${SKILL_DIR}. Continuation file: ${path.join(run.state, "next-prompt.md")}. Night report: ${run.report}.`,
     // Opus mode: a Fable or Mythos session is for its one piece, and a refused one is told why. Fable or
@@ -763,12 +770,20 @@ function runSession(run, session, plan, nn, resume, rules = "") {
 const statusHead = (ptr, running, T) => [running ? T.cli.statusRunning(ptr.pid, ptr.startedAt)
   : ptr.finished ? T.cli.statusFinished(ptr.finishedAt, ptr.reason) : T.cli.statusScheduled(ptr.scheduledAt), T.cli.statusState(ptr.state)];
 
-function status(opt) {
+// status and wait: the run's language table, before anything reads it; one that is gone or does not load reads English.
+async function readLang(code) {
+  const r = await loadLang(code);
+  if (r.error) console.error(`language table: ${r.error}; what the user reads is in English`);
+  return strings(code);
+}
+
+async function status(opt) {
   const repo = repoRoot(opt.repo || process.cwd());
   const ptr = readPointer(repo);
-  if (!ptr) return console.log(strings(langOf({ repo })).cli.noRun);
+  if (!ptr) return console.log((await readLang(langOf({ repo }))).cli.noRun);
   const running = !ptr.finished && isRunner(ptr.pid);
-  console.log(`${[...statusHead(ptr, running, stateStrings(ptr.state, repo)), ...ruleLines(ruleStatus(repo))].join("\n")}\n`);
+  const T = await readLang(stateLang(ptr.state, repo));
+  console.log(`${[...statusHead(ptr, running, T), ...ruleLines(ruleStatus(repo))].join("\n")}\n`);
   console.log(buildReport(ptr.state, { focus: "all", pid: running ? ptr.pid : 0 }).plain);
 }
 
@@ -815,7 +830,7 @@ async function waitChain(opt) {
   if (typeof opt.state === "string" && !same(opt.state)) fail(`${path.resolve(opt.state)} is not this repository's last run (${state})`);
   const runner = (not) => (p) => Boolean(p.state && same(p.state) && p.pid && p.pid !== not && alive(p.pid));
   const run = JSON.parse(read(path.join(state, "run.json")) || "{}");
-  const T = stateStrings(state, repo);
+  const T = await readLang(stateLang(state, repo));
   const report = (head) => [...head, "", ...buildReport(state, { pid: 0 }).plain.split("\n\n").slice(0, 2).flatMap((b) => [b, ""])];
   const over = () => {
     const waits = userWaits(state);

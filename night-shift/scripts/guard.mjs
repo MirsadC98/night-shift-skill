@@ -1381,6 +1381,8 @@ function selfTest() {
     [bash("rm .claude/night-shift-rules.md"), true], [bash("rm -f C:/work/repo/.claude/night-shift-*"), true],
     [ps("Set-Content .claude\\night-shift-rules.md 'x'"), true], [bash("cat .claude/night-shift-rules.md"), false],
     [write("C:/Users/u/.claude/night-shift/rules.md", inHome), true], [write("C:/Users/u/.claude/night-shift/config.json", inHome), true],
+    // the user's language tables are code the runner and the watcher run (lang/index.mjs)
+    [write("C:/Users/u/.claude/night-shift/lang/tr.mjs", inHome), true], [bash("echo 'export default {}' > C:/Users/u/.claude/night-shift/lang/xx.mjs", inHome), true],
     [bash("rm night-shift/rules.md", inHome), true], [write("C:/Users/u/.claude/notes.md", inHome), false],
     [bash("find . -name rules.md -delete", inHome), true], [bash("find . -name config.json -delete", inHome), true],
     [bash("find . -path '*/night-shift/*' -delete", inHome), true], [bash("find . -name rules.md -exec rm {} +", inHome), true],

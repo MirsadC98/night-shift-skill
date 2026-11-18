@@ -23,8 +23,8 @@ test("the two files sit where the user is told to put them", () => {
 test("the limit counts bytes, and exactly 8192 passes", () => {
   assert.equal(readRuleFile(fileOf("a".repeat(8192))).text.length, 8192);
   assert.equal(readRuleFile(fileOf("a".repeat(8193))).error, "is 8193 bytes, over the 8192 limit");
-  assert.equal(readRuleFile(fileOf("ş".repeat(4097))).error, "is 8194 bytes, over the 8192 limit");
-  assert.equal(readRuleFile(fileOf("ş".repeat(4096))).text.length, 4096);
+  assert.equal(readRuleFile(fileOf("é".repeat(4097))).error, "is 8194 bytes, over the 8192 limit");
+  assert.equal(readRuleFile(fileOf("é".repeat(4096))).text.length, 4096);
 });
 
 test("the limit is the file's bytes on disk: a BOM and CRLF count, even though they are stripped", () => {
@@ -56,7 +56,7 @@ test("rulesBlock: both parts, one part, none", () => {
 });
 
 test("a file saved as UTF-16 (Notepad's \"Unicode\") reads as its text; one that is no Unicode text is refused", () => {
-  assert.equal(readRuleFile(fileOf(Buffer.concat([Buffer.from([0xFF, 0xFE]), Buffer.from("ş\r\nb", "utf16le")]))).text, "ş\nb");
-  assert.equal(readRuleFile(fileOf(Buffer.concat([Buffer.from([0xFE, 0xFF]), Buffer.from("ş\r\nb", "utf16le").swap16()]))).text, "ş\nb");
+  assert.equal(readRuleFile(fileOf(Buffer.concat([Buffer.from([0xFF, 0xFE]), Buffer.from("é\r\nb", "utf16le")]))).text, "é\nb");
+  assert.equal(readRuleFile(fileOf(Buffer.concat([Buffer.from([0xFE, 0xFF]), Buffer.from("é\r\nb", "utf16le").swap16()]))).text, "é\nb");
   assert.match(readRuleFile(fileOf(Buffer.from([0x61, 0xFE, 0x62]))).error, /^cannot be read: it is not UTF-8 text/);
 });

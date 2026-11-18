@@ -10,6 +10,8 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const REPORT = path.join(path.dirname(fileURLToPath(import.meta.url)), "night-report.mjs");
+// A made-up language table, "xx", that a scene copies into its home as the user's own (lang/index.mjs).
+const XX = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "lang-xx.mjs");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const until = async (pred, ms, what) => {
   const end = Date.now() + ms;
@@ -42,8 +44,9 @@ async function bot(answer) {
 }
 
 // A throwaway home and state folder, a helper process standing in for the runner, the watcher itself.
-// lang: null writes a run.json from before the language was a setting.
-async function scene(answer, { chatId = 42, notified, env = {}, token = "T", lang = "tr" } = {}, body) {
+// lang: null writes a run.json from before the language was a setting; lang "xx" puts the made-up table in the home
+// unless table is false.
+async function scene(answer, { chatId = 42, notified, env = {}, token = "T", lang = "en", table = true } = {}, body) {
   const api = await bot(answer);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ns-watch-"));
   const home = path.join(dir, "home"), state = path.join(dir, "state"), root = path.join(dir, "repo");
@@ -51,6 +54,10 @@ async function scene(answer, { chatId = 42, notified, env = {}, token = "T", lan
   fs.mkdirSync(state);
   fs.mkdirSync(root);
   fs.writeFileSync(path.join(home, ".claude", "night-shift", "telegram.json"), JSON.stringify({ token, chatId }));
+  if (lang === "xx" && table) {
+    fs.mkdirSync(path.join(home, ".claude", "night-shift", "lang"));
+    fs.copyFileSync(XX, path.join(home, ".claude", "night-shift", "lang", "xx.mjs"));
+  }
   fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ repo: root, ...(lang && { lang }) }));
   fs.writeFileSync(path.join(state, "chain.log"), "");
   if (notified !== undefined) fs.writeFileSync(path.join(state, "notified.json"), notified);
@@ -80,7 +87,7 @@ test("a card Telegram did not take is sent again, and the log line is counted on
   await scene((m, b, n) => (m === "sendMessage" ? (n < 2 ? down : [200, { ok: true }]) : undefined), {}, async ({ api, state, chain }) => {
     chain(RETRY);
     await until(() => api.sends().length >= 3, 10_000, "three sendMessage calls");
-    assert.match(api.sends().at(-1).body.text, /#02 devam istemi bırakmadı/);
+    assert.match(api.sends().at(-1).body.text, /#02 left no continuation prompt/);
     const marked = () => { try { return JSON.parse(fs.readFileSync(path.join(state, "notified.json"), "utf8")).lines; } catch { return 0; } };
     await until(() => marked() === 1, 5_000, "the line to be counted");
     assert.equal(api.sends().length, 3);
@@ -126,31 +133,34 @@ test("a half-written notified.json or telegram.json does not end the watcher", a
   });
 });
 
-test("a chat id saved as text still answers /durum", async () => {
-  const ask = { ok: true, result: [{ update_id: 1, message: { chat: { id: 42 }, date: Math.floor(Date.now() / 1000), text: "/durum" } }] };
+test("a chat id saved as text still answers /status", async () => {
+  const ask = { ok: true, result: [{ update_id: 1, message: { chat: { id: 42 }, date: Math.floor(Date.now() / 1000), text: "/status" } }] };
   await scene((m, b, n) => (m === "getUpdates" && n === 0 ? [200, ask] : m === "sendMessage" ? [200, { ok: true }] : undefined), { chatId: "42" }, async ({ api }) => {
-    await until(() => api.sends().length >= 1, 10_000, "the /durum answer");
+    await until(() => api.sends().length >= 1, 10_000, "the /status answer");
   });
 });
 
-// A command typed in the user's own chat; both languages' names answer, whatever the run's language.
+// A command typed in the user's own chat: the English name always answers, and so does the name the run's table gives it.
 const asked = (text) => ({ ok: true, result: [{ update_id: 1, message: { chat: { id: 42 }, date: Math.floor(Date.now() / 1000), text } }] });
 const asking = (text) => (m, b, n) => (m === "getUpdates" && n === 0 ? [200, asked(text)] : m === "sendMessage" ? [200, { ok: true }] : undefined);
 
-test("/durum answers under lang en and /status under lang tr, each in the run's language", async () => {
-  await scene(asking("/durum"), { lang: "en" }, async ({ api }) => {
-    await until(() => api.sends().length >= 1, 10_000, "the /durum answer");
-    assert.match(api.sends()[0].body.text, /<b>repo<\/b> · running/);
-    assert.doesNotMatch(api.sends()[0].body.text, /çalışıyor/);
-  });
-  await scene(asking("/status"), { lang: "tr" }, async ({ api }) => {
-    await until(() => api.sends().length >= 1, 10_000, "the /status answer");
-    assert.match(api.sends()[0].body.text, /<b>repo<\/b> · çalışıyor/);
+test("/status and the table's own name both answer, in the run's language; a name only another table gives does not", async () => {
+  for (const cmd of ["/status", "/xxstatus"]) {
+    await scene(asking(cmd), { lang: "xx" }, async ({ api }) => {
+      await until(() => api.sends().length >= 1, 10_000, `the ${cmd} answer`);
+      assert.match(api.sends()[0].body.text, /<b>repo<\/b> · xx·running/);
+    });
+  }
+  await scene(asking("/xxstatus"), { lang: "en" }, async ({ api }) => {
+    await until(() => api.calls.filter((c) => c.method === "getUpdates").length >= 2, 10_000, "the poll after the command");
+    await sleep(300);
+    assert.equal(api.sends().length, 0);
   });
 });
 
-test("/report and /rapor both give the report, in the run's language", async () => {
-  for (const [lang, cmd, head] of [["en", "/rapor", /^🌙 <b>repo<\/b> · running · \d\d:\d\d/], ["tr", "/report", /^🌙 <b>repo<\/b> · çalışıyor · \d\d:\d\d/]]) {
+test("/report and the table's own name both give the report, in the run's language", async () => {
+  for (const [lang, cmd, head] of [["en", "/report", /^🌙 <b>repo<\/b> · running · \d\d:\d\d/], ["xx", "/report", /^🌙 <b>repo<\/b> · xx·running · \d\d:\d\d/],
+    ["xx", "/xxreport", /^🌙 <b>repo<\/b> · xx·running · \d\d:\d\d/]]) {
     await scene(asking(cmd), { lang }, async ({ api }) => {
       await until(() => api.sends().length >= 1, 10_000, `the ${cmd} answer`);
       assert.match(api.sends()[0].body.text, head);
@@ -159,12 +169,24 @@ test("/report and /rapor both give the report, in the run's language", async () 
 });
 
 test("the bot's menu lists the command pair of the run's language", async () => {
-  for (const [lang, names] of [["tr", ["durum", "rapor"]], ["en", ["status", "report"]]]) {
+  for (const [lang, names] of [["xx", ["xxstatus", "xxreport"]], ["en", ["status", "report"]]]) {
     await scene(() => undefined, { lang }, async ({ api }) => {
       await until(() => api.calls.some((c) => c.method === "setMyCommands"), 10_000, "setMyCommands");
       assert.deepEqual(api.calls.find((c) => c.method === "setMyCommands").body.commands.map((c) => c.command), names);
     });
   }
+});
+
+test("a watcher whose language table is gone watches in English and says so once in watch.log", async () => {
+  await scene(() => undefined, { lang: "xx", table: false }, async ({ api, state, chain }) => {
+    chain(RETRY);
+    await until(() => api.sends().length >= 1, 10_000, "the retry card");
+    assert.match(api.sends()[0].body.text, /#02 left no continuation prompt, retrying/);
+    assert.deepEqual(api.calls.find((c) => c.method === "setMyCommands").body.commands.map((c) => c.command), ["status", "report"]);
+    const lines = fs.readFileSync(path.join(state, "watch.log"), "utf8").split("\n").filter((l) => /language table/.test(l));
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /\] language table: no language table at .*xx\.mjs; what the user reads is in English$/);
+  });
 });
 
 test("a run.json from before the language was a setting is watched in English", async () => {
@@ -213,12 +235,12 @@ test("the quiet mark is saved only after the quiet card went out", async () => {
     fs.writeFileSync(f, JSON.stringify({ type: "system", subtype: "init", session_id: "s-1" }) + "\n");
     const old = new Date(Date.now() - 2 * 3_600_000);
     fs.utimesSync(f, old, old);
-  }, "quiet", /dakikadır sessiz/);
+  }, "quiet", /quiet for \d+ minutes/);
 });
 test("the effort mark is saved only after the effort card went out", async () => {
   await markAfterCard((state) => {
     fs.writeFileSync(path.join(state, "session-01.jsonl"), JSON.stringify({ type: "assistant", session_id: "s-1", perTurnEffort: "low", message: { model: "m", content: [] } }) + "\n");
-  }, "effort", /düzeyde çalışıyor/);
+  }, "effort", /is running at low/);
 });
 
 // The chain's last card is out and its line counted; a notified.json that cannot be written (here: a folder
@@ -253,12 +275,12 @@ test("an outage's retries make one error card and no session card until the sess
   await scene(() => undefined, {}, async ({ api, state, chain }) => {
     fs.writeFileSync(path.join(state, "session-01.jsonl"), SESSION_DONE + "\n");
     for (const l of OUTAGE) chain(l);
-    await until(() => api.sends().some((c) => /#02 devam istemi bırakmadı/.test(c.body.text)), 10_000, "the last card");
+    await until(() => api.sends().some((c) => /#02 left no continuation prompt/.test(c.body.text)), 10_000, "the last card");
     await sleep(300);
     const texts = api.sends().map((c) => c.body.text);
-    assert.equal(texts.filter((t) => /bağlantı ya da API hatası/.test(t)).length, 1, "the try 1 error card, none for try 2");
+    assert.equal(texts.filter((t) => /connection or API error/.test(t)).length, 1, "the try 1 error card, none for try 2");
     assert.equal(texts.filter((t) => /<b>#01/.test(t)).length, 1, "one session card, for the final end");
-    assert.equal(texts.filter((t) => /kaldığı yerden sürüyor/.test(t)).length, 2);
+    assert.equal(texts.filter((t) => /is going on where it left off/.test(t)).length, 2);
     assert.equal(marks(state).lines, OUTAGE.length);
   });
 });
@@ -282,8 +304,8 @@ test("the error card comes from try 1 only", async () => {
     await until(() => api.sends().length >= 2, 10_000, "two cards");
     await sleep(300);
     assert.equal(api.sends().length, 2);
-    assert.match(api.sends()[0].body.text, /#01 bağlantı ya da API hatası · 03:01'de yeniden denenecek/);
-    assert.match(api.sends()[1].body.text, /#02 devam istemi/);
+    assert.match(api.sends()[0].body.text, /#01 connection or API error · retrying at 03:01/);
+    assert.match(api.sends()[1].body.text, /#02 left no continuation prompt/);
   });
 });
 test("a log line no card can be made of is skipped on the third try, and later lines still get theirs", async () => {
@@ -296,20 +318,20 @@ test("a log line no card can be made of is skipped on the third try, and later l
     fs.rmSync(path.join(state, "status.md"), { recursive: true });
     chain("session 03 left no continuation prompt; retrying with a recovery note");
     await until(() => api.sends().length >= 1, 10_000, "the later line's card");
-    assert.match(api.sends()[0].body.text, /#03 devam istemi/);
+    assert.match(api.sends()[0].body.text, /#03 left no continuation prompt/);
     assert.equal(marks(state).lines, 2);
   });
 });
 
 test("a rules: line from the runner is sent as a card, not silent, in the run's language", async () => {
-  await scene(() => undefined, {}, async ({ api, state, chain }) => {
+  await scene(() => undefined, { lang: "xx" }, async ({ api, state, chain }) => {
     chain("rules: C:/Users/demo-app/.claude/night-shift/rules.md is 9000 bytes, over the 8192 limit; the last text read stays in force");
     chain(RETRY);
     await until(() => api.sends().length >= 2, 10_000, "two cards");
     const [rules] = api.sends();
-    assert.equal(rules.body.text, "⚠️ Kural dosyası: C:/Users/demo-app/.claude/night-shift/rules.md is 9000 bytes, over the 8192 limit; the last text read stays in force");
+    assert.equal(rules.body.text, "⚠️ Rules file: C:/Users/demo-app/.claude/night-shift/rules.md is 9000 bytes, over the 8192 limit; the last text read stays in force");
     assert.notEqual(rules.body.disable_notification, true, "it makes a sound");
-    assert.match(api.sends()[1].body.text, /#02 devam istemi/);
+    assert.match(api.sends()[1].body.text, /#02 xx·retry/, "the run's table; the rules line, which it lacks, reads English");
     assert.equal(marks(state).lines, 2);
   });
   await scene(() => undefined, { lang: "en" }, async ({ api, chain }) => {

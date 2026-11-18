@@ -62,7 +62,10 @@ const isStr = (v) => typeof v === "string";
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 // The run's main model: Opus, or Fable or Mythos, which are one model under two names (effort.mjs, resolveMode).
 export const MODES = ["opus", "fable", "mythos"];
-export const LANGS = ["en", "tr"];
+// A language code names a table (lang/index.mjs): en, or the user's own ~/.claude/night-shift/lang/<code>.mjs.
+// Only its shape is checked here, which also keeps a path out of it: this module runs inside the guard too,
+// where a missing table must not turn every command into a refusal. `start` checks that the table loads.
+export const isLangCode = (v) => typeof v === "string" && /^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/.test(v);
 // Each check returns null when the value is fine, else the text that follows the key's name.
 // `deny` is checked rule by rule in denyErrors.
 export const CONFIG_KEYS = {
@@ -71,7 +74,7 @@ export const CONFIG_KEYS = {
   lessons: (v) => (isStr(v) ? null : "must be a string"),
   model: (v) => (isStr(v) ? null : "must be a string"),
   mode: (v) => (MODES.includes(v) ? null : `must be one of ${MODES.join(", ")}`),
-  lang: (v) => (LANGS.includes(v) ? null : `must be one of ${LANGS.join(", ")}`),
+  lang: (v) => (isLangCode(v) ? null : "must be a language code in lowercase, such as en or pt-br (a table at ~/.claude/night-shift/lang/<code>.mjs)"),
   effort: (v) => (EFFORTS.includes(v) ? null : `must be one of ${EFFORTS.join(", ")}`),
   fableCeiling: (v) => (typeof v === "number" && v > 0 && v <= 100 ? null : "must be a number above 0 and at most 100"),
   fableSessions: (v) => (Number.isInteger(v) && v >= 0 ? null : "must be a whole number, 0 or more"),

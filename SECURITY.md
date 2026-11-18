@@ -10,6 +10,10 @@ It is a safety net, not a sandbox. It does not confine a process: a program the 
 
 A project's `.claude/night-shift-rules.md` is trusted like its `CLAUDE.md`, and `start` names the rule files in force. A night session cannot write the rule files, the config files or anything under `~/.claude/night-shift/`.
 
+## Language tables
+
+A language table (`~/.claude/night-shift/lang/<code>.mjs`, see the README's "Language") is a JavaScript module that the runner and the watcher import and run with your rights, as Claude Code runs a hook, so install only a table you wrote or have read; a night session cannot write it.
+
 ## Reporting a bypass
 
 If you find a command or a path the guard should have refused and did not, report it privately: open a private security advisory on this repository (the Security tab, "Report a vulnerability"). Please do not open a public issue for it. Include the command or path, the guard's answer, and what it should have been.
