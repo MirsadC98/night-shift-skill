@@ -309,6 +309,8 @@ test("shell keywords and builtins before cd do not hide where a delete stands", 
     `cd "/c/Users/u/R\u00e9sum\u00e9s/My Game/.." && rm -rf Documents`])
     assert.ok(bash(c), c);
   assert.equal(bash(`if cd app; then rm -rf dist; fi`), null);
+  // The quoted folder outside ASCII is followed, not lost: inside the temp folder the same delete is allowed.
+  assert.equal(bash(`cd "/c/temp/R\u00e9sum\u00e9s/My Game/.." && rm -rf old`), null);
 });
 test("PowerShell's separators and continuation are read", () => {
   assert.ok(ps("Set-Location C:\\Users\\u; Remove-Item -Recurse -Force Documents"));

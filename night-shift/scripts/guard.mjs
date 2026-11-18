@@ -1324,7 +1324,7 @@ function selfTest() {
     [write("C:/temp/x-night/night-settings.json"), true], [write("C:/temp/x-night/run.json"), true],
     [write("C:/temp/../Users/u/.claude/skills/night-shift/scripts/guard.mjs"), true], [write("C:/work/repo/.claude/settings.json."), true],
     [bash("cd /c/Users/u && rm -rf Documents"), true], [bash("cd app && rm -rf dist"), false],
-    [bash(`cd "/c/Users/u/R\u00e9sum\u00e9s/My Game/.." && rm -rf Documents`), true],
+    [bash(`cd "/c/Users/u/R\u00e9sum\u00e9s/My Game/.." && rm -rf Documents`), true], [bash(`cd "/c/temp/R\u00e9sum\u00e9s/My Game/.." && rm -rf old`), false],
     [bash("Remove-Item -r -fo C:\\Users\\u\\Documents"), true], [bash("Remove-Item -Recurse ~\\Documents"), true],
     [bash("rm -f /c/Users/u/Documents/a.docx"), true], [bash("rm -f src/old.ts"), false],
     [bash(`git push "--force" origin main`), true], [bash("git push -uf origin main"), true], [bash("git push -u origin night"), false],
