@@ -43,6 +43,8 @@ export async function loadLang(code, home = os.homedir()) {
   const names = [table.cmdStatus, table.cmdReport];
   if (!names.every(cmd) || names[0] === names[1] || names[0] === en.cmdReport || names[1] === en.cmdStatus)
     Object.assign(table, { cmdStatus: en.cmdStatus, cmdReport: en.cmdReport });
+  // A description takes 1 to 256 characters; one it refuses fails the whole menu, so it reads English, each on its own.
+  for (const k of ["cmdStatusDesc", "cmdReportDesc"]) if (!table[k].trim() || table[k].length > 256) table[k] = en[k];
   loaded.set(code, table);
   return { table, file };
 }

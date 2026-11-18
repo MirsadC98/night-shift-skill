@@ -105,6 +105,18 @@ test("a table without a name reads its code as its name, and command names Teleg
   assert.deepEqual([good.table.cmdStatus, good.table.cmdReport], ["zh_status2", "zhreport"]);
 });
 
+test("a command description Telegram would refuse (not 1 to 256 characters) reads English, each on its own", async () => {
+  const long = "d".repeat(257), most = "d".repeat(256);
+  const cases = [["zu", "", "zu report"], ["zv", "   ", "zv report"], ["zw", long, "zw report"], ["zy", "zy status", ""], ["zz", most, "zz report"]];
+  const want = { zu: [en.cmdStatusDesc, "zu report"], zv: [en.cmdStatusDesc, "zv report"], zw: [en.cmdStatusDesc, "zw report"],
+    zy: ["zy status", en.cmdReportDesc], zz: [most, "zz report"] };
+  for (const [code, status, report] of cases) {
+    const r = await loadLang(code, homeWithTable(code, `export default { name: 'Z', cmdStatusDesc: ${JSON.stringify(status)}, cmdReportDesc: ${JSON.stringify(report)} };\n`));
+    assert.equal(r.error, undefined, code);
+    assert.deepEqual([r.table.cmdStatusDesc, r.table.cmdReportDesc], want[code], code);
+  }
+});
+
 test("loadLang refuses a code of the wrong shape before it looks for a file, and en needs no file", async () => {
   for (const bad of ["../x", "TR", "tr-TR", "x", "", "a/b", "en.mjs"]) {
     const r = await loadLang(bad, throwaway());
