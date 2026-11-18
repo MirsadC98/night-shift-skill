@@ -486,13 +486,14 @@ async function runChain(opt) {
   while (!run.maxSessions || session <= run.maxSessions) {
     if (fs.existsSync(stopFile)) finish("stop requested");
     if (fs.existsSync(reloadFile)) handOver(); // returns only when the hand-over failed
-    if (run.deadline && Date.now() >= run.deadline) finish(`reached ${run.until}`);
     const prompt = read(next).trim();
-    if (!prompt) finish("next-prompt.md is empty");
     // MODEL and EFFORT lines are the runner's: STOP is looked for in what follows them, and the
-    // session gets only that.
+    // session gets only that. A STOP handover wins over the deadline: the session that wrote it
+    // after --until finished the work, and the chain must not end as if work were left.
     const asked = sessionPlan(prompt, run);
     if (isStop(asked.body)) finish(asked.body.split("\n")[0]);
+    if (run.deadline && Date.now() >= run.deadline) finish(`reached ${run.until}`);
+    if (!prompt) finish("next-prompt.md is empty");
     if (!asked.body.trim()) finish("next-prompt.md holds only MODEL/EFFORT lines");
 
     const nn = String(session).padStart(2, "0");
@@ -615,8 +616,8 @@ async function runChain(opt) {
     session++;
   }
   // The last allowed session may have written a STOP handover: that reason ends the chain, not the cap.
-  const last = read(next).trim();
-  if (last && isStop(sessionPlan(last, run).body)) finish(sessionPlan(last, run).body.split("\n")[0]);
+  const last = sessionPlan(read(next).trim(), run).body;
+  if (isStop(last)) finish(last.split("\n")[0]);
   finish(`reached ${run.maxSessions} sessions`);
   } catch (e) { die(e); }
 }

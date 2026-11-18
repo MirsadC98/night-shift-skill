@@ -244,6 +244,40 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
   assert.match(log, /chain ends: reached 2 sessions/);
 });
 
+// A session that ends after --until: its fake waits for the deadline in run.json to pass, then writes its handover.
+async function pastDeadlineRun(handover) {
+  const { state, env, root } = setup();
+  const fake = path.join(root, "fake-past-deadline.mjs");
+  fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path";
+const st = process.env.NIGHT_SHIFT_STATE;
+for await (const c of process.stdin);
+const { deadline } = JSON.parse(fs.readFileSync(path.join(st, "run.json"), "utf8"));
+while (Date.now() <= deadline + 100) await new Promise((r) => setTimeout(r, 50));
+fs.writeFileSync(path.join(st, "next-prompt.md"), ${JSON.stringify(handover)});
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-1", result: "ok" }));
+`);
+  const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+  fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake, maxSessions: null, until: "09:00", deadline: Date.now() + 4000 }));
+  fs.writeFileSync(path.join(state, "next-prompt.md"), "first piece");
+  const { code } = await runOnce(["--state", state, "--headless"], env, root);
+  const log = fs.readFileSync(path.join(state, "chain.log"), "utf8");
+  assert.equal(code, 0, log);
+  assert.match(log, /session 01 starts: first piece/, "the session must start before the deadline");
+  return log;
+}
+
+test("a STOP handover written after --until has passed ends the chain with the STOP reason, not the deadline", async () => {
+  const log = await pastDeadlineRun("STOP: all pieces done");
+  assert.match(log, /chain ends: STOP: all pieces done/);
+  assert.doesNotMatch(log, /reached 09:00/);
+});
+
+test("without a STOP handover a passed --until still ends the chain", async () => {
+  const log = await pastDeadlineRun("next piece");
+  assert.match(log, /chain ends: reached 09:00/);
+  assert.doesNotMatch(log, /session 02 starts/);
+});
+
 test("the runner picks model and effort: Opus unless a prompt asks for Fable, max only for a prompt that opens with EFFORT: max", async () => {
   const { state, env, root, home, repo } = setup();
   const fake = path.join(root, "fake-effort.mjs");
