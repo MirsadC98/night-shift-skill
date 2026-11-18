@@ -8,7 +8,7 @@ It runs a chain of fresh headless sessions (`claude -p`). Each session is like o
 
 - **Windows only.** The runner starts itself through Task Scheduler in a hidden console (`conhost --headless`) and uses PowerShell, so it keeps running after your editor closes.
 - **It runs unattended with no permission prompts.** Sessions run with `--permission-mode auto --permission-prompts none`, and `AskUserQuestion` and plan mode are turned off. `scripts/guard.mjs` is a hook that blocks dangerous commands (see below). It is a safety net, not a sandbox. Run it only on a repository you have committed and can restore.
-- **It costs tokens.** By default (mode `opus`) every session runs Opus at `xhigh`, subagents run Sonnet at `medium` and Haiku at `high`, and the chain has no end time. Use `--max-sessions` or `--until` if you want a limit. A session whose prompt opens with `MODEL: fable` runs on Fable at `high`; `SKILL.md` allows that for one hard piece only. Fable has its own weekly allowance, so the runner grants it only while less than 60 % of that allowance is used, and to at most two sessions in a chain while the share is unknown. A piece it refuses, or one the allowance cuts off, runs on Opus at `max`. See "Modes" for the other mode.
+- **It costs tokens.** By default (mode `opus`) every session runs Opus at `xhigh`, subagents run Sonnet at `medium` and Haiku at `high`, and the chain has no end time. Use `--max-sessions` or `--until` if you want a limit. A session whose prompt opens with `MODEL: fable` runs on Fable at `high`; `SKILL.md` allows that for one hard piece only. Fable has its own weekly allowance, so the runner grants it only while less than 60 % of that allowance is used, and to at most two sessions in a chain while the share is unknown. A piece it refuses, or one the allowance cuts off, runs on Opus at `max`. Mythos, which Anthropic opens only to organizations it has verified, is the same model as Fable under another name and draws on the same weekly allowance: everything this page says about Fable's allowance, its ceiling and its count holds for the two together, and `MODEL: mythos` works as `MODEL: fable` does. See "Modes" for the other modes.
 
 ## Requirements
 
@@ -40,7 +40,7 @@ node ~/.claude/skills/night-shift/scripts/night-chain.mjs stop   --repo <dir> [-
 node ~/.claude/skills/night-shift/scripts/night-chain.mjs reload --repo <dir>
 ```
 
-`start` also takes `--until HH:MM`, `--max-sessions <n>`, `--model <m>`, `--effort <level>`, `--fable-ceiling <share>`, `--fable-sessions <n>`, `--mode opus|fable`, `--lang <code>`, `--max-wait-hours <h>` (the longest wait for a usage limit or an outage, default 6; a value that is not a positive number stops `start`), `--state <dir>` (continue in an earlier run's folder) and `--window` (a visible console; closing it stops the chain). `start` without a prompt goes on from a session a limit or an error cut off, kept in `<state>/resume.json`.
+`start` also takes `--until HH:MM`, `--max-sessions <n>`, `--model <m>`, `--effort <level>`, `--fable-ceiling <share>`, `--fable-sessions <n>`, `--mode opus|fable|mythos`, `--lang <code>`, `--max-wait-hours <h>` (the longest wait for a usage limit or an outage, default 6; a value that is not a positive number stops `start`), `--state <dir>` (continue in an earlier run's folder) and `--window` (a visible console; closing it stops the chain). `start` without a prompt goes on from a session a limit or an error cut off, kept in `<state>/resume.json`.
 
 While a chain runs, write new work or changed rules into `<state>/inbox.md`. The next session reads that file first.
 
@@ -70,10 +70,10 @@ Put a `.claude/night-shift.json` in the target repository. Every key is optional
 - `stateDir`: the folder for the chain's log, prompts and inbox. The default is `<temp>/night-shift-<repo>-{date}`, inside your own profile. A folder under `C:/temp` is shorter to type, but on a PC with other accounts those users can write there too, and the next session reads `inbox.md` and `next-prompt.md` from this folder as instructions. On a shared PC keep the default. A drive root, a folder directly below one, your home folder, the repository, the temp folder itself, `.git` and `~/.claude` are refused.
 - `report`: the night report. The default is `NIGHT_RUNS.md`.
 - `lessons`: the notes file where sessions keep lessons that outlast one session.
-- `mode`: `"opus"` (the default) or `"fable"` (see "Modes").
+- `mode`: `"opus"` (the default), `"fable"` or `"mythos"` (see "Modes").
 - `lang`: the language of what you read; `"en"` is the default (see "Language").
 - `model`, `effort`: what a session runs on when its prompt names neither. What `model` means depends on the mode (see "Modes").
-- `fableCeiling`, `fableSessions`: in mode `opus`, the share of Fable's weekly allowance above which a `MODEL: fable` prompt runs on Opus at `max` instead, and how many Fable sessions a chain may run while that share is unknown. In mode `fable`, `fableCeiling` is the share at or over which sessions run on Opus at `xhigh` until the reset, and `fableSessions` does not apply.
+- `fableCeiling`, `fableSessions`: in mode `opus`, the share of the weekly allowance Fable and Mythos share at or over which a `MODEL: fable` or `MODEL: mythos` prompt runs on Opus at `max` instead, and how many sessions on either a chain may run while that share is unknown (the two count together). In mode `fable` or `mythos`, `fableCeiling` is the share at or over which sessions run on Opus at `xhigh` until the reset, and `fableSessions` does not apply. The keys and their flags keep Fable's name for both models.
 - `maxWaitHours`: the longest the chain waits for a usage limit to reset or for an outage to pass (see "When a session fails"). The default is 6.
 - `mcp`: `"none"` (the default), `"inherit"` or a list of server names. A night run loads no MCP server and the guard refuses every `mcp__` tool, unless the project lists the server (`"mcp": ["my-server"]`) or sets `"inherit"`.
 - `deny`: your own guard rules. `pattern` is a regular expression and `flags` defaults to `i`.
@@ -82,12 +82,15 @@ Put a `.claude/night-shift.json` in the target repository. Every key is optional
 
 `mode` in the project file, or `--mode` on `start`, picks how the chain uses models.
 
-- **`opus`** (the default): every session runs on Opus at `xhigh`. A session whose prompt opens with `MODEL: fable` runs on Fable at `high`, for one hard piece, while the Fable gate allows it (see above).
+- **`opus`** (the default): every session runs on Opus at `xhigh`. A session whose prompt opens with `MODEL: fable` (or `MODEL: mythos`) runs on that model at `high`, for one hard piece, while the gate allows it (see above). A session on a model your account cannot run (the CLI refuses it as not found before any turn) does not end the chain: its piece runs on Opus at `max`, and so does every later ask for that model in the chain.
 - **`fable`**: every session runs on Fable at `high`. While Fable's weekly share is at or over `fableCeiling` (default 0.6), or used up, sessions run on Opus at `xhigh` until the reset. The runner never picks `max` in this mode. `effort` is Fable's level there: the sample config's `"effort": "xhigh"`, or a global `effort`, runs every Fable session at `xhigh` instead of `high`, and a `max` you set runs them all at `max`. The Opus fallback stays at `xhigh`.
+- **`mythos`**: mode `fable` with Mythos as the main model, for an account Mythos is open to. Everything said for `fable` holds, on the same allowance and the same `fableCeiling`.
 
-What `model` means: in mode `opus` it is the main model, and any model that is not Fable passes. In mode `fable` a Fable id is the main model and an Opus id is the fallback. `--model fable` alone means mode `fable`; `--mode opus --model fable` is refused.
+In mode `fable` or `mythos`, a prompt that opens with `MODEL: opus` runs that session on the Opus fallback, and one that names the other of the two models stays on the main model (they are one model; `chain.log` notes it). A main model your account cannot run ends the chain (`session NN cannot run: …`): pick another mode.
 
-The limit: Fable's share arrives only on Fable calls. If the CLI never reports it, fable mode uses Fable until its weekly allowance runs out, then Opus until the reset.
+What `model` means: in mode `opus` it is the main model, and any model that is not Fable or Mythos passes. In mode `fable` or `mythos` an id of that model is the main model and an Opus id is the fallback. `--model fable` alone means mode `fable`, and `--model mythos` alone means mode `mythos` on the model id `claude-mythos-5-2` (the CLI has no `mythos` alias). `--mode opus` with a Fable or Mythos model is refused, and so is a Mythos model in mode `fable` or a Fable model in mode `mythos`.
+
+The limit: the allowance's share arrives only on Fable or Mythos calls. If the CLI never reports it, mode `fable` or `mythos` uses its main model until the weekly allowance runs out, then Opus until the reset.
 
 ### Your rules
 
