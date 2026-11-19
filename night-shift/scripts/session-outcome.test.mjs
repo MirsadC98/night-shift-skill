@@ -193,6 +193,42 @@ test("a rate-limit event that is not rejected clears the rejected one a later li
   assert.deepEqual([cleared.limited, cleared.limitInfo, cleared.resetAt], [true, null, null]);
 });
 
+// Session 32's final review: resulted and cost, read directly.
+test("resulted and cost: a result line's dollars, none without one, and an empty trailing result that never lowers them", () => {
+  const out = (stream, ...rest) => { const o = sessionOutcome(stream, ...rest); return [o.resulted, o.cost]; };
+  assert.deepEqual(out(result({ total_cost_usd: 2.5 })), [true, 2.5]);
+  // No result line: a crash, a kill or the timer's; no dollars.
+  assert.deepEqual(out("", "boom", 1), [false, 0]);
+  assert.deepEqual(out(turn("claude-opus-5-5"), "", null, { timedOut: true, hours: 4 }), [false, 0]);
+  // An empty trailing result keeps the real one, at the larger of the two totals.
+  assert.deepEqual(out([result({ num_turns: 4, total_cost_usd: 5 }), result({ num_turns: 0, result: "", total_cost_usd: 2 })].join("\n")), [true, 5]);
+  assert.deepEqual(out([result({ num_turns: 4, total_cost_usd: 5 }), result({ num_turns: 0, result: "", total_cost_usd: 7 })].join("\n")), [true, 7]);
+  // Alone, an empty result is still a result: a session that did nothing, at its own cost.
+  assert.deepEqual(out(result({ num_turns: 0, result: "", total_cost_usd: 0.1 })), [true, 0.1]);
+  // A later real result (a resumed part) carries the conversation's whole total: it replaces the earlier one, never adds.
+  assert.deepEqual(out([result({ total_cost_usd: 1 }), result({ num_turns: 2, total_cost_usd: 3 })].join("\n")), [true, 3]);
+  // A total that is missing or not a number costs nothing.
+  assert.deepEqual(out(result({ total_cost_usd: undefined })), [true, 0]);
+  assert.deepEqual(out(result({ total_cost_usd: "x" })), [true, 0]);
+});
+
+test("a rate_limit_event without unifiedWindows or without rate_limit_info is the event, with no window, and clears nothing", () => {
+  const bare = JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "allowed" } }), noInfo = JSON.stringify({ type: "rate_limit_event" });
+  for (const ev of [bare, noInfo]) {
+    const o = sessionOutcome([ev, turn("claude-opus-5-5"), result({})].join("\n"));
+    assert.deepEqual(o.fields, ["rate_limit_event"]);
+    assert.deepEqual([o.windows.first, o.windows.last, o.windows.latest, o.limited], [null, null, {}, false]);
+    // An earlier event's windows stay the last ones read.
+    const after = sessionOutcome([limitEvent({ five_hour: { utilization: 0.4 } }), ev, turn("claude-opus-5-5"), result({})].join("\n"));
+    assert.deepEqual([after.windows.last, after.windows.latest], [{ five_hour: { utilization: 0.4 } }, { five_hour: { utilization: 0.4 } }]);
+  }
+  // Without rate_limit_info an event says nothing of a rejection: a limit result still borrows the earlier rejected one.
+  const rejected = JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "rejected", rateLimitType: "five_hour", resetsAt: 1795000000 } });
+  const hit = result({ is_error: true, api_error: "usage_limit_reached", num_turns: 5 });
+  const o = sessionOutcome([rejected, result({ is_error: true, subtype: "error_max_turns", result: "Reached max turns" }), noInfo, hit].join("\n"));
+  assert.deepEqual([o.limited, o.resetAt], [true, 1795000000 * 1000 + 60_000]);
+});
+
 // Mythos, measured 2026-11-18 with claude 2.1.327 (the two probe streams, cut to what is read here).
 test("a session the CLI refused its model (--model mythos: a 404, no turn on any model) is modelUnavailable and fatal", () => {
   const o = sessionOutcome(fixture("session-mythos-word-2026-11-18.jsonl"), "", 1);

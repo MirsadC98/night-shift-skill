@@ -159,7 +159,7 @@ const denialReason = (t) => {
 };
 
 // A model billed in the totals that no transcript row names (calls the transcripts do not record): its own row,
-// with the totals' tokens and dollars and no count of calls. A second key of that model ("…[1m]") adds to the row.
+// with the totals' tokens and dollars (its keys added up) and no count of calls.
 function addUntracked(row, mu) {
   add(row.usage, { input_tokens: mu.inputTokens, cache_read_input_tokens: mu.cacheReadInputTokens, cache_creation_input_tokens: mu.cacheCreationInputTokens, output_tokens: mu.outputTokens });
   row.usage.calls = 0;
@@ -195,11 +195,17 @@ function parseSession(state, nn) {
   // Once the session has its totals: give the agents the output their transcripts
   // missed, then split each model's dollars over its rows by weighted tokens.
   if (result?.modelUsage) {
+    // One model's keys ("…[1m]" for the main thread, the plain id for its subagents) bill the same rows: added up first,
+    // so that the output the rows missed is counted once, against both keys' output.
+    const byModel = new Map();
     for (const [key, mu] of Object.entries(result.modelUsage)) {
-      const model = key.replace(/\[.*\]$/, "");
+      const model = key.replace(/\[.*\]$/, ""), sum = byModel.get(model) || {};
+      for (const f of ["inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens", "costUSD"]) sum[f] = (sum[f] || 0) + (Number(mu?.[f]) || 0);
+      byModel.set(model, sum);
+    }
+    for (const [model, mu] of byModel) {
       const mine = rows.filter((r) => r.model === model);
       if (!mine.length) { if (mu.costUSD || mu.inputTokens || mu.outputTokens) rows.push(untrackedRow(model, mu)); continue; }
-      if (mine.every((r) => r.untracked)) { addUntracked(mine[0], mu); continue; }
       const counted = mine.reduce((s, r) => s + r.usage.output, 0);
       const agentsOf = mine.filter((r) => r.kind !== "ana");
       const calls = agentsOf.reduce((s, r) => s + r.usage.calls, 0);
@@ -210,8 +216,7 @@ function parseSession(state, nn) {
         r.usage.units += extra * WEIGHT.output;
       }
       const units = mine.reduce((s, r) => s + r.usage.units, 0);
-      // Added up: two keys of one model ("…[1m]" and the plain id) both bill its rows.
-      for (const r of mine) r.cost = (r.cost || 0) + (units ? (mu.costUSD || 0) * r.usage.units / units : 0);
+      for (const r of mine) r.cost = (r.cost || 0) + (units ? mu.costUSD * r.usage.units / units : 0);
     }
   }
   const tools = entries.filter((j) => j.type === "assistant" && !j.parent_tool_use_id)

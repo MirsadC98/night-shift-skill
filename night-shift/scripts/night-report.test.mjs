@@ -126,6 +126,23 @@ test("two keys of one model in the totals (the plain id and its [1m] form) add u
   assert.match(plain.split("Night total")[1] ?? "", /total \$2\.00/);
 });
 
+// Session 32's final review: one model's two keys (its "[1m]" form for the main thread, the plain id for the subagents)
+// are added up before the output the rows missed is counted, so the subagents' missing output is not lost.
+test("a model with two keys gives its subagents the output their transcripts missed, counted against both keys", () => {
+  const msg = (id, out) => line({ type: "assistant", message: { id, model: "claude-opus-5-5", role: "assistant", content: [{ type: "text", text: "ok" }], usage: { input_tokens: 10, output_tokens: out } } });
+  const state = finished([msg("msg_a", 1000), success({ "claude-opus-5-5[1m]": used(10, 1000, 1), "claude-opus-5-5": used(10, 3000, 1) }, 2)]);
+  const cfg = path.join(path.dirname(state), "claude-config"), base = path.join(cfg, "projects", "demo-app", SID);
+  fs.mkdirSync(path.join(base, "subagents"), { recursive: true });
+  fs.writeFileSync(`${base}.jsonl`, [msg("msg_a", 1000), ""].join("\n"));
+  fs.writeFileSync(path.join(base, "subagents", "agent-a.jsonl"), [msg("msg_b", 1000), ""].join("\n"));
+  const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+  fs.writeFileSync(path.join(state, "run.json"), line({ ...run, claudeConfigDir: cfg }));
+  const plain = buildReport(state, { focus: "all", pid: 0 }).plain;
+  assert.match(plain, /main opus 5\.5\s+1 call\s+\$0\.50\n\s+in 10 read 0 write 0 out 1k/, plain);
+  assert.match(plain, /sub opus 5\.5\s+1 agent\s+\$1\.50\n\s+in 10 read 0 write 0 out 3k/, plain);
+  assert.match(plain.split("Night total")[1] ?? "", /total \$2\.00/);
+});
+
 // U20: a time the user reads comes from the language table's clock; a section is still found by its heading's HH:MM.
 test("the report's clock times are the language table's, and a section is still found by its heading's HH:MM", async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "night-report-clock-"));
@@ -164,6 +181,13 @@ test("a report section is found by its date and start time, not by the time alon
   const early = "## 2026-11-18 · run 1 · session 04 (23:58–00:40) · early piece\n\n**Remaining:** 2 sessions\n";
   assert.equal(reportSection(early, "04", "00:03", "2026-11-19").title, "early piece");
   assert.equal(reportSection(early, "04", "00:03", "2026-11-20"), null);
+  // The day after only for a heading whose span crosses midnight or names no end (session 32's final review): the next
+  // night's session of the same number and start time is another job, and an older job without a section gets none.
+  const nextNight = "## 2026-11-19 · run 2 · session 07 (22:00–23:10) · tonight's piece\n\n**Remaining:** 1 sessions\n";
+  assert.equal(reportSection(nextNight, "07", "22:00", "2026-11-18"), null);
+  assert.equal(reportSection(nextNight, "07", "22:00", "2026-11-19").title, "tonight's piece");
+  assert.equal(reportSection("## 2026-11-19 · run 1 · session 03 (23:55-00:30) · hyphen piece\n", "03", "23:55", "2026-11-18").title, "hyphen piece");
+  assert.equal(reportSection("## 2026-11-19 · run 1 · session 03 (23:55) · open piece\n", "03", "23:55", "2026-11-18").title, "open piece");
   // A heading with no date is read by its time.
   assert.equal(reportSection("## run 1 · session 05 (10:00–11:00) · undated\n", "05", "10:05", "2026-11-19").title, "undated");
 });
