@@ -109,6 +109,8 @@ export function sessionOutcome(stream, errText = "", code = null, { timedOut = f
     // The limit windows of the session's first and last rate_limit_event (the whole account's), and each window's
     // latest reading, which an event without that window (another model's call) does not drop.
     windows: { first, last, latest },
+    // The session's dollars, the CLI's total_cost_usd: a resumed conversation's total includes its earlier parts.
+    cost,
     timedOut,
     // The known stream fields this stream carried (STREAM_FIELDS' order), for fieldsGone.
     fields: STREAM_FIELDS.filter((f) => fields.has(f)),

@@ -72,6 +72,9 @@ test("a misspelt key and a wrong type are named", () => {
   assert.equal(n({ weeklyCeiling: 101 }), 1);
   assert.equal(n({ weeklyCeiling: "80" }), 1);
   assert.equal(n({ fableCeiling: 100, fableSessions: 0, maxWaitHours: 0.5, weeklyCeiling: 80 }), 0);
+  assert.equal(n({ maxUsd: 0 }), 1);
+  assert.equal(n({ maxUsd: "20" }), 1);
+  assert.equal(n({ maxUsd: 12.5 }), 0);
 });
 
 test("a state folder may not be a drive, the home folder, the repository, temp itself, .git or ~/.claude", () => {
@@ -120,6 +123,9 @@ test("the global file holds only run-wide keys", () => {
 });
 test("the weekly ceiling is a run-wide key: one allowance serves every project", () => {
   assert.deepEqual(readGlobalConfig(tmpHome({ weeklyCeiling: 0.8 })), { config: { weeklyCeiling: 0.8 }, errors: [] });
+});
+test("the dollar cap is a run-wide key too: one bill serves every project", () => {
+  assert.deepEqual(readGlobalConfig(tmpHome({ maxUsd: 20 })), { config: { maxUsd: 20 }, errors: [] });
 });
 test("a missing global file is no error", () => assert.deepEqual(readGlobalConfig(emptyHome()), { config: {}, errors: [] }));
 test("the project file wins over the global one, key by key", () => {

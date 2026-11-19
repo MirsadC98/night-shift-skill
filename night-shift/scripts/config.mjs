@@ -84,6 +84,7 @@ export const CONFIG_KEYS = {
   fableSessions: (v) => (Number.isInteger(v) && v >= 0 ? null : "must be a whole number, 0 or more"),
   maxWaitHours: (v) => (typeof v === "number" && v > 0 ? null : "must be a number above 0"),
   weeklyCeiling: (v) => (typeof v === "number" && v > 0 && v <= 100 ? null : "must be a number above 0 and at most 100"),
+  maxUsd: (v) => (typeof v === "number" && v > 0 && Number.isFinite(v) ? null : "must be a number of dollars above 0"),
   mcp: (v) => (v === "none" || v === "inherit" || (Array.isArray(v) && v.every((s) => isStr(s) && s)) ? null : 'must be "none", "inherit" or a list of server names'),
   deny: (v) => denyErrors(v),
 };
@@ -132,7 +133,7 @@ export const projectConfigFile = (repo) => path.join(String(repo), ".claude", "n
 export const readProjectConfig = (repo) => readConfigFile(projectConfigFile(repo));
 
 // Only what is about the run as a whole; anything that names a path or a rule of one repository stays per project.
-export const GLOBAL_KEYS = ["mode", "lang", "effort", "fableCeiling", "fableSessions", "maxWaitHours", "weeklyCeiling"];
+export const GLOBAL_KEYS = ["mode", "lang", "effort", "fableCeiling", "fableSessions", "maxWaitHours", "weeklyCeiling", "maxUsd"];
 export const globalConfigFile = (home = os.homedir()) => path.join(claudeHome(home), "night-shift", "config.json");
 export const readGlobalConfig = (home = os.homedir()) => readConfigFile(globalConfigFile(home), GLOBAL_KEYS);
 

@@ -504,7 +504,7 @@ if (step.model) console.log(JSON.stringify({ type: "assistant", perTurnEffort: s
 if (step.next != null) fs.writeFileSync(path.join(st, "next-prompt.md"), step.next);
 console.log(JSON.stringify(step.refuse
   ? { type: "result", subtype: "success", is_error: true, api_error: step.refuse, num_turns: 1, total_cost_usd: 0, session_id: "fake-" + n, result: "refused" }
-  : { type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-" + n, result: "ok" }));
+  : { type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: step.cost ?? 0, session_id: step.id ?? "fake-" + n, result: "ok" }));
 `;
 async function fableRun(first, script, runPatch = {}, before = null) {
   const { state, env, root } = setup();
@@ -2245,8 +2245,10 @@ test("start refuses an --effort, --fable-ceiling, --fable-sessions or --weekly-c
     [["--fable-sessions", "-1"], /--fable-sessions must be/],
     [["--weekly-ceiling", "most"], /--weekly-ceiling must be a number above 0 and at most 100 \(got most\)/], [["--weekly-ceiling"], /--weekly-ceiling .*no value/],
     [["--weekly-ceiling", "0"], /--weekly-ceiling must be/], [["--weekly-ceiling", "101"], /--weekly-ceiling must be/],
+    [["--max-usd", "lots"], /--max-usd must be a number of dollars above 0 \(got lots\)/], [["--max-usd"], /--max-usd .*no value/],
+    [["--max-usd", "0"], /--max-usd must be/], [["--max-usd", "-5"], /--max-usd must be/],
   ]) {
-    const r = startRun(extra, { effort: "high", fableCeiling: 0.5, fableSessions: 1, weeklyCeiling: 0.8 });
+    const r = startRun(extra, { effort: "high", fableCeiling: 0.5, fableSessions: 1, weeklyCeiling: 0.8, maxUsd: 20 });
     assert.equal(r.status, 1, extra.join(" "));
     assert.match(r.stderr, re, extra.join(" "));
     assert.doesNotMatch(r.stderr, /launch refused/, extra.join(" "));
@@ -2260,6 +2262,10 @@ test("start refuses an --effort, --fable-ceiling, --fable-sessions or --weekly-c
   assert.equal(startRun([]).run.weeklyCeiling, null);
   assert.equal(startRun([], { weeklyCeiling: 0.7 }).run.weeklyCeiling, 0.7);
   assert.equal(startRun(["--weekly-ceiling", "85"], { weeklyCeiling: 0.7 }).run.weeklyCeiling, 0.85);
+  // T5: the dollar cap: none unless asked for, the flag over the config.
+  assert.equal(startRun([]).run.maxUsd, null);
+  assert.equal(startRun([], { maxUsd: 20 }).run.maxUsd, 20);
+  assert.equal(startRun(["--max-usd", "12.5"], { maxUsd: 20 }).run.maxUsd, 12.5);
 });
 
 // T4, U14: limits.json keeps the seven-day window's last reading for a later start in the same folder while the window has
@@ -2283,6 +2289,7 @@ test("start keeps the seven-day window's reading until it resets, and the stream
   assert.deepEqual(limitsAfter({ five: { ...five, resetsAt: past } }), { seen: [], told: [] });
   assert.deepEqual(limitsAfter({ five: { ...five, resetsAt: null } }), { seen: [], told: [] });
   assert.deepEqual(limitsAfter("{ broken"), { seen: [], told: [] });
+  assert.deepEqual(limitsAfter({ week, seen, usd: { "fake-1": 9 } }), { week, seen, told: [] }, "T5: each start counts its own dollars");
 });
 
 test("start prints the weekly ceiling, and the kept reading that already stops the chain", async () => {
@@ -2297,6 +2304,51 @@ test("start prints the weekly ceiling, and the kept reading that already stops t
   });
   assert.match(over, /^ {2}ceiling: no new session once the seven-day window is at or over 80%; it was at 86% at \d{4}-\d\d-\d\d \d\d:\d\d, so none starts before it resets \d{4}-\d\d-\d\d \d\d:\d\d$/m);
   assert.doesNotMatch(await startPrints(() => {}), /^ {2}ceiling:/m);
+});
+
+test("start prints the dollar cap", async () => {
+  const capped = await startPrints(({ repo }) => {
+    fs.mkdirSync(path.join(repo, ".claude"), { recursive: true });
+    fs.writeFileSync(path.join(repo, ".claude", "night-shift.json"), JSON.stringify({ maxUsd: 20 }));
+  });
+  assert.match(capped, /^ {2}cap: {4}no new session once this start's sessions cost \$20\.00 or more$/m);
+  assert.doesNotMatch(await startPrints(() => {}), /^ {2}cap:/m);
+});
+
+// T5: --max-usd ends the chain before a new session once the sessions this start ran cost that much, as --weekly-ceiling
+// does; the CLI's own --max-budget-usd would end a session mid-piece. A resumed conversation's total includes its
+// earlier parts, so a conversation counts once, at its latest total.
+test("--max-usd: no new session once this start's sessions cost it; next-prompt.md stays; a resumed conversation counts once", async () => {
+  const r = await fableRun("first", { 1: { cost: 3, next: "second" }, 2: { cost: 2.5, next: "third" }, 3: { next: "STOP: done" } }, { maxUsd: 5 });
+  assert.match(r.log, /session 02 starts: second/);
+  assert.match(r.log, /chain ends: this start's sessions cost \$5\.50, at or over the \$5\.00 cap \(--max-usd\); next-prompt\.md stays for a start with --state$/m);
+  assert.doesNotMatch(r.log, /session 03 starts/);
+  assert.equal(fs.readFileSync(path.join(r.state, "next-prompt.md"), "utf8"), "third");
+  const none = await fableRun("first", { 1: { cost: 30, next: "second" }, 2: { next: "STOP: done" } });
+  assert.match(none.log, /chain ends: STOP: done/);
+  // Session 01's conversation cost $4 before a limit cut it off; resumed, the CLI reports $4.50 for the whole of it.
+  const id = "00000000-0000-4000-8000-000000000001";
+  const resumed = await fableRun("first", { 1: { id, cost: 4.5, next: "second" }, 2: { cost: 1, next: "third" }, 3: { next: "STOP: done" } }, { maxUsd: 5 }, (state) => {
+    fs.writeFileSync(path.join(state, "limits.json"), JSON.stringify({ usd: { [id]: 4 } }));
+    fs.writeFileSync(path.join(state, "resume.json"), JSON.stringify({ nn: "01", sessionId: id, why: "limit" }));
+  });
+  assert.match(resumed.log, /session 02 starts: second/);
+  assert.match(resumed.log, /chain ends: this start's sessions cost \$5\.50, at or over the \$5\.00 cap/);
+  // A session a limit or an error cut off still goes on over the cap: its work may be uncommitted.
+  const cut = await fableRun("first", { 1: { id, cost: 6, next: "second" }, 2: { next: "STOP: done" } }, { maxUsd: 5 }, (state) => {
+    fs.writeFileSync(path.join(state, "limits.json"), JSON.stringify({ usd: { [id]: 5.5 } }));
+    fs.writeFileSync(path.join(state, "resume.json"), JSON.stringify({ nn: "01", sessionId: id, why: "error" }));
+  });
+  assert.match(cut.log, /session 01 resumes 00000000-0000-4000-8000-000000000001 after the error/);
+  assert.match(cut.log, /chain ends: this start's sessions cost \$6\.00, at or over the \$5\.00 cap/);
+  // A resumed part that reports no cost (it ended without a result line) keeps the conversation's earlier $4.
+  const blank = await fableRun("first", { 1: { id, next: "second" }, 2: { cost: 1.5, next: "third" }, 3: { next: "STOP: done" } }, { maxUsd: 5 }, (state) => {
+    fs.writeFileSync(path.join(state, "limits.json"), JSON.stringify({ usd: { [id]: 4 } }));
+    fs.writeFileSync(path.join(state, "resume.json"), JSON.stringify({ nn: "01", sessionId: id, why: "limit" }));
+  });
+  assert.match(blank.log, /session 02 starts: second/);
+  assert.match(blank.log, /chain ends: this start's sessions cost \$5\.50, at or over the \$5\.00 cap/);
+  assert.doesNotMatch(blank.log, /session 03 starts/);
 });
 
 // T4: --weekly-ceiling ends the chain before a new session once the seven-day window's last reading is at or over it.

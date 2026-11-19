@@ -7,7 +7,8 @@
 //   node night-chain.mjs start  --repo <dir> (--prompt-file <f> | --prompt <text>) [--until HH:MM]
 //                               [--max-sessions <n>] [--session-hours 4] [--model <m>] [--allow-dirty]
 //                               [--effort xhigh] [--fable-ceiling 0.6] [--fable-sessions 2]
-//                               [--max-wait-hours 6] [--weekly-ceiling <share>] [--mode opus|fable|mythos]
+//                               [--max-wait-hours 6] [--weekly-ceiling <share>] [--max-usd <dollars>]
+//                               [--mode opus|fable|mythos]
 //                               [--lang <code>] [--state <dir>] [--window]
 //   (without --until and --max-sessions the chain goes on until a session writes STOP,
 //    two handovers fail in a row, or stop is called; a usage limit pauses it, and the
@@ -28,7 +29,8 @@
 //    --mode fable or --mode mythos ("mode") makes that model every session's model at high, and Opus
 //    at xhigh (never max) stands in while its allowance is at or over the ceiling or used up.
 //    --weekly-ceiling ("weeklyCeiling", default none) starts no new session once the seven-day window
-//    is at or over that share, and ends the chain with next-prompt.md kept for a start with --state;
+//    is at or over that share, and ends the chain with next-prompt.md kept for a start with --state, and
+//    --max-usd ("maxUsd", default none) does the same once the sessions this start ran cost that many dollars;
 //    at or over 90% of the five-hour window a session waits for its reset)
 //   node night-chain.mjs status --repo <dir>
 //   node night-chain.mjs wait   --repo <dir> [--state <dir>]  (returns once the chain is over: exit 0
@@ -113,8 +115,8 @@ const ratioArg = (v, d) => { const n = Number(v); return v == null || v === true
 const countArg = (v, d) => { const n = Number(v); return v == null || v === true || !Number.isFinite(n) || n < 0 ? d : Math.floor(n); };
 const pct = (u) => `${Math.round(u * 100)}%`;
 // <state>/limits.json: { week: { ratio, resetsAt (s), at (ms) }, the seven-day window's last reading (--weekly-ceiling),
-// five: the same of the five-hour window (FIVE_HOUR_WAIT), and fieldsGone's memo { seen, told } (U14). A share as the
-// stream gives it (0–1), or a percentage.
+// five: the same of the five-hour window (FIVE_HOUR_WAIT), usd: { <conversation id>: dollars } of this start's sessions
+// (--max-usd), and fieldsGone's memo { seen, told } (U14). A share as the stream gives it (0–1), or a percentage.
 const shareOf = (u) => (u > 1 ? u / 100 : u);
 // What each known stream field feeds, for the line that says it stopped arriving (fieldsGone).
 const FIELD_USE = {
@@ -137,7 +139,11 @@ export const weekOver = (week, ceiling, at = Date.now()) => {
 // reset its last reading names (a reading that names none is not waited for).
 export const FIVE_HOUR_WAIT = 0.9;
 export const fiveOver = (five, at = Date.now()) => (five?.resetsAt ? weekOver(five, FIVE_HOUR_WAIT, at) : null);
-// At start: the readings while their windows have not reset, the fields seen, and nothing told yet (each chain tells once).
+// T5: what this start's sessions cost, one conversation once, at its latest total.
+export const spentUsd = (limits) => Object.values(limits?.usd && typeof limits.usd === "object" ? limits.usd : {}).reduce((a, v) => a + (Number(v) || 0), 0);
+const usd = (n) => `$${n.toFixed(2)}`;
+// At start: the readings while their windows have not reset, the fields seen, and nothing told yet (each chain tells once);
+// no dollars: each start counts its own sessions' against --max-usd, as --max-sessions counts its own sessions.
 const keepLimits = (state) => {
   const l = readLimits(state);
   const live = (r) => (r?.resetsAt * 1000 > Date.now() && typeof r.ratio === "number" ? r : null);
@@ -305,7 +311,7 @@ async function start(opt) {
   const hoursArg = opt["session-hours"];
   // At most 500: a timer over 2^31 ms (about 596 h) fires at once.
   if (hoursArg !== undefined && !(num(hoursArg) > 0 && num(hoursArg) <= 500)) fail(`--session-hours must be a positive number of hours, at most 500 (got ${got(hoursArg)})`);
-  for (const [flag, key] of [["effort", "effort"], ["fable-ceiling", "fableCeiling"], ["fable-sessions", "fableSessions"], ["weekly-ceiling", "weeklyCeiling"]]) {
+  for (const [flag, key] of [["effort", "effort"], ["fable-ceiling", "fableCeiling"], ["fable-sessions", "fableSessions"], ["weekly-ceiling", "weeklyCeiling"], ["max-usd", "maxUsd"]]) {
     const v = opt[flag];
     const bad = v !== undefined && CONFIG_KEYS[key](key === "effort" ? v : num(v));
     if (bad) fail(`--${flag} ${bad} (got ${got(v)})`);
@@ -390,6 +396,9 @@ async function start(opt) {
     maxWaitHours: waitArg !== undefined ? Number(waitArg) : cfg.maxWaitHours > 0 ? cfg.maxWaitHours : 6,
     // No new session once the seven-day window's use is at or over this share (null: no ceiling).
     weeklyCeiling: ratioArg(opt["weekly-ceiling"] ?? cfg.weeklyCeiling, null),
+    // T5: no new session once the sessions this start ran cost this many dollars (null: no cap). Checked between
+    // sessions, never inside one: the CLI's --max-budget-usd would end a session mid-piece, its tree dirty.
+    maxUsd: opt["max-usd"] !== undefined ? num(opt["max-usd"]) : cfg.maxUsd ?? null,
     // "none", "inherit" or the list of servers the guard lets through (the guard reads the same file).
     mcp: cfg.mcp ?? "none",
     lang,
@@ -424,6 +433,7 @@ async function start(opt) {
     console.log(`  ceiling: no new session once the seven-day window is at or over ${pct(run.weeklyCeiling)}${over
       ? `; it was at ${pct(over.share)} at ${stamp(week.at)}, so none starts before it resets ${stamp(week.resetsAt * 1000)}` : ""}`);
   }
+  if (run.maxUsd) console.log(`  cap:    no new session once this start's sessions cost ${usd(run.maxUsd)} or more`);
   if (mcpFound?.found.length) console.log(`  mcp:    ${mcpFound.found.map((f) => `${f.name} (${MCP_SOURCE[f.source](f.name)})`).join(", ")}; no other server starts`);
   else if (cfg.mcp === "inherit") console.log("  mcp:    inherit: every MCP server you have starts in each session, and the guard lets all their tools through");
   console.log(`  status: node "${SELF}" status --repo "${repo}"`);
@@ -563,11 +573,15 @@ async function runChain(opt) {
   // the limit resets; resume.json keeps it across a restarted chain too.
   const resumeFile = path.join(state, "resume.json");
   const pendingResume = () => parseOr(read(resumeFile), null);
-  // Ends the chain when the seven-day window's last reading is at or over --weekly-ceiling (weekOver); else returns.
+  // Ends the chain when the seven-day window's last reading is at or over --weekly-ceiling (weekOver), or when this
+  // start's sessions cost --max-usd or more (spentUsd); else returns.
   const ceilingStop = () => {
-    const over = weekOver(readLimits(state).week, run.weeklyCeiling);
+    const limits = readLimits(state);
+    const over = weekOver(limits.week, run.weeklyCeiling);
     if (over) finish(`the seven-day window is at ${pct(over.share)}, at or over the ${pct(run.weeklyCeiling)} weekly ceiling (--weekly-ceiling)${over.resetsAt
       ? ` until it resets ${stamp(over.resetsAt * 1000)}` : ""}; next-prompt.md stays for a start with --state`);
+    const spent = spentUsd(limits);
+    if (run.maxUsd && spent >= run.maxUsd) finish(`this start's sessions cost ${usd(spent)}, at or over the ${usd(run.maxUsd)} cap (--max-usd); next-prompt.md stays for a start with --state`);
   };
   let session = firstSession(state);
   const lastAllowed = lastSessionOf(run);
@@ -640,8 +654,9 @@ async function runChain(opt) {
     if (run.deadline && Date.now() >= run.deadline) finish(`reached ${run.until}`);
     if (!prompt) finish("next-prompt.md is empty");
     if (!asked.body.trim()) finish("next-prompt.md holds only MODEL/EFFORT lines");
-    // --weekly-ceiling: no new session while the seven-day window's last reading is at or over it. A session a limit
-    // or an error cut off still goes on: its work may be uncommitted. next-prompt.md stays for a later start.
+    // --weekly-ceiling and --max-usd: no new session while the seven-day window's last reading, or what this start's
+    // sessions cost, is at or over it. A session a limit or an error cut off still goes on: its work may be uncommitted.
+    // next-prompt.md stays for a later start.
     if (!pendingResume()) ceilingStop();
     // T10: at or over FIVE_HOUR_WAIT of the five-hour window, the next session waits for its reset, a resumed one too: cut
     // off again, its work would stay half done. A reset no session may start after (--until), or farther than
@@ -694,6 +709,12 @@ async function runChain(opt) {
     for (const f of lost.gone) log(`session ${nn}: its stream had no ${f}, which earlier sessions' streams had (the CLI may have renamed it); ${FIELD_USE[f]}`);
     if (lost.ceilingBlind) log(`session ${nn}: its stream had no unifiedWindows.seven_day, which --weekly-ceiling reads; until a session's stream has it, the ceiling stops no session`);
     writeLimits(state, lost.memo);
+    // T5: a conversation's latest total replaces its earlier one (a resumed session's includes what came before), but
+    // never lowers it: a resumed part that ends without a result line (killed, crashed, an expired id) reports $0.
+    if (result.sessionId) {
+      const spent = readLimits(state).usd || {};
+      writeLimits(state, { usd: { ...spent, [result.sessionId]: Math.max(Number(spent[result.sessionId]) || 0, result.cost || 0) } });
+    }
     // A session that wrote its handover has done its piece, even when a limit cut off what came after.
     const wrote = fs.statSync(next).mtimeMs > before && read(next).trim() !== prompt;
     // T2: before the end line too, so the session's card has it.
