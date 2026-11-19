@@ -564,6 +564,34 @@ test("a session's header opens with the marker and names the user's language and
   assert.match((await headerOf("en")).input, /The user reads English: /);
 });
 
+// C4 follow-up: Claude Code runs a hook in the session's environment, so the guard's hook knows the run's skill folder.
+// The stand-in runs the hook command the runner wrote into the settings layer, as the CLI would, on a copy into that
+// folder: only a guard that sees NIGHT_SHIFT_SKILL refuses it as the skill (outside the roots a shell copy passes).
+test("the guard's hook the runner writes sees the run's skill folder and refuses a shell copy into it", async () => {
+  const { root, state, env } = setup();
+  const skillDir = path.dirname(path.dirname(CHAIN));
+  const fake = path.join(root, "fake-hook.mjs");
+  fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path"; import { spawnSync } from "node:child_process";
+const st = process.env.NIGHT_SHIFT_STATE;
+for await (const c of process.stdin) { /* the prompt */ }
+const settings = JSON.parse(fs.readFileSync(process.argv[process.argv.indexOf("--settings") + 1], "utf8"));
+const hook = settings.hooks.PreToolUse[0].hooks[0];
+const ask = (command) => spawnSync(hook.command, hook.args, { encoding: "utf8", env: process.env,
+  input: JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command }, cwd: process.cwd() }) }).stdout;
+fs.writeFileSync(path.join(st, "hook-1.json"), JSON.stringify({ copy: ask(${JSON.stringify(`cp a.mjs "${path.join(skillDir, "scripts", "guard.mjs").replace(/\\/g, "/")}"`)}), plain: ask("git status") }));
+fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done");
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-1", result: "ok" }));
+`);
+  const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+  fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake, maxSessions: null }));
+  fs.writeFileSync(path.join(state, "next-prompt.md"), "a piece");
+  const { code } = await runOnce(["--state", state, "--headless"], env, root);
+  assert.equal(code, 0, fs.readFileSync(path.join(state, "chain.log"), "utf8"));
+  const seen = JSON.parse(fs.readFileSync(path.join(state, "hook-1.json"), "utf8"));
+  assert.match(JSON.parse(seen.copy).hookSpecificOutput.permissionDecisionReason, /writing the night-shift skill itself is not allowed/);
+  assert.equal(seen.plain, "");
+});
+
 test("a runner whose language table is gone reads English and says so once in chain.log", async () => {
   const gone = await headerOf("xx");
   assert.match(gone.input, /The user reads English: /);
@@ -2248,10 +2276,11 @@ test("doctor checks what a start needs, one line a check, and exits 0 when nothi
   const lines = r.stdout.trim().split("\n");
   assert.match(lines[0], /^night-shift \S+ doctor$/);
   assert.match(lines.at(-1), /^all checks pass/);
-  for (const what of ["node", "git", "claude", "repo", "config", "model", "rules", "lang", "mcp", "state", "guard", "hook", "home"]) assert.equal(doctorLine(r.stdout, "ok", what).length >= 1, true, `${what}:\n${r.stdout}`);
+  for (const what of ["skill", "node", "git", "claude", "repo", "config", "model", "rules", "lang", "mcp", "state", "guard", "hook", "home"]) assert.equal(doctorLine(r.stdout, "ok", what).length >= 1, true, `${what}:\n${r.stdout}`);
   assert.equal(lines.filter((l) => /^  FAIL/.test(l)).length, 0);
-  // This copy is not the one at <home>/.claude/skills/night-shift, whose files the guard protects.
-  assert.match(doctorLine(r.stdout, "warn", "skill")[0], /the guard protects the skill's files only at .*skills.night-shift/);
+  assert.equal(lines.filter((l) => /^  warn/.test(l)).length, 0, r.stdout);
+  // This copy is outside the repository the check is for, so the guard names it as the skill's own files.
+  assert.match(lines[1], new RegExp(`^  ok    skill: ${literal(path.dirname(path.dirname(CHAIN)))}; the guard refuses a night session's writes to it$`), "the first check");
   assert.match(doctorLine(r.stdout, "ok", "claude")[0], new RegExp(literal(process.execPath)));
   assert.equal(doctorLine(r.stdout, "ok", "config").length, 2, "the global file and the project's");
   assert.match(doctorLine(r.stdout, "ok", "config")[1], /night-shift\.json \(none; the defaults apply\)$/);
@@ -2260,6 +2289,26 @@ test("doctor checks what a start needs, one line a check, and exits 0 when nothi
   assert.match(doctorLine(r.stdout, "ok", "home")[0], /\(not a link\)$/);
   assert.match(doctorLine(r.stdout, "ok", "state")[0], /night-shift-repo-\d{8}; writable$/);
   assert.deepEqual(fs.readdirSync(path.join(c.home, "..")).filter((f) => f.startsWith(".night-shift-doctor-")), [], "the probe folder is gone");
+});
+
+// C4 follow-up: the skill row asks the guard as the hook the runner writes, with the run's skill folder in its environment:
+// ok for a copy it names (the installed path, or any copy outside the repository), warn for one inside the repository.
+test("doctor's skill row: ok for a copy the guard names as the skill, warn for a copy inside the repository --repo names", () => {
+  const skill = path.dirname(path.dirname(CHAIN));
+  const c = pointerCase();
+  const copyTo = (dir) => { fs.cpSync(skill, dir, { recursive: true }); return path.join(dir, "scripts", "night-chain.mjs"); };
+  const inRepo = copyTo(path.join(c.repo, "tools", "night-shift"));
+  const warned = c.run("doctor", [], {}, inRepo);
+  assert.equal(warned.status, 0, warned.stdout + warned.stderr);
+  assert.match(doctorLine(warned.stdout, "warn", "skill")[0], new RegExp(`^  warn  skill: ${literal(path.join(c.repo, "tools", "night-shift"))} is inside the repository ${literal(c.repo)}, `
+    + "where the guard leaves the skill's files writable, so a night session could change this copy's; install it outside the repository$"));
+  assert.match(warned.stdout.trim().split("\n").at(-1), /^all checks pass \(1 warning\)$/);
+  // The same copy, checked for another repository: outside it, so the guard names it.
+  const other = c.run("doctor", ["--repo", setup().repo], {}, inRepo);
+  assert.match(doctorLine(other.stdout, "ok", "skill")[0], /; the guard refuses a night session's writes to it$/);
+  // The installed path stays named whatever the repository (as before the C4 follow-up).
+  const installed = copyTo(path.join(c.home, ".claude", "skills", "night-shift"));
+  assert.match(doctorLine(c.run("doctor", [], {}, installed).stdout, "ok", "skill")[0], new RegExp(`^  ok    skill: ${literal(path.join(c.home, ".claude", "skills", "night-shift"))}; `));
 });
 
 test("doctor names each check that fails, with start's own messages, and exits 1", () => {

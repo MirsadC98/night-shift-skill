@@ -51,7 +51,8 @@
 //   node night-chain.mjs init --repo <dir>         (writes a starter .claude/night-shift.json and a rules file
 //                                                   skeleton, .claude/night-shift-rules.md, never over a file,
 //                                                   and prints the next steps)
-//   node night-chain.mjs doctor [--repo <dir>]     (checks what a start needs, one line a check: the skill's copy,
+//   node night-chain.mjs doctor [--repo <dir>]     (checks what a start needs, one line a check: the skill's copy
+//                                                   and whether the guard protects its files from a night session,
 //                                                   Node, git and the CLI, the config and rule files, the language
 //                                                   table, the MCP list, the state folder, the guard's self-test and
 //                                                   the hook the runner writes, a linked ~/.claude; exit 1 on a FAIL;
@@ -1167,16 +1168,15 @@ function reload(opt) {
 // when it does not yet, removed at once (the guard's self-test makes and removes its own in the temp folder).
 async function doctor(opt) {
   const rows = [];
-  const row = (verdict, what, text) => rows.push({ verdict, line: `  ${verdict.padEnd(4)}  ${what}: ${text}` });
+  const line = (verdict, what, text) => ({ verdict, line: `  ${verdict.padEnd(4)}  ${what}: ${text}` });
+  const row = (verdict, what, text) => rows.push(line(verdict, what, text));
   const real = (p) => { try { return fs.realpathSync.native(p); } catch { return path.resolve(p); } };
   const same = platform.samePath;
 
-  // The skill: a whole copy, at the path whose files the guard protects.
-  const installed = path.join(claudeHome(), "skills", "night-shift");
+  // The skill: a whole copy, whose files the guard refuses a night session (asked below, once the hook is known).
   const missing = SKILL_FILES.filter((f) => !fs.existsSync(path.join(SKILL_DIR, f)));
-  if (missing.length) row("FAIL", "skill", `${SKILL_DIR} lacks ${missing.join(", ")}; copy the whole skill folder again`);
-  else if (!same(real(SKILL_DIR), real(installed))) row("warn", "skill", `${SKILL_DIR}; the guard protects the skill's files only at ${installed}, so a night session could change this copy's`);
-  else row("ok", "skill", SKILL_DIR);
+  const skillRow = rows.length;
+  row(missing.length ? "FAIL" : "ok", "skill", missing.length ? `${SKILL_DIR} lacks ${missing.join(", ")}; copy the whole skill folder again` : SKILL_DIR);
   const major = Number(process.versions.node.split(".")[0]);
   row(major >= NODE_FLOOR ? "ok" : "FAIL", "node", `${process.version}${major >= NODE_FLOOR ? "" : `; night-shift needs Node ${NODE_FLOOR} or later`}`);
   let git = "";
@@ -1235,7 +1235,7 @@ async function doctor(opt) {
   const self = spawnSync(NODE, [GUARD, "--self-test"], { encoding: "utf8", windowsHide: true, timeout: 120_000 });
   row(self.status === 0 ? "ok" : "FAIL", "guard", `self-test: ${String(self.stdout || "").trim().split("\n").at(-1) || (self.error ? self.error.message : `exit ${self.status}`)}`);
   const hook = guardHook(), cmd = `${hook.command} ${hook.args.join(" ")}`;
-  const env = { ...withoutEffortEnv(process.env), NIGHT_SHIFT: "1", NIGHT_SHIFT_REPO: repo || "", NIGHT_SHIFT_STATE: state };
+  const env = { ...withoutEffortEnv(process.env), NIGHT_SHIFT: "1", NIGHT_SHIFT_REPO: repo || "", NIGHT_SHIFT_STATE: state, NIGHT_SHIFT_SKILL: SKILL_DIR };
   const ask = (tool_name, tool_input) => {
     const r = spawnSync(hook.command, hook.args, { input: JSON.stringify({ hook_event_name: "PreToolUse", tool_name, tool_input, cwd: repo || process.cwd() }),
       encoding: "utf8", windowsHide: true, timeout: hook.timeout * 1000, env });
@@ -1250,6 +1250,16 @@ async function doctor(opt) {
   else if (!push.deny || /could not check/.test(push.deny)) row("FAIL", "hook", `${cmd} let "git push --force origin main" through${push.deny ? `: ${push.deny}` : ""}`);
   else if (plain.deny) row("FAIL", "hook", `${cmd} refuses "git status" too: ${plain.deny}`);
   else row("ok", "hook", `${cmd} refuses "git push --force origin main" and lets "git status" through`);
+  // The skill's row: the guard names the run's copy as the skill itself (at ~/.claude/skills/night-shift, or wherever the
+  // runner's NIGHT_SHIFT_SKILL puts it) unless the repository holds it, where a chain may develop the skill.
+  if (!missing.length) {
+    const w = ask("Write", { file_path: path.join(SKILL_DIR, "SKILL.md") });
+    const rel = repo ? path.relative(real(repo), real(SKILL_DIR)) : "..";
+    const inside = rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
+    rows[skillRow] = w.deny && /the night-shift skill itself/.test(w.deny) ? line("ok", "skill", `${SKILL_DIR}; the guard refuses a night session's writes to it`)
+      : inside ? line("warn", "skill", `${SKILL_DIR} is inside the repository ${repo}, where the guard leaves the skill's files writable, so a night session could change this copy's; install it outside the repository`)
+        : line("warn", "skill", `${SKILL_DIR}; the guard ${w.broken ? `cannot be asked about it: ${w.broken}` : w.deny ? `refuses a write to it only because ${w.deny}` : "lets a write to it through"}, so a night session could change this copy's files`);
+  }
   // A ~/.claude that is a link (a junction to a folder elsewhere): the guard must know what it protects there by the target's path too.
   // Only the folder itself counts as a link: a home reached through a linked parent (macOS's /var) is no link of its own.
   // The guard must refuse the write as Claude's settings: a target outside the writable roots is refused for that alone.

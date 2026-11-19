@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { decide } from "./guard.mjs";
@@ -91,13 +91,17 @@ test("a written path is read the way Windows resolves it: .., a trailing dot, \\
   assert.equal(write("C:/work/repo/src/./sub/../a.ts"), null);
 });
 
-// C4: a plugin install puts the skill in Claude Code's plugin cache, which the guard does not name as the skill's own
-// files (it names ~/.claude/skills/night-shift). README says what still keeps a night session out of it: Write and Edit,
-// and deletes, are limited to the repository and temp folders; a shell redirect or cp there is not (README says so too).
-test("a plugin install's copy of the skill is refused to Write and to a delete by the folders' limit", () => {
+// C4: a plugin install puts the skill in Claude Code's plugin cache. Since the C4 follow-up the guard names the cache
+// as Claude Code's installed plugins, for a shell redirect or cp too (session 23 found `cp` there passed), and the
+// run's own copy as the skill itself (NIGHT_SHIFT_SKILL, the tests at the end of this file).
+test("a plugin install's copy of the skill is refused to Write, a delete, a redirect and cp as an installed plugin's, and as the skill's when the run starts from it", () => {
   const copy = "C:/Users/u/.claude/plugins/cache/night-shift/night-shift/0.3.0-dev/night-shift";
-  assert.match(write(`${copy}/scripts/guard.mjs`) ?? "", /limited to/);
-  for (const c of [`rm -rf ${copy}`, `rm ${copy}/scripts/guard.mjs`]) assert.match(bash(c) ?? "", /limited to/, c);
+  assert.match(write(`${copy}/scripts/guard.mjs`) ?? "", /writing Claude Code's installed plugins is not allowed/);
+  for (const c of [`rm -rf ${copy}`, `rm ${copy}/scripts/guard.mjs`, `cp a.mjs ${copy}/scripts/guard.mjs`, `echo x > ${copy}/SKILL.md`])
+    assert.match(bash(c) ?? "", /Claude Code's installed plugins/, c);
+  const own = { ...env, NIGHT_SHIFT_SKILL: copy };
+  assert.match(write(`${copy}/scripts/guard.mjs`, own) ?? "", /writing the night-shift skill itself is not allowed/);
+  assert.match(bash(`cp a.mjs ${copy}/scripts/guard.mjs`, own) ?? "", /the night-shift skill itself/);
 });
 
 test("a relative delete target is read from where the command stands", () => {
@@ -1087,5 +1091,158 @@ test("a folder named by CLAUDE_CONFIG_DIR is protected as ~/.claude is, also by 
     const t = target.replace(/\\/g, "/");
     assert.match(bash(`echo x > "${t}/settings.json"`, { ...env, CLAUDE_CONFIG_DIR: link }) ?? "", /Claude settings/);
     assert.equal(bash(`echo x > "${t}/notes.md"`, { ...env, CLAUDE_CONFIG_DIR: link }), null);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------- C4 follow-up: the run's skill folder and the plugins
+// The runner puts the folder of the copy it runs from into every session's environment (NIGHT_SHIFT_SKILL), the hook's
+// included: wherever that copy is (a plugin's cache, a folder of the user's own), the guard names it as the skill itself.
+const SKILL_AT = "D:/tools/night-shift";
+const withSkill = (dir, e = env) => ({ ...e, NIGHT_SHIFT_SKILL: dir });
+const edit = (file_path, e = env) => decide({ tool_name: "Edit", tool_input: { file_path, old_string: "a", new_string: "b" } }, e);
+test("the run's skill folder is the night-shift skill itself wherever it is: Write, Edit, a redirect, the in-place writers and deletes", () => {
+  const s = withSkill(SKILL_AT);
+  for (const c of [`cp a.mjs ${SKILL_AT}/scripts/guard.mjs`, `echo x > ${SKILL_AT}/SKILL.md`, `echo x >> ${SKILL_AT}/references/goal.md`,
+    `echo x | tee ${SKILL_AT}/SKILL.md`, `sed -i s/a/b/ ${SKILL_AT}/SKILL.md`, `rm ${SKILL_AT}/scripts/guard.mjs`, `rm -rf ${SKILL_AT}`,
+    `rm -f ${SKILL_AT}/scripts/*.mjs`, `mv x.mjs ${SKILL_AT}/scripts/guard.mjs`])
+    assert.match(bash(c, s) ?? "", /the night-shift skill itself/, c);
+  assert.match(ps(`Set-Content ${SKILL_AT}/SKILL.md x`, s) ?? "", /the night-shift skill itself/);
+  assert.match(write(`${SKILL_AT}/SKILL.md`, s) ?? "", /writing the night-shift skill itself is not allowed/);
+  assert.match(edit(`${SKILL_AT}/scripts/guard.mjs`, s) ?? "", /writing the night-shift skill itself is not allowed/);
+  // Other spellings of the same folder: case, backslashes, .., Git Bash's drive, \\?\.
+  for (const c of [`echo x > "D:\\TOOLS\\Night-Shift\\SKILL.md"`, "echo x > D:/tools/x/../night-shift/SKILL.md", "echo x > /d/tools/night-shift/SKILL.md",
+    `cp a '\\\\?\\D:\\tools\\night-shift\\SKILL.md'`])
+    assert.match(bash(c, s) ?? "", /the night-shift skill itself/, c);
+  assert.match(bash("echo x > /d/tools/night-shift/SKILL.md", withSkill("/d/tools/night-shift")) ?? "", /the night-shift skill itself/, "the variable in Git Bash's spelling");
+  assert.match(bash(`echo x > ${SKILL_AT}/SKILL.md`, withSkill("D:\\tools\\night-shift\\")) ?? "", /the night-shift skill itself/, "the variable with backslashes");
+  // The folder next to it is not the skill, and without the variable nothing changes: a shell write outside the roots passes,
+  // Write and Edit meet only the folders' limit.
+  assert.equal(bash("echo x > D:/tools/night-shift-old/SKILL.md", s), null);
+  assert.equal(bash(`cp a.mjs ${SKILL_AT}/scripts/guard.mjs`), null);
+  assert.match(write(`${SKILL_AT}/SKILL.md`) ?? "", /writes are limited to/);
+  assert.match(bash(`rm ${SKILL_AT}/scripts/guard.mjs`) ?? "", /deletes are limited to/);
+  // A copy in a temp folder, where everything else may be written and deleted.
+  const inTemp = withSkill("C:/temp/copy/night-shift");
+  assert.match(write("C:/temp/copy/night-shift/SKILL.md", inTemp) ?? "", /the night-shift skill itself/);
+  assert.match(bash("rm -rf C:/temp/copy/*", inTemp) ?? "", /the night-shift skill itself through a wildcard/);
+  assert.equal(write("C:/temp/copy/notes.md", inTemp), null);
+  assert.equal(bash("rm -rf C:/temp/copy/old", inTemp), null);
+  // A folder above it takes it along: a delete or a move of that folder is refused too.
+  for (const c of ["rm -rf C:/temp/copy", "mv C:/temp/copy C:/temp/copy2", "rm -r /c/temp/copy/"])
+    assert.match(bash(c, inTemp) ?? "", /of a folder that holds the night-shift skill itself/, c);
+  assert.match(ps("Remove-Item -Recurse C:\\temp\\copy", inTemp) ?? "", /of a folder that holds the night-shift skill itself/);
+  assert.equal(bash("rm -rf C:/temp/other", inTemp), null);
+  // The same holds for the project's .claude folder, which a wildcard could not delete either; what is below it can go.
+  for (const c of ["rm -rf .claude", "rm -rf C:/work/repo/.claude/", "mv .claude old-claude"]) assert.match(bash(c) ?? "", /of the project's \.claude folder/, c);
+  assert.equal(bash("rm -rf .claude/worktrees/x"), null);
+  assert.equal(bash("find . -name '*.tmp' -delete"), null, "a find from the repository is read by its tests, as before");
+  // A drive-relative value (C:x) names a folder below that drive's own folder, as resolve() reads it (a path C:x itself
+  // is refused as a stream name in any write).
+  const driveRelative = resolve("C:tools-x/night-shift").replace(/\\/g, "/");
+  assert.match(bash(`echo x > "${driveRelative}/SKILL.md"`, withSkill("C:tools-x/night-shift")) ?? "", /the night-shift skill itself/);
+});
+
+test("a skill folder inside the repository, or one that is or holds the repository, a temp root, the home, a drive or the state folder, changes nothing", () => {
+  // A chain that develops the skill from its own clone: the clone is the repository's to change.
+  const clone = withSkill("C:/work/repo/night-shift");
+  assert.equal(write("C:/work/repo/night-shift/SKILL.md", clone), null);
+  assert.equal(bash("cp a.mjs C:/work/repo/night-shift/scripts/guard.mjs", clone), null);
+  assert.equal(bash("rm -rf C:/work/repo/night-shift/scripts/old", clone), null);
+  assert.equal(write("C:/work/repo/night-shift/SKILL.md", withSkill("c:\\WORK\\repo\\Night-Shift")), null, "in another spelling");
+  for (const [dir, shown] of [["C:/work/repo", "the repository"], ["C:/work", "a folder above the repository"], ["C:/temp", "a temp root"],
+    ["C:/Users/u/AppData/Local/Temp", "the home's temp folder"], ["C:/Users/u/AppData", "a folder that holds a temp root"], ["C:/Users/u", "the home"],
+    ["C:/Users", "a folder above the home"], ["D:/", "a drive"], ["D:", "a drive without its slash"], ["C:/temp/x-night", "the state folder"]]) {
+    const e = withSkill(dir);
+    assert.equal(write("C:/work/repo/src/a.ts", e), null, `${shown}: the repository stays writable`);
+    assert.equal(bash("rm -rf C:/work/repo/dist", e), null, `${shown}: and its folders deletable`);
+    assert.equal(write("C:/temp/x-night/notes.md", e), null, `${shown}: the state folder stays writable`);
+    assert.equal(bash("echo x > C:/temp/a.txt", e), null, `${shown}: the temp folder stays writable`);
+    assert.equal(bash("echo x > C:/Users/u/AppData/Local/Temp/a.txt", e), null, `${shown}: the home's temp folder too`);
+  }
+  assert.equal(bash("echo x > C:/Users/u/notes.md", withSkill("C:/Users/u")), null, "a skill folder that is the home names no file");
+  assert.equal(bash("echo x > D:/a.txt", withSkill("D:/")), null, "nor one that is a drive");
+  // A skill folder that holds the state folder would make the runner's handover unwritable.
+  const holdsState = { ...withSkill(SKILL_AT), NIGHT_SHIFT_STATE: `${SKILL_AT}/state` };
+  assert.equal(write(`${SKILL_AT}/state/next-prompt.md`, holdsState), null);
+  assert.equal(bash(`echo x > ${SKILL_AT}/SKILL.md`, holdsState), null);
+});
+
+test("Claude Code's installed plugins are refused under every spelling of ~/.claude; plugins/data stays writable", () => {
+  const plugins = "C:/Users/u/.claude/plugins";
+  for (const c of [`cp a.mjs ${plugins}/cache/m/p/1.0.0/hooks/x.mjs`, `echo x > ${plugins}/marketplaces/m/.claude-plugin/marketplace.json`,
+    `echo {} > ${plugins}/installed_plugins.json`, `echo {} > ${plugins}/known_marketplaces.json`, `sed -i s/a/b/ ${plugins}/installed_plugins.json`,
+    `rm -rf ${plugins}/cache/m`, `rm ${plugins}/known_marketplaces.json`, `rm -rf ${plugins}/marketplaces`, `echo x > "C:\\USERS\\U\\.CLAUDE\\PLUGINS\\CACHE\\m\\x"`,
+    `echo x > ${plugins}/data/../cache/m/x`, `echo x > ~/.claude/plugins/cache/m/x`])
+    assert.match(bash(c) ?? "", /Claude Code's installed plugins/, c);
+  assert.match(write(`${plugins}/cache/m/p/1.0.0/hooks/x.mjs`) ?? "", /writing Claude Code's installed plugins is not allowed/);
+  assert.match(edit(`${plugins}/installed_plugins.json`) ?? "", /writing Claude Code's installed plugins is not allowed/);
+  assert.match(ps(`Set-Content ${plugins}/known_marketplaces.json x`) ?? "", /Claude Code's installed plugins/);
+  // Where plugins keep their own data, and the rest of the folder, are as before.
+  assert.equal(bash(`echo x > ${plugins}/data/p/x.json`), null);
+  assert.equal(bash(`cp a ${plugins}/data/p/y.json`), null);
+  assert.equal(bash(`echo x > ${plugins}/cache-notes.md`), null);
+  // With the repository at ~/.claude the plugins stay protected inside it.
+  const inHome = { ...env, NIGHT_SHIFT_REPO: "C:/Users/u/.claude" };
+  assert.match(write(`${plugins}/cache/m/x.mjs`, inHome) ?? "", /installed plugins/);
+  assert.match(bash("rm -rf plugins/cache", inHome) ?? "", /installed plugins/);
+  assert.match(bash("rm -rf plugins/*", inHome) ?? "", /installed plugins through a wildcard/);
+  assert.equal(write(`${plugins}/data/p/x.json`, inHome), null);
+  assert.match(bash("rm -rf plugins", inHome) ?? "", /of a folder that holds Claude Code's installed plugins/);
+  assert.equal(bash("rm -rf plugins/data/p", inHome), null);
+  // Under CLAUDE_CONFIG_DIR's folder, and ~/.claude's stay protected.
+  const cfg = { ...env, CLAUDE_CONFIG_DIR: "C:/temp/claude-config" };
+  assert.match(write("C:/temp/claude-config/plugins/cache/m/x.mjs", cfg) ?? "", /installed plugins/);
+  assert.match(bash("echo {} > C:/temp/claude-config/plugins/installed_plugins.json", cfg) ?? "", /installed plugins/);
+  assert.match(bash(`cp a ${plugins}/cache/m/x`, cfg) ?? "", /installed plugins/);
+  assert.equal(write("C:/temp/claude-config/plugins/data/p/x.json", cfg), null);
+});
+
+test("CLAUDE_CODE_PLUGIN_CACHE_DIR names one more plugins folder, unless it is or holds the repository, a temp root, the home, a drive or the state folder", () => {
+  const e = { ...env, CLAUDE_CODE_PLUGIN_CACHE_DIR: "D:/plugins" };
+  for (const c of ["cp a D:/plugins/cache/m/x.mjs", "echo {} > D:/plugins/installed_plugins.json", "rm -rf D:/plugins/marketplaces/m", "echo x > 'D:\\PLUGINS\\known_marketplaces.json'"])
+    assert.match(bash(c, e) ?? "", /Claude Code's installed plugins/, c);
+  assert.equal(bash("echo x > D:/plugins/data/p/x.json", e), null);
+  assert.match(bash("cp a C:/Users/u/.claude/plugins/cache/m/x", e) ?? "", /installed plugins/, "the default folder stays protected");
+  assert.equal(bash("cp a D:/plugins/cache/m/x.mjs"), null, "without the variable D:/plugins is any folder");
+  // In a temp folder: protected there, the rest of temp writable.
+  const inTemp = { ...env, CLAUDE_CODE_PLUGIN_CACHE_DIR: "C:/temp/plugins" };
+  assert.match(write("C:/temp/plugins/cache/m/x.mjs", inTemp) ?? "", /installed plugins/);
+  assert.match(bash("rm -rf C:/temp/plugins", inTemp) ?? "", /of a folder that holds Claude Code's installed plugins/);
+  assert.equal(write("C:/temp/notes.md", inTemp), null);
+  for (const dir of ["C:/work/repo", "C:/work", "C:/temp", "C:/Users/u", "C:/Users/u/AppData/Local/Temp", "C:/Users", "D:", "C:/temp/x-night"]) {
+    const v = { ...env, CLAUDE_CODE_PLUGIN_CACHE_DIR: dir };
+    assert.equal(bash(`echo {} > ${dir}/cache/a.json`, v), null, `${dir}: ignored`);
+    assert.equal(bash(`echo {} > ${dir}/installed_plugins.json`, v), null, `${dir}: ignored`);
+    assert.equal(write("C:/work/repo/src/a.ts", v), null, `${dir}: the repository stays writable`);
+    assert.equal(write("C:/temp/x-night/notes.md", v), null, `${dir}: the state folder stays writable`);
+  }
+  assert.equal(write("C:/work/repo/cache/a.ts", { ...env, CLAUDE_CODE_PLUGIN_CACHE_DIR: "C:/work/repo" }), null);
+  assert.equal(write("C:/temp/x-night/cache/a.ts", { ...env, CLAUDE_CODE_PLUGIN_CACHE_DIR: "C:/temp/x-night" }), null);
+});
+
+test("a linked home's and a linked skill folder's targets are protected too", () => {
+  const base = mkdtempSync(join(tempRoot(), "night-skill-link-"));
+  const target = join(base, "settings-folder"), home = join(base, "home"), repo = join(base, "repo"), real = join(repo, "skill-real"), link = join(base, "skill-link");
+  mkdirSync(join(target, "plugins", "cache"), { recursive: true });
+  mkdirSync(home);
+  mkdirSync(real, { recursive: true });
+  symlinkSync(target, join(home, ".claude"), "junction");
+  symlinkSync(real, link, "junction");
+  const t = target.replace(/\\/g, "/"), h = home.replace(/\\/g, "/"), r = real.replace(/\\/g, "/");
+  const e = { ...env, USERPROFILE: home };
+  try {
+    // ~/.claude is a link: its plugins by the target's path, and a skill folder in its cache by either spelling.
+    assert.match(bash(`cp a "${t}/plugins/cache/m/x.mjs"`, e) ?? "", /installed plugins/);
+    assert.match(bash(`echo {} > "${t}/plugins/installed_plugins.json"`, e) ?? "", /installed plugins/);
+    assert.equal(bash(`echo x > "${t}/plugins/data/p/x.json"`, e), null);
+    const cached = withSkill(`${h}/.claude/plugins/cache/night-shift/night-shift/0.3.0/night-shift`, e);
+    assert.match(bash(`echo x > "${t}/plugins/cache/night-shift/night-shift/0.3.0/night-shift/SKILL.md"`, cached) ?? "", /the night-shift skill itself/);
+    // The skill folder is a link: the folder it points at is the skill too.
+    assert.match(bash(`echo x > "${r}/SKILL.md"`, withSkill(link, e)) ?? "", /the night-shift skill itself/);
+    assert.match(bash(`echo x > "${link.replace(/\\/g, "/")}/SKILL.md"`, withSkill(link, e)) ?? "", /the night-shift skill itself/);
+    // A linked skill folder whose target is inside the repository (not the repository itself) is the repository's.
+    const inRepo = { ...withSkill(link, e), NIGHT_SHIFT_REPO: repo.replace(/\\/g, "/") };
+    assert.equal(bash(`echo x > "${r}/SKILL.md"`, inRepo), null);
+    assert.equal(decide({ tool_name: "Write", tool_input: { file_path: `${r}/SKILL.md` } }, inRepo), null);
   } finally { rmSync(base, { recursive: true, force: true }); }
 });

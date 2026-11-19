@@ -45,12 +45,33 @@ const spellings = (p, r) => {
   return out;
 };
 
+// A folder an environment variable names, in each spelling: as given (a relative one from the hook's folder) and as the
+// file system resolves a link. None when it is a drive, or is or holds one of the places in wide (the home, a temp
+// root, the repository, the state folder): protecting it would make that whole place unwritable, as a state folder
+// that wide is no writable root (roots below).
+function namedFolder(value, wide) {
+  if (!value) return [];
+  // A drive-relative D:x is relative too (to that drive's folder), as resolve() reads it.
+  const raw = String(value).trim().replace(/^["']|["']$/g, ""), given = norm(raw);
+  const out = [/^([a-z]:(\/|$)|\/)/.test(given) ? given : norm(resolve(raw))];
+  try { const real = norm(realpathSync.native(resolve(fsHome(raw)))); if (!out.includes(real)) out.push(real); } catch { /* no such folder */ }
+  const drive = (d) => !d.replace(/^\/\/[^/]*(\/[^/]*)?|^[a-z]:/, "").split("/").some(Boolean);
+  return out.some((d) => drive(d) || wide.some((w) => under(w, d))) ? [] : out;
+}
+// What Claude Code keeps of its installed plugins in a plugins folder: their copies, the marketplaces' clones and the
+// two lists of what is installed. Their hooks and servers run in the user's own sessions; data/ is the plugins' own.
+const PLUGIN_PARTS = ["cache", "marketplaces", "installed_plugins.json", "known_marketplaces.json"];
+
 function roots(env) {
   const home = norm(platform.home(env));
   const repo = norm(env.NIGHT_SHIFT_REPO || "");
   // A state folder that is a drive, the home folder or the like (a typo in stateDir) would make
   // all of it writable: it adds nothing, and the runner refuses to start with one.
   const state = env.NIGHT_SHIFT_STATE && !stateDirProblem(env.NIGHT_SHIFT_STATE, { home, repo, temp: tempRoot(), env }) ? norm(env.NIGHT_SHIFT_STATE) : "";
+  const wide = [home, ...platform.tempRoots(home), repo, state].filter(Boolean);
+  // The copy of the skill the run started from (the runner puts NIGHT_SHIFT_SKILL into every session's environment),
+  // wherever it is, unless the repository holds it: a chain may develop the skill in its own clone.
+  const skill = namedFolder(env.NIGHT_SHIFT_SKILL, wide);
   return {
     repo,
     state,
@@ -58,6 +79,10 @@ function roots(env) {
     writable: [repo, state, ...platform.tempRoots(home)].filter(Boolean),
     home,
     claude: claudeSpellings(platform.home(env), env.CLAUDE_CONFIG_DIR),
+    skill: repo && skill.some((d) => under(d, repo)) ? [] : skill,
+    // Claude Code's plugins folders: ~/.claude's under each of its spellings (spellings() maps them to the home's one),
+    // and the one CLAUDE_CODE_PLUGIN_CACHE_DIR names, which adds to it.
+    plugins: [`${home}/.claude/plugins`, ...namedFolder(env.CLAUDE_CODE_PLUGIN_CACHE_DIR, wide)],
   };
 }
 
@@ -78,7 +103,8 @@ function protectedPath(p, r) {
   return null;
 }
 function protectedSpelling(p, r) {
-  if (under(p, `${r.home}/.claude/skills/night-shift`)) return "the night-shift skill itself";
+  if (under(p, `${r.home}/.claude/skills/night-shift`) || r.skill.some((s) => under(p, s))) return "the night-shift skill itself";
+  if (r.plugins.some((root) => PLUGIN_PARTS.some((f) => under(p, `${root}/${f}`)))) return "Claude Code's installed plugins";
   if (/^.*\/\.claude\/settings(\.local)?\.json$/.test(p)) return "Claude settings";
   if (p === `${r.home}/.claude/claude.md`) return "the user's global CLAUDE.md";
   // Config, rules and run state the user steers the night with. Before the repo roots: with the repo at ~/.claude they sit inside a writable root.
@@ -316,6 +342,8 @@ function protectedTargets(r) {
     [r.repo && `${r.repo}/.git`, "the .git directory"],
     [r.repo && `${r.repo}/.claude`, "the project's .claude folder"],
     [`${r.home}/.claude/skills/night-shift`, "the night-shift skill itself"],
+    ...r.skill.map((s) => [s, "the night-shift skill itself"]),
+    ...r.plugins.flatMap((root) => PLUGIN_PARTS.map((f) => [`${root}/${f}`, "Claude Code's installed plugins"])),
     [`${r.home}/.claude/night-shift`, "the user's night-shift settings and rules"],
     [`${r.home}/.claude/settings.json`, "Claude settings"],
     [`${r.home}/.claude/settings.local.json`, "Claude settings"],
@@ -914,6 +942,11 @@ function targetReason(t, o, where, r) {
     const hit = protectedTargets(r).find(([c]) => overlaps(p, c));
     if (hit) return `refusing a ${act} of ${hit[1]} through a wildcard (${t})`;
   }
+  // A recursive delete or a move of a folder takes what is inside along: one that is, or holds, another protected place
+  // (the skill's copy, the installed plugins, the project's .claude) is refused too. A find, and a listing a PowerShell
+  // pipeline filters, are read by their tests instead (below): from the repository they would meet .git every time.
+  const holds = (recursive || o.noun) && !find && protectedTargets(r).find(([c]) => under(c, q));
+  if (holds) return `refusing a ${act} of ${holds[0] === q ? "" : "a folder that holds "}${holds[1]} (${t})`;
   if (find && !find.expr && wideFind(q, r) && !find.narrowed(q)) return wideFindReason(t);
   // A find from a temp root itself empties the folder every program shares.
   if (find && !find.expr && q !== r.repo && r.writable.includes(q) && !find.narrowed(q)) return `refusing a find delete from the temp folder itself (${t}) without a name, path or regex test`;
@@ -1340,6 +1373,7 @@ function linkedCases(env, bash, write) {
       [bash(`cp a.mjs "${lt}/skills/night-shift/scripts/guard.mjs"`, linked), true], [bash(`echo x > "${lt}/notes.md"`, linked), false],
       [write(`${lt}/night-shift/rules.md`, linkedRepo), true], [write(`${lt}/notes.md`, linkedRepo), false],
       [bash(`rm -f "${lt}"/settings.*`, linkedRepo), true], [bash("find . -name rules.md -delete", linkedRepo), true],
+      [bash(`cp a.mjs "${lt}/plugins/cache/m/x.mjs"`, linked), true], [bash(`echo x > "${lt}/plugins/data/p/x.json"`, linked), false],
     ];
   } finally { rmSync(base, { recursive: true, force: true }); }
 }
@@ -1352,6 +1386,7 @@ function selfTest() {
   const ps = (command, e = env) => decide({ tool_name: "PowerShell", tool_input: { command } }, e);
   const write = (file_path, e = env) => decide({ tool_name: "Write", tool_input: { file_path } }, e);
   const mcp = (tool_name) => decide({ tool_name, tool_input: {} }, env);
+  const skill = (dir) => ({ ...env, NIGHT_SHIFT_SKILL: dir });
   const cases = [
     [mcp("mcp__blender__execute_blender_code"), true],
     [bash("git push --force origin master"), true], [bash("git push -f"), true], [bash("git push origin :old"), true],
@@ -1458,6 +1493,16 @@ function selfTest() {
     [bash("git push https://example.com/o/r.git HEAD:main"), true], [bash("git push git@example.com:o/r.git main"), true], [bash("git push origin HEAD:refs/heads/night"), false],
     [bash(`node -e "f('rm -rf C:/Users/u/x')"`), false], [bash(`node -p "process.env.A + ':' + 'rm -rf x'"`), false],
     [bash(`node -e "x" > C:/temp/x-night/run.json`), true], [bash(`node -e "x" && rm -rf C:/Users/u/Documents`), true], [bash(`node -e "$(rm -rf /c/Users/u/Documents)"`), true],
+    // The C4 follow-up: Claude Code's installed plugins; the run's skill folder wherever it is, apart from inside the repository; a variable too wide to protect.
+    [bash("cp a.mjs C:/Users/u/.claude/plugins/cache/m/p/1.0.0/hooks/x.mjs"), true], [bash("echo {} > C:/Users/u/.claude/plugins/installed_plugins.json"), true],
+    [bash("rm -rf C:/Users/u/.claude/plugins/marketplaces/m"), true], [bash("echo x > C:/Users/u/.claude/plugins/data/p/x.json"), false],
+    [bash("cp a.mjs D:/tools/night-shift/scripts/guard.mjs", skill("D:/tools/night-shift")), true], [bash("cp a.mjs D:/tools/night-shift/scripts/guard.mjs"), false],
+    [write("C:/temp/copy/night-shift/SKILL.md", skill("C:/temp/copy/night-shift")), true], [bash("rm -rf C:/temp/copy/*", skill("C:/temp/copy/night-shift")), true],
+    [bash("rm -rf C:/temp/copy", skill("C:/temp/copy/night-shift")), true], [bash("rm -rf .claude"), true], [bash("rm -rf .claude/worktrees/x"), false],
+    [bash("echo x > C:/work/repo/night-shift/SKILL.md", skill("C:/work/repo/night-shift")), false], [write("C:/work/repo/src/a.ts", skill("C:/work")), false],
+    [bash("echo x > C:/temp/a.txt", skill("C:/temp")), false], [write("C:/temp/x-night/notes.md", skill("C:/temp/x-night")), false],
+    [bash("cp a D:/plugins/cache/m/x.mjs", { ...env, CLAUDE_CODE_PLUGIN_CACHE_DIR: "D:/plugins" }), true],
+    [write("C:/work/repo/cache/a.ts", { ...env, CLAUDE_CODE_PLUGIN_CACHE_DIR: "C:/work/repo" }), false],
     ...linkedCases(env, bash, write),
   ];
   let failed = 0;

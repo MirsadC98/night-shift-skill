@@ -239,6 +239,11 @@ test("the plugin manifest and its marketplace name the version the code knows an
   assert.ok(readme.includes("claude plugin marketplace add <you>/<this-repo>"), "README: add the marketplace");
   assert.ok(readme.includes(`claude plugin install ${entry.name}@${market.name}`), "README: install the plugin");
   assert.ok(readme.includes("`.claude-plugin/plugin.json`"), "README: the manifest");
+  // The C4 follow-up: the guard protects either route's copy and the installed plugins (guard.test.mjs checks the guard).
+  const install = readme.slice(readme.indexOf("\n## Install\n"), readme.indexOf("\n## Use\n"));
+  for (const w of ["`NIGHT_SHIFT_SKILL`", "inside the repository", "`cache/`", "`marketplaces/`", "`installed_plugins.json`", "`known_marketplaces.json`",
+    "`CLAUDE_CODE_PLUGIN_CACHE_DIR`", "`plugins/data/`"]) assert.ok(install.includes(w), `README's Install: ${w}`);
+  assert.doesNotMatch(readme, /names the skill's files only at|For unattended runs, copy the folder/, "the plugin route's old guard gap");
 });
 
 // C4: examples/ holds a small roadmap, a first prompt and a project rules file, each linked from README and generic.
