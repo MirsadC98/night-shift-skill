@@ -1,14 +1,49 @@
 # night-shift
 
-A [Claude Code](https://claude.com/claude-code) skill that keeps work going for hours while you are away, such as overnight.
+A [Claude Code](https://claude.com/claude-code) skill that carries a job through to its end while you are not at the keyboard: overnight, through a day of meetings, or beside you while you work on something else.
 
-It runs a chain of fresh headless sessions (`claude -p`). Each session is like opening a fresh chat and pasting a continuation prompt. A session does one finished piece of an approved plan, commits it, adds its section to a night report and writes the prompt for the next session. The chain stops when a session writes `STOP`, when two handovers fail in a row, or when you stop it. When it hits a usage limit, it waits for the reset and resumes the same session.
+Give it a plan (a roadmap of pieces) or only a goal, and it works through it in a chain of fresh headless sessions, one finished piece each: the change with its tests and review, a commit, a section of the night report, and the prompt for the next session. Unattended, a session decides what you would decide from your recorded preferences and keeps for you only what truly needs you; attended (`--attended`), it puts those questions to you as it goes, in the chat that started it, and works on meanwhile. On your phone, optional Telegram cards report each session's end, and the bot's chat can stop the chain. A guard hook refuses what no unattended session should do, such as history rewrites, publishing and writes outside the repository ("The guard" says what it does not stop).
 
 ## Read this first
 
 - **Windows only.** The runner starts itself through Task Scheduler in a hidden console (`conhost --headless`) and uses PowerShell, so it keeps running after your editor closes.
 - **It runs unattended with no permission prompts.** Sessions run with `--permission-mode auto --permission-prompts none`, and `AskUserQuestion` and plan mode are turned off. `scripts/guard.mjs` is a hook that blocks dangerous commands (see below). It is a safety net, not a sandbox. Run it only on a repository you have committed and can restore. The runner's settings layer also sets `crossSessionInbound` to `refuse`: a message from another of your Claude Code sessions is not your word, so the chain's sessions take none (each still gets its own subagents' results).
 - **It costs tokens.** By default (mode `opus`) every session runs Opus at `xhigh`, subagents run Sonnet at `medium` and Haiku at `high`, and the chain has no end time. Use `--max-sessions` or `--until` if you want a limit. A session whose prompt opens with `MODEL: fable` runs on Fable at `high`; `references/mode-opus.md`, the rules every session of mode `opus` gets in its header, allows that for one hard piece only. Fable has its own weekly allowance, so the runner grants it only while less than 60 % of that allowance is used, and to at most two sessions in a chain while the share is unknown. A piece it refuses, or one the allowance cuts off, runs on Opus at `max`. Mythos, which Anthropic opens only to organizations it has verified, is the same model as Fable under another name and draws on the same weekly allowance: everything this page says about Fable's allowance, its ceiling and its count holds for the two together, and `MODEL: mythos` works as `MODEL: fable` does. See "Modes" for the other modes.
+
+## Quick start
+
+The setup takes about five minutes, on Windows with Node.js 22 or later, git and the Claude Code CLI ("Requirements" has the details); the chain then runs as long as its pieces take.
+
+1. Install the skill where the guard protects it ("Install" has the plugin route too):
+
+   ```bash
+   git clone https://github.com/<you>/<this-repo>.git
+   cp -r <this-repo>/night-shift ~/.claude/skills/night-shift
+   ```
+
+2. In a repository you have committed and can restore, write the starter files:
+
+   ```bash
+   node ~/.claude/skills/night-shift/scripts/night-chain.mjs init --repo <dir>
+   ```
+
+   Put your rules for that project below the comment in `.claude/night-shift-rules.md`, as in [examples/night-shift-rules.md](examples/night-shift-rules.md), and commit the two files (`start` wants a committed tree).
+
+3. Check what a start needs, without starting anything, and fix each `FAIL` line:
+
+   ```bash
+   node ~/.claude/skills/night-shift/scripts/night-chain.mjs doctor --repo <dir>
+   ```
+
+4. Write a roadmap of your own work, shaped like [examples/roadmap.md](examples/roadmap.md) (its project is made up), commit it, and ask a Claude Code chat for a night shift on it ("run a night shift on docs/plans/<name>.md until it is done"). Or write its first prompt yourself, shaped like [examples/first-prompt.md](examples/first-prompt.md), to a file outside the repository (`start` refuses a tree with an uncommitted file in it, and copies the prompt into its state folder), and start a chain of two sessions, each a full session on the mode's model ("It costs tokens" above):
+
+   ```bash
+   node ~/.claude/skills/night-shift/scripts/night-chain.mjs start --repo <dir> --prompt-file <file> --max-sessions 2
+   ```
+
+   With no roadmap, `--goal "<what you want done>"` in place of `--prompt-file` has the first session write one.
+
+5. `status --repo <dir>` shows how far it is; `stop --repo <dir>` ends it after the session that is running.
 
 ## Requirements
 
@@ -41,6 +76,8 @@ What the plugin route changes for the guard: the guard names the skill's files o
 
 ## Use
 
+A chain runs fresh headless sessions (`claude -p`), one after another. Each session is like opening a fresh chat and pasting a continuation prompt. A session does one finished piece of an approved plan, commits it, adds its section to a night report and writes the prompt for the next session. The chain stops when a session writes `STOP`, when two handovers fail in a row, or when you stop it. When it hits a usage limit, it waits for the reset and resumes the same session.
+
 In a Claude Code chat, ask for a night shift ("run a night shift on the plan in docs/plan.md until it is done"). A night session's prompt opens with `Night shift (night-shift)`; that is how the skill knows it is inside one. The skill's `references/interactive.md` tells Claude how to write the first prompt, start the chain and report back when it ends.
 
 You can also drive the runner yourself:
@@ -62,8 +99,6 @@ node ~/.claude/skills/night-shift/scripts/night-chain.mjs --version
 `init --repo <dir>` writes a starter `.claude/night-shift.json` (the defaults written out, with examples as comments; it sets nothing your own `config.json` sets) and a rules file skeleton, `.claude/night-shift-rules.md`, which is all comment until you write below it. It never writes over a file that exists, and it prints the next steps: commit the two files (`start` wants a committed tree), run `doctor`, start a chain.
 
 A chain works from an approved roadmap: the pieces in order, each one session's work. Without one, give `start` the goal instead of a prompt, with `--goal <text>` or `--goal-file <file>` (one of the two, and never beside `--prompt` or `--prompt-file`). The runner wraps it in the planning prompt `references/goal.md`. The first session reads the repository and your recorded preferences, writes the roadmap (the pieces in order, what done looks like for each, the checks, what is out of scope), has one reviewer check it, marks it approved and commits it; the work starts in the second session. The goal approves the work it needs and nothing beyond it. Keep a long specification in the repository and name it in the goal ("the spec in docs/spec.md"): the first session reads the goal again in every call. Like a prompt, a goal starts fresh: it replaces a kept `next-prompt.md` and a session kept in `resume.json`.
-
-`examples/` has one of each to copy and change: a small roadmap ([examples/roadmap.md](examples/roadmap.md)), the first prompt for its first piece in the shape every session hands on ([examples/first-prompt.md](examples/first-prompt.md)), and a project rules file in the form `init` writes, with a few rules below its comment ([examples/night-shift-rules.md](examples/night-shift-rules.md), which goes to `.claude/night-shift-rules.md`).
 
 Start with `--attended` (or set `"attended": true`) when you are at hand but not watching, for a job by day. No session waits for you and `AskUserQuestion` stays off, as at night. But a decision that needs you (one that passes the five tests, or a hard stop the work meets, such as a push you can do by hand) is written at once to `<state>/questions.md`, one line each: `Q<n> · <time> · question · the session's pick and why · what changes otherwise`. When Telegram is set up, the watcher sends each new line to your chat as it appears. The piece that depends on it goes behind the other work. Answer with a line `A<n>: <answer>` in `<state>/inbox.md`; the next session applies the answers before anything else. When nothing else is left ahead of it and no answer has come, the session builds its pick, as an unattended run does. The rules are in `references/attended.md`, which only an attended run's sessions get. `--attended false` turns a config's `true` off for one start. `wait` (in the commands above) also wakes on each new question: it prints the question and how to answer, and exits 3 while the chain goes on; run it again to wait on. A Claude Code chat that started the chain does this for you and writes your answer into the inbox, and with Remote Control (`/remote-control` in that chat) you can answer from your phone without Telegram.
 

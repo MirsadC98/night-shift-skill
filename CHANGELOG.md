@@ -21,6 +21,7 @@ Not on `main` yet: the commits after `2c14b8b`.
 
 ### Changed
 
+- README opens with what the skill is for, by night or by day, and a quick start: install, `init`, `doctor`, a first chain from `examples/`.
 - `--max-sessions <n>` counts the sessions a `start` runs; it was the number of the last session.
 - English is the only language in the repository: the bundled Turkish table left it, and any other language is a table you keep in `~/.claude/night-shift/lang/<code>.mjs`.
 - Each mode's rules moved from `SKILL.md` into `references/mode-<mode>.md`, which the runner puts into a new session's header.

@@ -267,3 +267,27 @@ test("examples/ holds a roadmap, a first prompt and a rules file README links, t
   assert.deepEqual(prompt.match(/^## .*/gm), ["## Rules", "## State", "## This piece", "## Lessons for this piece"]);
   assert.match(fs.readFileSync(path.join(dir, "roadmap.md"), "utf8"), /^Approved: /m, "the roadmap is marked approved");
 });
+
+// C4: README opens with what the skill is for (a job by night or by day, from a plan or a goal, the phone, the guard),
+// the warnings, then a quick start of five steps a new user finishes in minutes; the sections after it stay, and what
+// the old opening said about how a chain runs is said once, under "Use".
+test("README opens with what the skill is for, then the warnings and a five-step quick start", { skip: !fs.existsSync(readmePath) && "no README beside this copy" }, () => {
+  const readme = fs.readFileSync(readmePath, "utf8").replace(/\r\n/g, "\n");
+  assert.deepEqual(readme.match(/^## .*/gm), ["## Read this first", "## Quick start", "## Requirements", "## Install", "## Use", "## The guard",
+    "## When a session fails", "## Telegram (optional)", "## Tests", "## Versions", "## License"]);
+  const opening = readme.slice(0, readme.indexOf("\n## "));
+  for (const w of ["a plan", "a goal", "overnight", "a day", "`--attended`", "phone", "guard"]) assert.ok(opening.includes(w), `the opening: ${w}`);
+  const quick = readme.slice(readme.indexOf("\n## Quick start\n"), readme.indexOf("\n## Requirements\n"));
+  assert.deepEqual(quick.match(/^\d+\. /gm), ["1. ", "2. ", "3. ", "4. ", "5. "]);
+  for (const w of ["cp -r <this-repo>/night-shift ~/.claude/skills/night-shift", "night-chain.mjs init --repo <dir>", "night-chain.mjs doctor --repo <dir>",
+    "night-chain.mjs start --repo <dir> --prompt-file <file>", "`--goal ", "(examples/roadmap.md)", "(examples/first-prompt.md)", "(examples/night-shift-rules.md)", "`status --repo <dir>`", "`stop --repo <dir>`"]) {
+    assert.ok(quick.includes(w), `the quick start: ${w}`);
+  }
+  // In the order a start needs them: install, init (whose files are committed), doctor, start.
+  const at = (w) => quick.indexOf(w);
+  assert.ok(at("cp -r ") < at(" init --repo") && at(" init --repo") < at(" doctor --repo") && at(" doctor --repo") < at(" start --repo"), "the steps' order");
+  assert.match(quick, /outside the repository/, "where a prompt file goes, since start refuses an uncommitted one");
+  const moved = "The chain stops when a session writes `STOP`, when two handovers fail in a row, or when you stop it.";
+  assert.equal(readme.split(moved).length - 1, 1, "said once");
+  assert.ok(readme.indexOf(moved) > readme.indexOf("\n## Use\n"), "under Use");
+});
