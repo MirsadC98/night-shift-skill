@@ -391,7 +391,10 @@ function gitGlobals(args) {
 // (include), or a command git calls (editor, pager, hooks, helpers, drivers). Reading a key is fine.
 const CONFIG_ALIAS = /^(alias|include|includeif)\./i;
 const CONFIG_RUNS = /^(core\.(fsmonitor|sshcommand|hookspath|editor|pager|askpass|gitproxy|alternaterefscommand)|sequence\.editor|credential\.(.+\.)?helper|diff\.external|diff\..+\.(textconv|command)|filter\..+\.(clean|smudge|process)|merge\..+\.driver|gpg\.(.+\.)?program|help\.autocorrect|pager\..+|uploadpack\.packobjectshook|remote\..+\.(uploadpack|receivepack)|(difftool|mergetool)\..+\.cmd|trailer\..+\.command|protocol\.(.+\.)?allow)$/i;
-const configReason = (key) => CONFIG_ALIAS.test(key) ? "git aliases are not read during a night run" : CONFIG_RUNS.test(key) ? "git settings that run commands are not changed during a night run" : null;
+// Keys that move where a fetch or push goes: the change `git remote set-url` makes, written as config.
+const CONFIG_REMOTE = /^(remote\..+\.(url|pushurl)|url\..+\.(insteadof|pushinsteadof))$/i;
+const REMOTES = "changing remotes needs the user";
+const configReason = (key) => CONFIG_ALIAS.test(key) ? "git aliases are not read during a night run" : CONFIG_RUNS.test(key) ? "git settings that run commands are not changed during a night run" : CONFIG_REMOTE.test(key) ? REMOTES : null;
 // Of those, the keys whose value is a command line: given for one command with -c, the value is read as
 // the command it is (`-c core.pager=cat`), the way GIT_PAGER and GIT_EDITOR are.
 const CONFIG_COMMAND = /^(core\.(editor|pager|sshcommand)|sequence\.editor|pager\..+)$/i;
@@ -424,11 +427,37 @@ function configRule(a) {
   if (reads && !writes) return null;
   if (anyLong(a, "global", "system")) return "global git config is the user's";
   const renames = long(a, "rename-section") || pos[0] === "rename-section";
+  const removes = long(a, "remove-section") || pos[0] === "remove-section";
+  if ((renames || removes) && pos.some((w) => /^(remote|url)(\.|$)/i.test(w))) return REMOTES;
   if (renames && pos.some((w) => CONFIG_SECTION.test(w))) return "git settings that run commands are not changed during a night run";
-  return a.map((w, i) => i + 1 < a.length && configReason(w)).find(Boolean) || null;
+  // A key followed by its value is set. A remote's key is refused when unset too: --unset pushurl sends pushes to url.
+  const unsets = anyLong(a, "unset", "unset-all") || pos[0] === "unset";
+  return a.map((w, i) => i + 1 < a.length && configReason(w)).find(Boolean) || (unsets && a.some((w) => CONFIG_REMOTE.test(w)) ? REMOTES : null);
 }
+// Where a push goes: --repo's value, else its first word that is neither an option nor an option's value (-o takes one).
+function pushRepos(a) {
+  const out = [];
+  let dashes = false, positional = 0;
+  for (let i = 0; i < a.length; i++) {
+    const w = a[i];
+    if (!dashes && w === "--") { dashes = true; continue; }
+    if (!dashes && w.startsWith("-")) {
+      const m = /^--([a-z-]+)(?:=(.*))?$/s.exec(w);
+      const repo = Boolean(m) && m[1].length >= 3 && "repo".startsWith(m[1]);
+      if (repo && m[2] != null) out.push(m[2]);
+      else if (repo) out.push(a[++i] ?? "");
+      else if (w === "-o" || (m && m[2] == null && m[1].length >= 6 && "push-option".startsWith(m[1]))) i++;
+      continue;
+    }
+    if (positional++ === 0) out.push(w);
+  }
+  return out;
+}
+// A URL (scheme:…) or scp's [user@]host:path is no remote's name; a drive path (C:/x) is a local repository.
+const URL_REPO = /^(?![a-z]:([\\/]|$))[^/:]+:/i;
 const GIT_RULES = {
-  push: (a) => transport(a) || ((anyLong(a, "force", "force-with-lease", "force-if-includes", "delete", "mirror", "prune") || anyShort(a, "fd") || a.some((w) => /^[+:]/.test(w))) && "force or deleting pushes rewrite shared history"),
+  push: (a) => transport(a) || ((anyLong(a, "force", "force-with-lease", "force-if-includes", "delete", "mirror", "prune") || anyShort(a, "fd") || a.some((w) => /^[+:]/.test(w))) && "force or deleting pushes rewrite shared history")
+    || (pushRepos(a).some((w) => URL_REPO.test(w)) && "a push to a URL instead of a remote is a change to the remotes, which needs the user"),
   fetch: (a) => transport(a),
   "ls-remote": (a) => transport(a),
   clone: (a) => transport(a, true),
@@ -450,7 +479,7 @@ const GIT_RULES = {
   pull: (a) => transport(a) || (!a.includes("--ff-only") && "only git pull --ff-only is allowed"),
   stash: (a) => /^(drop|clear)$/.test(a[0]) && "dropping stashes discards work",
   // `git remote -v add x url` works: the options come first.
-  remote: (a) => /^(add|remove|rm|set-url|rename)$/.test(firstArg(a)) && "changing remotes needs the user",
+  remote: (a) => /^(add|remove|rm|set-url|rename)$/.test(firstArg(a)) && REMOTES,
   config: configRule,
   tag: (a) => (long(a, "delete") || short(a, "d")) && "deleting tags needs the user",
   worktree: (a) => firstArg(a) === "remove" && (long(a, "force") || short(a, "f")) && "removing a worktree by force discards the work in it",
@@ -1158,7 +1187,22 @@ function readCommand(c, pipe, sawPipe, prev, env, where, opts, depth, r, tmp, li
   if (nm === "git") {
     if (rest[gitGlobals(rest).sub] !== "rm") return null;
   }
-  return checkDelete(args, ni, env, where, vars, r, line);
+  return checkDelete(nm === "node" ? withoutInlineScript(args, ni) : args, ni, env, where, vars, r, line);
+}
+// node's inline script (-e, -p, --eval, --print, or -pe) is one word of JavaScript: text in it such as
+// `'rm -rf a:b'` names no delete target. The shell still runs a $(...) in it first (read above), and the
+// redirects, pipes and words around it are read as usual. node's options come before its script, so the
+// first word that is no option (a script file, or an option's value) ends the search; the words after the
+// inline script are its argv, still read.
+const NODE_INLINE = /^(-[ep]|-pe|-ep|--eval|--print)$/;
+function withoutInlineScript(args, ni) {
+  for (let k = ni + 1; k < args.length; k++) {
+    const w = args[k];
+    if (/^--(eval|print)=/.test(w)) return [...args.slice(0, k), ...args.slice(k + 1)];
+    if (NODE_INLINE.test(w)) return [...args.slice(0, k + 1), ...args.slice(k + 2)];
+    if (!w.startsWith("-")) return args;
+  }
+  return args;
 }
 
 // where is put back to a copy of it (keys a later cd added are dropped too).
@@ -1245,7 +1289,20 @@ export function decide(input, env = process.env, opts = {}) {
   if (typeof tool !== "string" || !tool) return "the hook input names no tool, so the guard cannot check the call";
   const ti = input.tool_input || {};
   if (["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(tool)) {
-    return checkWrite(ti.file_path || ti.notebook_path, env);
+    const file = ti.file_path || ti.notebook_path;
+    const { rules, error } = projectRules(env);
+    if (error) return `.claude/night-shift.json is invalid (${error}); the user must fix it`;
+    // The project's rules read the path with forward slashes, as given and as Windows resolves it (norm, in
+    // lower case), each from the repository down too. An MSYS /c/ is read as c:/ to line it up with the repository.
+    const given = String(file ?? "").replace(/\\/g, "/"), p = norm(given), repo = roots(env).repo;
+    const lined = given.replace(/^\/([a-z])(?=\/)/i, "$1:"), forms = [given, p];
+    if (repo && p.startsWith(repo + "/")) {
+      forms.push(p.slice(repo.length + 1));
+      if (lined.toLowerCase().startsWith(repo + "/")) forms.push(lined.slice(repo.length + 1));
+    }
+    // lastIndex goes back to 0 for each form: a rule with the g or y flag keeps its place between tests.
+    for (const [re, reason] of rules) if (forms.some((f) => { re.lastIndex = 0; return re.test(f); })) return reason;
+    return checkWrite(file, env);
   }
   if (typeof tool === "string" && tool.startsWith("mcp__")) {
     // A server the project did not name may do anything its tools do, outside every rule here.
@@ -1396,6 +1453,12 @@ function selfTest() {
     [ps("Get-ChildItem . -Recurse -Filter config.json | Remove-Item", inHome), true], [bash("find . -name notes.md -delete", inHome), false],
     [bash("find . -path './night-shift/*' -delete", inHome), true], [bash("find . -path './night-shift/rules.md' -delete", inHome), true],
     [bash("find . -path './skills/*' -delete", inHome), false],
+    // Where a push goes is changed through config or a URL too; node's inline script names no delete target.
+    [bash("git config remote.origin.url https://example.com/x.git"), true], [bash("git config url.https://example.com/.insteadOf https://github.com/"), true],
+    [bash("git -c remote.origin.pushurl=x push origin main"), true], [bash("git config --unset remote.origin.pushurl"), true], [bash("git config --get remote.origin.url"), false],
+    [bash("git push https://example.com/o/r.git HEAD:main"), true], [bash("git push git@example.com:o/r.git main"), true], [bash("git push origin HEAD:refs/heads/night"), false],
+    [bash(`node -e "f('rm -rf C:/Users/u/x')"`), false], [bash(`node -p "process.env.A + ':' + 'rm -rf x'"`), false],
+    [bash(`node -e "x" > C:/temp/x-night/run.json`), true], [bash(`node -e "x" && rm -rf C:/Users/u/Documents`), true], [bash(`node -e "$(rm -rf /c/Users/u/Documents)"`), true],
     ...linkedCases(env, bash, write),
   ];
   let failed = 0;

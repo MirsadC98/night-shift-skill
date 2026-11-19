@@ -76,7 +76,7 @@ Put a `.claude/night-shift.json` in the target repository. Every key is optional
 - `fableCeiling`, `fableSessions`: in mode `opus`, the share of the weekly allowance Fable and Mythos share at or over which a `MODEL: fable` or `MODEL: mythos` prompt runs on Opus at `max` instead, and how many sessions on either a chain may run while that share is unknown (the two count together). In mode `fable` or `mythos`, `fableCeiling` is the share at or over which sessions run on Opus at `xhigh` until the reset, and `fableSessions` does not apply. The keys and their flags keep Fable's name for both models.
 - `maxWaitHours`: the longest the chain waits for a usage limit to reset or for an outage to pass (see "When a session fails"). The default is 6.
 - `mcp`: `"none"` (the default), `"inherit"` or a list of server names. A night run loads no MCP server and the guard refuses every `mcp__` tool, unless the project lists the server (`"mcp": ["my-server"]`) or sets `"inherit"`.
-- `deny`: your own guard rules. `pattern` is a regular expression and `flags` defaults to `i`.
+- `deny`: your own guard rules. `pattern` is a regular expression and `flags` defaults to `i`. A rule reads the text of each Bash and PowerShell command, and the path of each file a Write, Edit, MultiEdit or NotebookEdit call writes, with forward slashes, both as given and from the repository down (so `^secrets/` means the folder at the repository's root). It does not read MCP calls, or what a program writes on its own.
 
 ### Modes
 
@@ -121,13 +121,13 @@ Each file is at most 8 KB (UTF-8 bytes) and is read again at every session start
 `scripts/guard.mjs` runs as a hook in every night session. It blocks:
 
 - history rewrites, force pushes, merges, branch, tag and ref deletes, `git reset --hard`, `git clean -f`, forced worktree removal, pruning of unreachable objects, and discarding the whole working tree (`git checkout .`, `git restore .`);
-- changes to remotes, to global git config and to git settings that run a command, and a git command started with another home folder;
+- changes to remotes (also as `git config` of a remote's `url` or `pushurl` or of `url.<base>.insteadOf`, and a push to a URL instead of a remote's name), to global git config and to git settings that run a command, and a git command started with another home folder;
 - publishing: `npm publish`, `gh release`, GitHub API writes and store uploads;
 - deletes and moves outside the repository and temp folders, recursive or not, with the target read from the folder the command stands in (`cd elsewhere && rm -rf x` is refused);
 - file writes (Write, Edit) outside the repository and temp folders, and writes to the skill itself, Claude settings, your global `CLAUDE.md`, the project's `.claude/night-shift.json`, the rule files, `~/.claude/night-shift/`, `.git`, and the runner's own files in the state folder (`night-settings.json`, `run.json`, `launch.cmd`, the logs); the same files are protected from a shell redirect and from the common commands that write a file in place (`sed -i`, `tee`, `cp`, `Set-Content` and the like);
 - registry writes, system-level commands, and killing `node`, `claude`, the editor or the shell;
 - MCP tools, unless the project lists their server (`mcp` above);
-- anything your project's `deny` rules match.
+- anything your project's `deny` rules match, in a command or in the path of a file write.
 
 A blocked action becomes an item under "Waits for you" in the night report.
 

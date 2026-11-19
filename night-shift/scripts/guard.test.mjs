@@ -196,6 +196,31 @@ test("a broken project config refuses shell commands with its reason, and does n
   assert.equal(bash("ls", ok), null);
 });
 
+test("a project rule also reads the path a Write, Edit, MultiEdit or NotebookEdit call writes", () => {
+  const e = repoWithConfig({ deny: [{ pattern: "secrets/" }, { pattern: "^build/out\\.txt$", reason: "build output is the CI's" }, { pattern: "^docs/Keep\\.md$", flags: "" },
+    { pattern: "^private/", reason: "private" }, { pattern: "^gl/", flags: "g" }] });
+  const repo = e.NIGHT_SHIFT_REPO, msys = repo.replace(/\\/g, "/").replace(/^([A-Za-z]):/, (_, d) => `/${d.toLowerCase()}`);
+  const w = (file, tool = "Write", env2 = e) => decide({ tool_name: tool, tool_input: tool === "NotebookEdit" ? { notebook_path: file } : { file_path: file } }, env2);
+  assert.match(w(`${repo}/secrets/a.txt`) ?? "", /refused by a project rule \(secrets\/\)/);
+  assert.match(w(`${repo}\\secrets\\a.txt`, "Edit") ?? "", /project rule/);
+  assert.match(w(`${repo}/secrets/b.txt`, "MultiEdit") ?? "", /project rule/);
+  assert.match(w(`${repo}/secrets/n.ipynb`, "NotebookEdit") ?? "", /project rule/);
+  // An anchored rule reads the path from the repository down; a rule without "i" keeps its case.
+  assert.match(w(`${repo}/build/out.txt`) ?? "", /build output is the CI's/);
+  assert.match(w(`${repo}/docs/Keep.md`) ?? "", /project rule/);
+  assert.match(w(`${msys}/docs/Keep.md`) ?? "", /project rule/);
+  assert.equal(w(`${repo}/docs/keep.md`), null);
+  // The path as Windows resolves it: a .. or . on the way, a doubled slash, a trailing dot.
+  for (const f of [`${repo}/src/../private/a.txt`, `${repo}/./private/a.txt`, `${repo}//private/a.txt`, `${repo}/private./a.txt`, `${msys}/private/a.txt`])
+    assert.equal(w(f), "private", f);
+  // A rule with the g flag matches every time, not every other time.
+  for (let i = 0; i < 3; i++) assert.match(w(`${repo}/gl/a.txt`) ?? "", /project rule/);
+  assert.equal(w(`${repo}/src/build/out.txt`), null);
+  assert.equal(w(`${repo}/src/a.txt`), null);
+  // A config that cannot be read refuses writes too, as it refuses shell commands.
+  assert.match(w(`${repo}/src/a.txt`, "Write", repoWithConfig("{ not json")) ?? "", /night-shift\.json is invalid/);
+});
+
 test("an MCP tool is refused unless the project's config allows its server", () => {
   const call = (tool, e) => decide({ tool_name: tool, tool_input: {} }, e);
   const none = repoWithConfig({}), off = repoWithConfig({ mcp: "none" }), listed = repoWithConfig({ mcp: ["plugin_x_y"] }), inherit = repoWithConfig({ mcp: "inherit" });
@@ -672,6 +697,52 @@ test("more config keys that make git run a command or open a protocol cannot be 
   for (const c of [`git config --get pager.log`, `git config protocol.version 2`, `git config uploadpack.allowFilter true`, `git config diff.tool vimdiff`, `git config diff.algorithm patience`,
     `git config remote.origin.fetch +refs/heads/*:refs/remotes/origin/*`, `git config gpg.format ssh`, `git config trailer.sign.key Signed-off-by`, `git config --get-all remote.origin.uploadpack`])
     assert.equal(git(c), null, c);
+});
+
+test("a git config write that moves where a fetch or push goes is a change to the remotes", () => {
+  for (const c of ["git config remote.origin.url https://example.com/other.git", "git config remote.origin.pushurl x", "git config --add remote.origin.pushurl x",
+    "git config url.https://example.com/.insteadOf https://github.com/", "git config url.x.pushInsteadOf y", "git config --replace-all remote.origin.url x",
+    "git config set remote.origin.url x", "git config --unset remote.origin.pushurl", "git config unset url.x.insteadof", "git config --local Remote.Origin.URL x",
+    "git config --file .git/config remote.origin.url x", "git -C sub config remote.origin.url x", "git config -- remote.origin.url x",
+    "git config --rename-section zz url.https://example.com/", "git config --rename-section remote.origin remote.old",
+    "git config --remove-section remote.origin", "git config remove-section url.x", "git config --unse remote.origin.pushurl",
+    "git -c url.https://example.com/.insteadOf=https://github.com/ push", "git -c remote.origin.pushurl=x push origin main", "git --config-env=remote.origin.url=V push"])
+    assert.match(git(c) ?? "", /remotes needs the user/, c);
+  for (const c of ["git config --get remote.origin.url", "git config remote.origin.url", "git config --get-regexp '^url[.]'", "git config get remote.origin.pushurl",
+    "git config --get-urlmatch http https://example.com", "git config branch.night.remote origin", "git config --list", "git -c user.name=x push origin night",
+    "git config --file .git/config remote.origin.url", "git config -- remote.origin.url", "git config --unset core.editor"])
+    assert.equal(git(c), null, c);
+});
+
+test("a push to a URL instead of a remote's name is refused: the place a push goes is the user's", () => {
+  for (const c of ["git push https://example.com/o/r.git HEAD:main", "git push git@example.com:o/r.git main", "git push --repo=https://example.com/o/r.git",
+    "git push --repo https://example.com/o/r.git", "git push file:///c/temp/x main", "git push -u ssh://git@example.com/o/r night", "git push -- https://example.com/o/r.git night",
+    "git push example.com:o/r.git main", "git push --repo=host:o/r.git", "git push --rep host:o/r.git", "git push -o ci.skip https://example.com/o/r.git night"])
+    assert.match(git(c) ?? "", /URL/, c);
+  for (const c of ["git push origin HEAD:refs/heads/night", "git push -u origin night", "git push origin main:main", "git push", "git push ../bare night", "git push origin 'HEAD@{1}:night'",
+    "git push origin night@2:night", "git push -o ci.skip origin night", "git push --push-option ci@x:y origin night", "git push C:/temp/bare night", "git push -- origin night"])
+    assert.equal(git(c), null, c);
+});
+
+test("node's inline script is one word of JavaScript: a quoted path with a colon in it is no delete target", () => {
+  // The shape of session 08's read-only probe (2026-11-19), refused as "a path with an NTFS stream name".
+  const probe = String.raw`cd /c/work/repo/scripts && node -e "
+import('./guard.mjs').then(({ decide }) => {
+  const env = { NIGHT_SHIFT_REPO: 'C:/work/repo', NIGHT_SHIFT_STATE: 'C:/temp/x-night', USERPROFILE: 'C:/Users/u' };
+  const bash = (command) => decide({ tool_name: 'Bash', tool_input: { command } }, env);
+  console.log('inside temp:', JSON.stringify(bash('cd \"/c/temp/My Game/..\" && rm -rf old')));
+  console.log('unquoted lost cd:', JSON.stringify(bash('cd \$X && rm -rf old')).slice(0, 80));
+});"`;
+  assert.equal(bash(probe), null);
+  for (const c of [`node -p "process.env.A + ':' + 'rm -rf x'"`, `node -e "f('rm -rf C:/Users/u/x')"`, `node --eval "f('rm -rf C:/Users/u/x')"`,
+    `node --print="f('rm -rf C:/Users/u/x')"`, `node -pe "'rm -rf a:b'"`, `C:/tools/node.exe -e "f('rm -rf C:/Users/u/x')"`, `node --input-type=module -e "f('rm -rf C:/x')"`])
+    assert.equal(bash(c), null, c);
+  // What the shell does around the script is still read: a substitution in it, a redirect, a pipe, the next command, words after it.
+  for (const c of [`node -e "x" > C:/Users/u/.claude/settings.json`, `node -e "x" && rm -rf C:/Users/u/Documents`, `node -e "$(rm -rf /c/Users/u/Documents)"`,
+    `node -p "1" | tee C:/temp/x-night/run.json`, `node -e "x" rm -rf C:/Users/u/Documents`, `bash -c 'node -e "x"; rm -rf ~/Documents'`, `node -e "x" -- rm -rf C:/Users/u/Documents`,
+    // after a script file, -p and -e are the script's own words: what follows them is still read
+    `node node_modules/rimraf/bin.js -p C:/Users/u/Documents`, `node tools/rm.mjs -e "rm -rf C:/Users/u/Documents"`])
+    assert.ok(bash(c), c);
 });
 
 test("a transport option that names a program is refused wherever git takes one", () => {
