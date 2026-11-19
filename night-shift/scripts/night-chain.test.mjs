@@ -143,11 +143,11 @@ test("cutOffSession: only a session that started (or resumed) and never ended co
   const { cutOffSession } = await import("./night-chain.mjs");
   const { state } = setup();
   const log = (lines) => fs.writeFileSync(path.join(state, "chain.log"), lines.map((l) => `[2026-11-01 19:26:17] ${l}`).join("\n") + "\n");
-  fs.writeFileSync(path.join(state, "session-35.jsonl"), '{"type":"system","session_id":"cb61ff92-x"}\n');
+  fs.writeFileSync(path.join(state, "session-35.jsonl"), '{"type":"system","session_id":"00000000-0000-4000-8000-000000000035"}\n');
   log(["chain starts in x", "session 34 ends: success", "session 35 starts: Zincir 2"]);
-  assert.deepEqual(cutOffSession(state), { nn: "35", sessionId: "cb61ff92-x" });
-  log(["session 35 resumes cb61ff92-x after the usage limit"]);
-  assert.deepEqual(cutOffSession(state), { nn: "35", sessionId: "cb61ff92-x" });
+  assert.deepEqual(cutOffSession(state), { nn: "35", sessionId: "00000000-0000-4000-8000-000000000035" });
+  log(["session 35 resumes 00000000-0000-4000-8000-000000000035 after the usage limit"]);
+  assert.deepEqual(cutOffSession(state), { nn: "35", sessionId: "00000000-0000-4000-8000-000000000035" });
   log(["session 35 starts: x", "session 35 ends: success"]);
   assert.equal(cutOffSession(state), null);
   log(["session 35 starts: x", "chain ends: stop requested"]);
@@ -156,10 +156,10 @@ test("cutOffSession: only a session that started (or resumed) and never ended co
   assert.equal(cutOffSession(state), null, "no stream, no conversation to resume");
   // From 2026-11-15 the runs line says what it ran on, so the resume goes on on the same model.
   log(["session 35 starts: x", "session 35 runs Fable at high"]);
-  assert.deepEqual(cutOffSession(state), { nn: "35", sessionId: "cb61ff92-x", model: "fable", effort: "high" });
+  assert.deepEqual(cutOffSession(state), { nn: "35", sessionId: "00000000-0000-4000-8000-000000000035", model: "fable", effort: "high" });
   log(["session 35 starts: x", "session 35 asked for Fable, but its allowance is used up until 2026-11-18 10:00; it runs on Opus at max",
     "session 35 runs Opus (claude-opus-5-5) at max"]);
-  assert.deepEqual(cutOffSession(state), { nn: "35", sessionId: "cb61ff92-x", model: "claude-opus-5-5", effort: "max" });
+  assert.deepEqual(cutOffSession(state), { nn: "35", sessionId: "00000000-0000-4000-8000-000000000035", model: "claude-opus-5-5", effort: "max" });
 });
 
 test("a resumed session's header is English throughout, for every reason it resumes", async () => {
@@ -173,11 +173,11 @@ const st = process.env.NIGHT_SHIFT_STATE; let input = "";
 for await (const c of process.stdin) input += c;
 fs.writeFileSync(path.join(st, "seen.json"), JSON.stringify({ input }));
 fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done");
-console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "cb61ff92-x", result: "ok" }));
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "00000000-0000-4000-8000-000000000035", result: "ok" }));
 `);
     const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
     fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake, maxSessions: null }));
-    fs.writeFileSync(path.join(state, "resume.json"), JSON.stringify({ nn: "35", sessionId: "cb61ff92-x", why }));
+    fs.writeFileSync(path.join(state, "resume.json"), JSON.stringify({ nn: "35", sessionId: "00000000-0000-4000-8000-000000000035", why }));
     const { code } = await runOnce(["--state", state, "--headless"], env, root);
     assert.equal(code, 0, fs.readFileSync(path.join(state, "chain.log"), "utf8"));
     const { input } = JSON.parse(fs.readFileSync(path.join(state, "seen.json"), "utf8"));
@@ -194,11 +194,11 @@ const st = process.env.NIGHT_SHIFT_STATE; let input = "";
 for await (const c of process.stdin) input += c;
 fs.writeFileSync(path.join(st, "seen.json"), JSON.stringify({ args: process.argv.slice(2), input }));
 fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done");
-console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "cb61ff92-x", result: "ok" }));
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "00000000-0000-4000-8000-000000000035", result: "ok" }));
 `);
   const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
   fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake, maxSessions: null }));
-  fs.writeFileSync(path.join(state, "resume.json"), JSON.stringify({ nn: "35", sessionId: "cb61ff92-x", why: "stopped" }));
+  fs.writeFileSync(path.join(state, "resume.json"), JSON.stringify({ nn: "35", sessionId: "00000000-0000-4000-8000-000000000035", why: "stopped" }));
   fs.writeFileSync(path.join(state, "night-settings.json"), JSON.stringify({
     env: { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0" },
     hooks: { SessionStart: [{ matcher: "startup", hooks: [{ type: "command", command: "cleanup.ps1" }] }], PreToolUse: [] },
@@ -207,10 +207,10 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
   const { code } = await runOnce(["--state", state, "--headless"], { ...env, NIGHT_SHIFT_HIDE_MARK: mark }, root);
   const log = fs.readFileSync(path.join(state, "chain.log"), "utf8");
   assert.equal(code, 0, log);
-  assert.match(log, /session 35 resumes cb61ff92-x where the last runner stopped/);
+  assert.match(log, /session 35 resumes 00000000-0000-4000-8000-000000000035 where the last runner stopped/);
   assert.ok(fs.existsSync(mark), "the session's Node processes must load hide-windows.cjs");
   const seen = JSON.parse(fs.readFileSync(path.join(state, "seen.json"), "utf8"));
-  assert.deepEqual(seen.args.slice(seen.args.indexOf("--resume"), seen.args.indexOf("--resume") + 2), ["--resume", "cb61ff92-x"]);
+  assert.deepEqual(seen.args.slice(seen.args.indexOf("--resume"), seen.args.indexOf("--resume") + 2), ["--resume", "00000000-0000-4000-8000-000000000035"]);
   assert.match(seen.input, /^The session was cut off: the runner stopped/);
   assert.doesNotMatch(seen.input, /The usage limit has reset/);
   assert.equal(fs.existsSync(path.join(state, "resume.json")), false);
@@ -1016,16 +1016,16 @@ test("report: a job resumed after a restart shows its working time and the gap a
     "[2026-11-01 19:26:17] chain starts in x, until the work is done, from session 35",
     "[2026-11-01 19:26:17] session 35 starts: Zincir 2. Devam.",
     "[2026-11-05 16:36:25] chain starts in x, until the work is done, from session 35",
-    "[2026-11-05 16:36:25] session 35 resumes cb61ff92-x where the last runner stopped",
+    "[2026-11-05 16:36:25] session 35 resumes 00000000-0000-4000-8000-000000000035 where the last runner stopped",
     "[2026-11-05 18:53:21] session 35 ends: success, 66 turns, $13.03",
   ].join("\n") + "\n");
   const said = (local, id) => JSON.stringify({ type: "assistant", timestamp: iso(local),
     message: { id, model: "claude-opus-5-5", content: [], usage: { input_tokens: 1, output_tokens: 1 } } });
   fs.writeFileSync(path.join(state, "session-35.jsonl"), [
-    JSON.stringify({ type: "system", session_id: "cb61ff92-x", timestamp: iso("2026-11-01T19:26:20") }),
+    JSON.stringify({ type: "system", session_id: "00000000-0000-4000-8000-000000000035", timestamp: iso("2026-11-01T19:26:20") }),
     said("2026-11-01T19:30:00", "a"), said("2026-11-01T21:20:00", "b"),
     said("2026-11-05T16:40:00", "c"), said("2026-11-05T18:53:00", "d"),
-    JSON.stringify({ type: "result", subtype: "success", is_error: false, session_id: "cb61ff92-x" }),
+    JSON.stringify({ type: "result", subtype: "success", is_error: false, session_id: "00000000-0000-4000-8000-000000000035" }),
   ].join("\n") + "\n");
   assert.match(buildReport(state, { pid: 0 }).plain, /#35 11-01 19:26–11-05 18:53 · 4 h 11 min \(\+91 h 16 min idle\) · ✅/);
 });
@@ -2019,11 +2019,11 @@ const st = process.env.NIGHT_SHIFT_STATE; let input = "";
 for await (const c of process.stdin) input += c;
 fs.writeFileSync(path.join(st, "seen.json"), JSON.stringify({ input }));
 fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done");
-console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "cb61ff92-x", result: "ok" }));
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "00000000-0000-4000-8000-000000000035", result: "ok" }));
 `);
   const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
   fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake, maxSessions: null }));
-  fs.writeFileSync(path.join(state, "resume.json"), JSON.stringify({ nn: "35", sessionId: "cb61ff92-x", why: "stopped" }));
+  fs.writeFileSync(path.join(state, "resume.json"), JSON.stringify({ nn: "35", sessionId: "00000000-0000-4000-8000-000000000035", why: "stopped" }));
   putRules(projectRules(repo), "push is allowed on night/*");
   const { code } = await runOnce(["--state", state, "--headless"], env, root);
   assert.equal(code, 0, fs.readFileSync(path.join(state, "chain.log"), "utf8"));

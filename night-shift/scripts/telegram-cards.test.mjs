@@ -9,15 +9,15 @@ const en = strings("en");
 
 const done = {
   nn: "13", ok: true, took: "1 h 21 min", cost: "$19.24", five: "56%", seven: "47%",
-  title: "R11 closure (Presets) — R11 done", next: "R12 plan (Settings)", problems: [],
-  commits: ["5cf8e41 ui: R11 closure — Presets"], rows: ["main opus 5.5 · 221 calls · $15.11"], waits: [],
+  title: "R11 closure (Themes) — R11 done", next: "R12 plan (Settings)", problems: [],
+  commits: ["a1b2c3d ui: R11 closure — Themes"], rows: ["main opus 5.5 · 221 calls · $15.11"], waits: [],
 };
 
 test("a finished job is a short card: title, one numbers line, what comes next", () => {
   const { text, silent } = sessionCard(done, en);
   const head = text.split("<blockquote")[0].trim().split("\n");
   assert.deepEqual(head, [
-    "✅ <b>#13 · R11 closure (Presets) — R11 done</b>",
+    "✅ <b>#13 · R11 closure (Themes) — R11 done</b>",
     "1 h 21 min · $19.24 · 5h 56% · 7d 47%",
     "➡️ R12 plan (Settings)",
   ]);
@@ -26,7 +26,7 @@ test("a finished job is a short card: title, one numbers line, what comes next",
 
 test("the card is short: no commit hashes and no token rows, only what waits in one collapsed quote", () => {
   const { text } = sessionCard(done, en);
-  assert.doesNotMatch(text, /blockquote|Commit|Token|5cf8e41|calls/);
+  assert.doesNotMatch(text, /blockquote|Commit|Token|a1b2c3d|calls/);
   const waiting = sessionCard({ ...done, waits: ["R65's physical acceptance"] }, en).text;
   assert.equal(waiting.match(/<blockquote expandable>/g).length, 1);
   assert.match(waiting, /<blockquote expandable><b>Waits for you<\/b> · 1\n• R65's physical acceptance<\/blockquote>$/);
@@ -39,7 +39,7 @@ test("only this job's problems show, above the details", () => {
 });
 
 test("a job with no report section falls back to its commits, then to its number", () => {
-  assert.match(sessionCard({ ...done, title: null }, en).text, /^✅ <b>#13 · ui: R11 closure — Presets<\/b>/);
+  assert.match(sessionCard({ ...done, title: null }, en).text, /^✅ <b>#13 · ui: R11 closure — Themes<\/b>/);
   assert.match(sessionCard({ ...done, title: null, commits: [] }, en).text, /^✅ <b>#13<\/b>/);
 });
 
@@ -88,8 +88,8 @@ test("the chain's end card counts the jobs and what waits, with each job one lin
 
 test("the next step drops its technical tail: an unclosed bracket, code and hashes", () => {
   const text = (next) => ["## 2026-11-10 · run 5 · session 7 (14:10–14:58) · D3b", `**Next:** ${next}`].join("\n");
-  assert.equal(reportSection(text("the D3 closure (round-closure-review over `1384f12..HEAD`, one fix wave, every walk)."), "7", "14:10").next, "the D3 closure");
-  assert.equal(reportSection(text("R10's plan (Taskbar), after `/clear`, base `abc`."), "7", "14:10").next, "R10's plan (Taskbar)");
+  assert.equal(reportSection(text("the D3 closure (round-closure-review over `b2c3d4e..HEAD`, one fix wave, every walk)."), "7", "14:10").next, "the D3 closure");
+  assert.equal(reportSection(text("R10's plan (Toolbar), after `/clear`, base `abc`."), "7", "14:10").next, "R10's plan (Toolbar)");
   assert.equal(reportSection(text("fix `ab12cd3` in the walk."), "7", "14:10").next, "fix in the walk");
 });
 
@@ -152,17 +152,17 @@ test("the share Fable and Mythos have in common is named after the model in play
 const report = [
   "## 2026-10-30 · session 7 (08:25–08:50) · R7 T1 (Effects)",
   "", "**Next:** something from run 1.",
-  "## 2026-10-31 · run 2 · session 7 (19:23–22:25, stopped by the usage limit) · R9 closure (Mouse Pet) — R9 done",
-  "", "**Done**", "- a", "", "**Waits for you**", "- **Look at** the `pet` stage", "  more of it", "- Physical test of R61", "",
-  "**Next:** R10's plan (Taskbar), after `/clear`, base `abc`.",
+  "## 2026-10-31 · run 2 · session 7 (19:23–22:25, stopped by the usage limit) · R9 closure (Search) — R9 done",
+  "", "**Done**", "- a", "", "**Waits for you**", "- **Look at** the `search` stage", "  more of it", "- Physical test of R61", "",
+  "**Next:** R10's plan (Toolbar), after `/clear`, base `abc`.",
   "## 2026-10-31 · run 2 · session 8 (22:19–23:01) · R10 plan",
 ].join("\n");
 
 test("a job's section is found by its number and start time, not by the first heading with that number", () => {
   const s = reportSection(report, "07", "19:24");
-  assert.equal(s.title, "R9 closure (Mouse Pet) — R9 done");
-  assert.equal(s.next, "R10's plan (Taskbar)");
-  assert.deepEqual(s.waits, ["Look at the pet stage", "Physical test of R61"]);
+  assert.equal(s.title, "R9 closure (Search) — R9 done");
+  assert.equal(s.next, "R10's plan (Toolbar)");
+  assert.deepEqual(s.waits, ["Look at the search stage", "Physical test of R61"]);
   assert.equal(s.older, 0);
   assert.equal(reportSection(report, "07", "12:00"), null);
 });
