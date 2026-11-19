@@ -628,6 +628,8 @@ export function chainMessage(state, reason, pid) {
     fableName: shareName(c, jobs),
     waits: waitList.length, waitList,
     problems: facts.flatMap((f) => f.problems.map((p) => `#${f.nn} ${p}`)),
+    // K6: a run on its own worktree, while the folder is there.
+    ...(c.run.tree && fs.existsSync(c.run.tree) ? { tree: c.run.tree, branch: c.run.branch || "night-shift" } : {}),
   }, T);
 }
 

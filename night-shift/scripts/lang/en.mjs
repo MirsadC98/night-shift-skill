@@ -38,6 +38,8 @@ export default {
   waitsLine: (n) => `${n} item${s(n)} waiting for you`,
   moreJobs: (n) => `… ${n} more job${s(n)}`,
   chainEnded: "Chain ended",
+  // the end card of a run on its own worktree: both commands are the user's
+  chainTree: (tree, branch) => `The work is on ${branch} in ${tree}: git merge ${branch} in your tree takes it, git worktree remove ${tree} removes the worktree`,
   jobRunning: "running",
   lastStep: "last step",
   lastDone: "Last finished",
@@ -165,6 +167,9 @@ export default {
     statusFinished: (at, reason) => `finished ${at}: ${reason}`,
     statusScheduled: (at) => `scheduled ${at}, not running`,
     statusState: (state) => `state: ${state}`,
+    // a run on its own worktree, until the chain has ended (running) and after
+    statusTree: (tree, branch, repo, running) => (running ? `worktree: ${tree} on ${branch}; the chain works there, and ${repo} is yours`
+      : `worktree: ${tree} on ${branch}; take its work with git merge ${branch} in ${repo}, remove it with git worktree remove ${tree}`),
     notStartedYet: "the runner has not started yet; waiting",
     waiting: (pid, state) => `waiting: runner pid ${pid} (${state})`,
     handedOver: (from, to) => `runner handed over: pid ${from} → ${to}`,

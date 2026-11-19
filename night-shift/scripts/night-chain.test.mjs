@@ -3580,3 +3580,88 @@ test("a start that goes on keeps its run's tree whatever the flag and the config
   gitT(c.repo, "worktree", "remove", "--force", dir);
   refused(goOn(), new RegExp(`the worktree ${lit(tree)} is gone; put it back \\(git worktree add ${lit(tree)} night-shift\\), or start with a new prompt`));
 });
+
+// ---------------------------------------------------------------- K6 task 4: a terminal in the worktree, status, the end card
+// The session runs status and start from its own folder, the worktree: both take the main tree's pointer. The inner start
+// gets a launch that fails and a state folder of its own, so that one that did not find the chain launches nothing.
+const TREE_CMDS = `import fs from "node:fs"; import path from "node:path"; import { execFileSync } from "node:child_process";
+const st = process.env.NIGHT_SHIFT_STATE;
+const cli = (args) => { try { return execFileSync(process.execPath, [process.env.TEST_CHAIN, ...args, "--repo", process.cwd()], { encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, NIGHT_SHIFT_LAUNCH: "fail" } }); } catch (e) { return "ERR " + (e.stderr || e.message); } };
+fs.writeFileSync(path.join(st, "cmds.json"), JSON.stringify({ status: cli(["status"]), start: cli(["start", "--prompt", "again", "--state", path.join(st, "none")]),
+  reload: cli(["reload"]), stop: cli(["stop"]) }));
+execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "night work"], { windowsHide: true });
+fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done");
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-1", result: "ok" }));
+`;
+
+test("a command given the chain's worktree takes its main tree; status, wait and the end card name the worktree and the user's two commands", async () => {
+  const s = setup();
+  gitT(s.repo, "commit", "-q", "--allow-empty", "-m", "base");
+  fs.writeFileSync(path.join(s.root, "fake-claude.mjs"), TREE_CMDS);
+  const e = { ...s.env, NIGHT_SHIFT_CLAUDE: path.join(s.root, "fake-claude.mjs") };
+  execFileSync(process.execPath, [CHAIN, "start", "--repo", s.repo, "--state", s.state, "--prompt", "first", "--worktree"], { env: e, cwd: s.root, encoding: "utf8" });
+  const tree = fs.realpathSync.native(nightDir(s.repo));
+  // wait, given the worktree, finds the chain.
+  const done = await waitFor(tree, e, s.root).done;
+  assert.equal(done.code, 0, done.out);
+  const finished = `worktree: ${tree} on night-shift; take its work with git merge night-shift in ${s.repo}, remove it with git worktree remove ${tree}`;
+  assert.ok(done.out.includes(finished), done.out);
+  // Inside the session: status found the running chain, and start refused a second one.
+  const cmds = JSON.parse(fs.readFileSync(path.join(s.state, "cmds.json"), "utf8"));
+  assert.match(cmds.status, /^running \(pid \d+\)/m);
+  assert.ok(cmds.status.includes(`worktree: ${tree} on night-shift; the chain works there, and ${s.repo} is yours`), cmds.status);
+  assert.match(cmds.start, /a run is already active/);
+  assert.match(cmds.reload, /takes up its new code after the session in progress/);
+  assert.match(cmds.stop, /the chain stops after the session in progress/);
+  // The stop ended the chain before the reload's hand-over; the request is left for no one.
+  fs.rmSync(path.join(s.state, "RELOAD-REQUEST"), { force: true });
+  // The pointer is the main tree's, and names the worktree.
+  const ptr = pointerOf(s.home);
+  assert.deepEqual([ptr.tree, ptr.branch], [tree, "night-shift"]);
+  const statusOf = (dir) => execFileSync(process.execPath, [CHAIN, "status", "--repo", dir], { env: e, cwd: s.root, encoding: "utf8" });
+  assert.ok(statusOf(tree).includes(finished));
+  assert.ok(statusOf(s.repo).includes(finished));
+  // The end card names them too; the runner ran neither.
+  const card = execFileSync(process.execPath, [REPORT_CLI, "card", "--state", s.state, "--chain"], { env: e, cwd: s.root, encoding: "utf8" });
+  assert.ok(card.includes(`The work is on night-shift in ${tree}: git merge night-shift in your tree takes it, git worktree remove ${tree} removes the worktree`), card);
+  assert.ok(fs.existsSync(tree));
+  assert.deepEqual(gitT(s.repo, "log", "--format=%s").split("\n"), ["base"]);
+  // A worktree made by hand keeps its own key.
+  const mine = path.join(s.root, "mine");
+  gitT(s.repo, "worktree", "add", "-q", "-b", "mine", mine);
+  assert.match(statusOf(mine), /no night-shift run recorded for this repository/);
+  // A later chain on the checked-out branch leaves the worktree out of the pointer, status and the card.
+  execFileSync(process.execPath, [CHAIN, "start", "--repo", s.repo, "--state", s.state, "--prompt", "second", "--worktree", "false"], { env: e, cwd: s.root, encoding: "utf8" });
+  const again = await waitFor(s.repo, e, s.root).done;
+  assert.equal(again.code, 0, again.out);
+  assert.equal(pointerOf(s.home).tree, undefined);
+  assert.doesNotMatch(statusOf(s.repo), /worktree:/);
+  assert.doesNotMatch(execFileSync(process.execPath, [REPORT_CLI, "card", "--state", s.state, "--chain"], { env: e, cwd: s.root, encoding: "utf8" }), /git worktree remove/);
+});
+
+test("status gives a worktree run whose runner is gone the user's commands, and leaves out a removed worktree; init and doctor in it take the main tree", async () => {
+  const s = await treeStart(["--worktree"]);
+  const tree = fs.realpathSync.native(nightDir(s.repo));
+  const status = () => execFileSync(process.execPath, [CHAIN, "status", "--repo", s.repo], { env: s.env, cwd: s.root, encoding: "utf8" });
+  const runs = path.join(s.home, ".claude", "night-shift", "runs"), file = path.join(runs, fs.readdirSync(runs)[0]);
+  const ptr = pointerOf(s.home);
+  // A runner that died without an end line: the chain is over, so the user's two commands.
+  const dead = spawnSync(process.execPath, ["-e", ""]).pid;
+  fs.writeFileSync(file, JSON.stringify({ ...ptr, finished: false, pid: dead }));
+  assert.ok(status().includes(`worktree: ${tree} on night-shift; take its work with git merge night-shift in ${s.repo}, remove it with git worktree remove ${tree}`));
+  // One not picked up yet: the chain is still to work there.
+  fs.writeFileSync(file, JSON.stringify({ ...ptr, finished: false, pid: 0 }));
+  assert.ok(status().includes(`worktree: ${tree} on night-shift; the chain works there, and ${s.repo} is yours`));
+  fs.writeFileSync(file, JSON.stringify(ptr));
+  // init and doctor given the worktree take the main tree, whose project file the runner reads.
+  execFileSync(process.execPath, [CHAIN, "init", "--repo", tree], { env: s.env, cwd: s.root, encoding: "utf8" });
+  assert.ok(fs.existsSync(path.join(s.repo, ".claude", "night-shift.json")));
+  assert.equal(fs.existsSync(path.join(tree, ".claude", "night-shift.json")), false);
+  const doc = spawnSync(process.execPath, [CHAIN, "doctor", "--repo", tree], { env: s.env, cwd: s.root, encoding: "utf8" });
+  assert.match(doc.stdout, new RegExp(`^ {2}ok {4}repo: ${lit(s.repo)}$`, "m"), doc.stdout);
+  // A worktree the user removed is left out.
+  gitT(s.repo, "worktree", "remove", "--force", tree);
+  const out = status();
+  assert.match(out, /^finished /m);
+  assert.doesNotMatch(out, /worktree:/);
+});

@@ -22,7 +22,9 @@
 //    tree stays the user's; its uncommitted work there does not stop start. A branch HEAD contains is moved up to
 //    HEAD first; one with commits HEAD lacks is kept as it is. The runner never merges it and never removes the
 //    worktree, except one a failed start made. A start that goes on (no new prompt) keeps the tree its run had;
-//    --worktree false turns a config's true off for a start with a new prompt)
+//    --worktree false turns a config's true off for a start with a new prompt. Given the worktree's folder, start,
+//    status, wait, stop, reload, init and doctor take its main tree; status and the end card name the worktree, and
+//    once the chain has ended the user's git merge night-shift (in the main tree) and git worktree remove <dir>)
 //   (without --until and --max-sessions the chain goes on until a session writes STOP,
 //    two handovers fail in a row, or stop is called; a usage limit pauses it, and the
 //    session it cut off is resumed with --resume once the limit resets. start without
@@ -295,6 +297,17 @@ const worktreeList = (repo) => (gitIn(repo, ["worktree", "list", "--porcelain"])
   const field = (k) => lines.find((l) => l.startsWith(`${k} `))?.slice(k.length + 1) ?? null;
   return { dir: field("worktree"), ref: field("branch") };
 }).filter((w) => w.dir).map((w) => ({ ...w, dir: path.resolve(w.dir) }));
+// K6: the repository a command is given, or its main tree when it is the worktree the main tree's last run works in, so
+// that start, status, wait, stop, reload, init and doctor in a terminal there (a session's own folder) find the chain by
+// the main tree's pointer and its project file. A worktree the user made keeps its own.
+const chainRepo = (dir) => {
+  const repo = repoRoot(dir), main = worktreeList(repo)[0]?.dir;
+  if (!main || sameDir(main, repo)) return repo;
+  const home = gitRoot(main, true) || main;
+  let ptr = null;
+  try { ptr = readPointer(home); } catch {}
+  return ptr?.tree && sameDir(ptr.tree, repo) ? home : repo;
+};
 
 // start: the worktree this start's chain works in, checked and not yet made, or null for the checked-out branch:
 // { tree, branch, kept (it exists already), madeBranch (the branch does not exist yet) }. A start that goes on (no new
@@ -455,7 +468,7 @@ const foreignState = (state) => !fs.existsSync(path.join(state, "run.json")) && 
 async function start(opt) {
   // No terminal opens the same way on every macOS and Linux desktop; tail -f <state>/chain.log shows what a console would.
   if (opt.window && platform.name !== "win32") fail("--window (a visible console) is for Windows only; follow <state>/chain.log instead (tail -f)");
-  const repo = repoRoot(opt.repo || process.cwd());
+  const repo = chainRepo(opt.repo || process.cwd());
   const ptr = readPointer(repo);
   if (ptr && !ptr.finished) {
     if (isRunner(ptr.pid)) fail(`a run is already active (pid ${ptr.pid}, state ${ptr.state}); reload gives it new runner code`);
@@ -626,7 +639,7 @@ async function start(opt) {
   let task;
   try { task = scheduleRun(run); } catch (e) { fail(`${platform.name === "win32" ? "Task Scheduler" : "the detached start"}: ${String(e.stderr || e.message).trim().split("\n")[0]}`); }
   if (made.undo) process.off("exit", made.undo);
-  writePointer(repo, { pid: 0, state, task, scheduledAt: now(), finished: false });
+  writePointer(repo, { pid: 0, state, task, ...(wt ? { tree: wt.tree, branch: wt.branch } : {}), scheduledAt: now(), finished: false });
   console.log(`night-shift started for ${repo}`);
   if (cut) console.log(`  resumes session ${cut.nn} (${cut.sessionId}), which the last runner left unfinished`);
   console.log(`  state:  ${state}`);
@@ -677,7 +690,9 @@ async function runChain(opt) {
       process.exit(0);
     } catch (e) { log(`could not move to a hidden console (${String(e.stderr || e.message).trim().split("\n")[0]}); runs here`); }
   }
-  const pointer = { ...(readPointer(repo) || {}), pid: process.pid, state, finished: false, startedAt: now(), reloadable: true };
+  // K6: the tree as this run's run.json has it, whatever an earlier pointer said.
+  const { tree: _tree, branch: _branch, ...earlier } = readPointer(repo) || {};
+  const pointer = { ...earlier, ...(run.tree ? { tree: run.tree, branch: run.branch } : {}), pid: process.pid, state, finished: false, startedAt: now(), reloadable: true };
   writePointer(repo, pointer);
   // A runner handing over may mark the pointer finished after this one wrote it; put it back. Not once a stop was asked:
   // a stop from inside this runner's tree (the bot's /stop now, runs.mjs) marks it finished before its kill, and that
@@ -1159,8 +1174,12 @@ function runSession(run, session, plan, nn, resume, rules = "", mcp = ["--strict
 }
 
 // ---------------------------------------------------------------- status / wait / stop
-const statusHead = (ptr, running, T) => [running ? T.cli.statusRunning(ptr.pid, ptr.startedAt)
-  : ptr.finished ? T.cli.statusFinished(ptr.finishedAt, ptr.reason) : T.cli.statusScheduled(ptr.scheduledAt), T.cli.statusState(ptr.state)];
+// K6: a run on its own worktree names it while the folder is there: while its runner runs or is not picked up yet, that
+// the main tree is the user's; once the chain has ended or its runner is gone, the user's two commands, which the runner
+// never runs.
+const statusHead = (ptr, running, T, repo) => [running ? T.cli.statusRunning(ptr.pid, ptr.startedAt)
+  : ptr.finished ? T.cli.statusFinished(ptr.finishedAt, ptr.reason) : T.cli.statusScheduled(ptr.scheduledAt), T.cli.statusState(ptr.state),
+  ...(ptr.tree && fs.existsSync(ptr.tree) ? [T.cli.statusTree(ptr.tree, ptr.branch || NIGHT_BRANCH, repo, running || (!ptr.finished && !ptr.pid))] : [])];
 
 // status and wait: the run's language table, before anything reads it; one that is gone or does not load reads English.
 async function readLang(code) {
@@ -1170,12 +1189,12 @@ async function readLang(code) {
 }
 
 async function status(opt) {
-  const repo = repoRoot(opt.repo || process.cwd());
+  const repo = chainRepo(opt.repo || process.cwd());
   const ptr = readPointer(repo);
   if (!ptr) return console.log((await readLang(langOf({ repo }))).cli.noRun);
   const running = !ptr.finished && isRunner(ptr.pid);
   const T = await readLang(stateLang(ptr.state, repo));
-  console.log(`${[...statusHead(ptr, running, T), ...ruleLines(ruleStatus(repo))].join("\n")}\n`);
+  console.log(`${[...statusHead(ptr, running, T, repo), ...ruleLines(ruleStatus(repo))].join("\n")}\n`);
   console.log(buildReport(ptr.state, { focus: "all", pid: running ? ptr.pid : 0 }).plain);
 }
 
@@ -1208,7 +1227,7 @@ const lastRunnerEvent = (state) => read(path.join(state, "chain.log")).split("\n
   .filter(Boolean).at(-1) || "";
 
 async function waitChain(opt) {
-  const repo = repoRoot(opt.repo || process.cwd());
+  const repo = chainRepo(opt.repo || process.cwd());
   const first = pointerOr(repo) || fail("no night-shift run recorded for this repository");
   const state = path.resolve(first.state);
   const same = (a) => platform.samePath(a, state);
@@ -1233,7 +1252,7 @@ async function waitChain(opt) {
     const waits = userWaits(state);
     const asked = unseen();
     keep(asked);
-    console.log([...report(statusHead(pointerOr(repo) || first, false, T)),
+    console.log([...report(statusHead(pointerOr(repo) || first, false, T, repo)),
       T.cli.userWaits(waits), "",
       ...(asked.length ? [T.cli.asked, ...asked, ""] : []),
       T.cli.reportLine(path.resolve(workTree(run) || repo, run.report || "NIGHT_RUNS.md"), `node "${SELF}" status --repo "${repo}"`)].join("\n"));
@@ -1310,7 +1329,7 @@ async function waitChain(opt) {
 
 // The one stop is runs.mjs's, shared with the bot's /stop; these are the CLI's words for what it found.
 async function stop(opt) {
-  const repo = repoRoot(opt.repo || process.cwd());
+  const repo = chainRepo(opt.repo || process.cwd());
   const { outcome, pid } = await stopRun(repo, { now: Boolean(opt.now) });
   console.log({
     none: "no active run",
@@ -1324,7 +1343,7 @@ async function stop(opt) {
 }
 
 function reload(opt) {
-  const repo = repoRoot(opt.repo || process.cwd());
+  const repo = chainRepo(opt.repo || process.cwd());
   const ptr = readPointer(repo);
   if (!ptr || ptr.finished || !isRunner(ptr.pid)) return console.log("no active run");
   // A runner from before reload never looks for the request; only its settings can still change.
@@ -1362,8 +1381,8 @@ async function doctor(opt) {
   // The project's checks need a repository: --repo, else the one this folder is in.
   let repo = null;
   if (opt.repo === true) row("FAIL", "repo", "--repo wants a folder (got no value)");
-  else if (typeof opt.repo === "string") { repo = gitRoot(opt.repo, true); row(repo ? "ok" : "FAIL", "repo", repo || `not a git repository: ${path.resolve(opt.repo)}`); }
-  else { repo = gitRoot(process.cwd(), true); row(repo ? "ok" : "skip", "repo", repo || `${process.cwd()} is in no git repository; pass --repo <dir> for the project's checks`); }
+  else if (typeof opt.repo === "string") { repo = gitRoot(opt.repo, true) && chainRepo(opt.repo); row(repo ? "ok" : "FAIL", "repo", repo || `not a git repository: ${path.resolve(opt.repo)}`); }
+  else { repo = gitRoot(process.cwd(), true) && chainRepo(process.cwd()); row(repo ? "ok" : "skip", "repo", repo || `${process.cwd()} is in no git repository; pass --repo <dir> for the project's checks`); }
 
   // The config files as start reads them: the user's, and the project's over it.
   const own = globalConfigFile();
@@ -1498,7 +1517,7 @@ For example:
 `;
 function init(opt) {
   if (opt.repo === true) fail("--repo wants a folder (got no value)");
-  const repo = repoRoot(typeof opt.repo === "string" ? opt.repo : process.cwd());
+  const repo = chainRepo(typeof opt.repo === "string" ? opt.repo : process.cwd());
   const files = [[projectConfigFile(repo), `${JSON.stringify(INIT_CONFIG, null, 2)}\n`, "starter settings, every key optional"],
     [ruleFiles(repo).project, INIT_RULES, "your rules for this project, none until you write them below its comment"]];
   try { fs.mkdirSync(path.join(repo, ".claude"), { recursive: true }); } catch (e) { fail(`${path.join(repo, ".claude")} cannot be made (${e.code || e.message})`); }

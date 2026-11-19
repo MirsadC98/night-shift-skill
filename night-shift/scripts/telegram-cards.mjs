@@ -174,6 +174,7 @@ export function chainCard(f, T = strings()) {
     esc(String(f.reason ?? "").replace(/^STOP:\s*/i, "")),
     [T.jobCount(f.jobs.length), f.took, f.cost, f.seven && `${T.seven} ${f.seven}`, share(f)].filter(Boolean).join(" · "),
     f.waits ? `🙋 ${T.waitsLine(f.waits)}` : null,
+    f.tree ? `🌿 ${T.chainTree(esc(f.tree), esc(f.branch))}` : null,
   ], [
     { name: T.waitsHead, count: true, lines: (f.waitList || []).map((w) => `• ${w}`) },
     { name: T.jobsHead, lines: f.jobs.map((j) => `${mark(j.ok)} #${j.nn}${j.title ? ` ${j.title}` : ""}${j.took ? ` · ${j.took}` : ""}`) },

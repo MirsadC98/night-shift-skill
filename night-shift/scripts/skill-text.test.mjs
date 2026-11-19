@@ -149,6 +149,9 @@ test("the help, interactive.md and the README name --worktree, and the README it
   }
   assert.match(readme, /^- `worktree`: /m);
   assert.ok(readme.includes("`git merge night-shift`") && readme.includes("`git worktree remove <dir>`"), "README: the user's merge and remove");
+  // K6 task 4: the session in the user's tree is told which tree is the chain's, and that both commands are the user's.
+  const tree = interactive.split("\n").find((l) => l.startsWith("An interactive session does not edit the tree")) || "";
+  assert.ok(tree.includes("`worktree: <dir> on night-shift`") && tree.includes("`git merge night-shift`") && tree.includes("`git worktree remove <dir>`"), "interactive.md: the worktree in the tree rule");
 });
 // B4 item 2, K7: the starting chat's waiter wakes on a question, the chat writes the answer into the inbox, and Remote
 // Control is the phone path for a user without Telegram.
