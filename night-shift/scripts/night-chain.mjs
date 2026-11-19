@@ -48,6 +48,11 @@
 //   node night-chain.mjs reload --repo <dir>       (a running chain takes up this code after
 //                                                   the session in progress, watcher included)
 //   node night-chain.mjs run    --state <dir>      (what start schedules)
+//   node night-chain.mjs doctor [--repo <dir>]     (checks what a start needs, one line a check: the skill's copy,
+//                                                   Node, git and the CLI, the config and rule files, the language
+//                                                   table, the MCP list, the state folder, the guard's self-test and
+//                                                   the hook the runner writes, a linked ~/.claude; exit 1 on a FAIL;
+//                                                   no network and no model call)
 //   node night-chain.mjs --version                 (this copy's version, which start keeps in run.json)
 //
 // start schedules `run` through Task Scheduler so the chain outlives the
@@ -60,19 +65,20 @@
 // Telegram when it is set up. Every session reads <state>/night-settings.json
 // anew; runChain rewrites only its own keys there.
 
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, spawnSync, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { buildReport, userWaits, stateLang, questionLines, estimatedCost } from "./night-report.mjs";
 import { slug, pointerFile, readPointer, writePointer, isRunner, stopRun } from "./runs.mjs";
-import { strings, langOf, loadLang } from "./lang/index.mjs";
-import { mergedConfig, isLangCode, MODES, CONFIG_KEYS, stateDirProblem, tempRoot, isMain, claudeHome } from "./config.mjs";
+import { strings, langOf, loadLang, langFile } from "./lang/index.mjs";
+import { mergedConfig, isLangCode, MODES, CONFIG_KEYS, stateDirProblem, tempRoot, isMain, claudeHome, readGlobalConfig, globalConfigFile,
+  projectConfigFile } from "./config.mjs";
 import { sessionOutcome, windowSpan, fieldsGone } from "./session-outcome.mjs";
 import { listedServers, mcpArgs, claudeJson, mcpConfigArg, MCP_ARG_MAX } from "./mcp.mjs";
 import { ruleFiles, readRuleFile, rulesBlock } from "./rules.mjs";
-import { VERSION } from "./version.mjs";
+import { VERSION, NODE_FLOOR } from "./version.mjs";
 import { MAIN_MODEL, SUB_MODEL, MAIN_EFFORT, subEffortText, MAX_NOTE, nightModelSettings, sessionPlan, promptDirectives,
   directiveLines, fableGate, mainGate, fallbackNote, resolveMode, familyOf, isPremium, modelName, runModelIds, premiumNote,
   deniedNote, runsOn } from "./effort.mjs";
@@ -182,11 +188,14 @@ export const modelLine = (run) => {
     : `MODEL: fable or MODEL: mythos runs one piece at ${MAIN_EFFORT.fable} while their shared weekly allowance is under ${ceiling} (at most ${run.fableSessions ?? 2} such sessions while its share is unknown), else on Opus at max`}`;
 };
 
-function repoRoot(dir) {
+// The repository's top folder, or null; quiet keeps git's own error line off the console (doctor names the problem).
+function gitRoot(dir, quiet = false) {
   try {
-    return path.resolve(execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: dir, encoding: "utf8", windowsHide: true }).trim());
-  } catch { fail(`not a git repository: ${dir}`); }
+    return path.resolve(execFileSync("git", ["rev-parse", "--show-toplevel"],
+      { cwd: dir, encoding: "utf8", windowsHide: true, ...(quiet ? { stdio: ["ignore", "pipe", "ignore"] } : {}) }).trim());
+  } catch { return null; }
 }
+const repoRoot = (dir) => gitRoot(dir) || fail(`not a git repository: ${dir}`);
 // flags: start's, so that a cap the user passes is theirs whatever a project's file says (config.mjs, CAPS).
 const projectConfig = (repo, flags = {}) => {
   const { config, from, errors } = mergedConfig(repo, undefined, flags);
@@ -195,24 +204,25 @@ const projectConfig = (repo, flags = {}) => {
 };
 // start and status: what each rule file is to the user, in order (a file with no text is left out). A file
 // that cannot be used is named, not dropped, so the user is never left thinking rules apply that do not.
-const ruleStatus = (repo) => Object.values(ruleFiles(repo)).flatMap((file) => {
+const fileStatus = (files) => files.flatMap((file) => {
   const r = readRuleFile(file);
   return r.error ? [{ file, error: r.error }] : r.text ? [{ file, bytes: fs.statSync(file).size }] : [];
 });
+const ruleStatus = (repo) => fileStatus(Object.values(ruleFiles(repo)));
 const ruleLines = (found) => (found.length ? found : [{ none: true }])
   .map((f) => `  rules:  ${f.none ? "none" : f.error ? `${f.file} ${f.error}` : `${f.file} (${f.bytes} bytes)`}`);
 
-function findClaude() {
+// Where start looks for the CLI, in order; doctor looks in the same places.
+function locateClaude() {
   const candidates = [
     process.env.NIGHT_SHIFT_CLAUDE,
     path.join(path.dirname(NODE), "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe"),
     path.join(os.homedir(), "AppData", "Roaming", "npm", "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe"),
     path.join(os.homedir(), ".local", "bin", "claude.exe"),
   ].filter(Boolean);
-  const found = candidates.find((c) => fs.existsSync(c));
-  if (!found) fail(`claude.exe not found; set NIGHT_SHIFT_CLAUDE (tried ${candidates.join(", ")})`);
-  return found;
+  return { found: candidates.find((c) => fs.existsSync(c)), why: `claude.exe not found; set NIGHT_SHIFT_CLAUDE (tried ${candidates.join(", ")})` };
 }
+const findClaude = () => { const { found, why } = locateClaude(); return found || fail(why); };
 
 // --until's clock time, 0:00 to 23:59. Before 2026-11-19 "7" passed (its minutes NaN), and the chain had no end time.
 const UNTIL = /^([01]?\d|2[0-3]):([0-5]\d)$/;
@@ -282,10 +292,41 @@ function scheduleRun(run, extra = []) {
 
 // ---------------------------------------------------------------- start
 const HANDOVER_MS = 180_000;
+// The guard as the runner's settings layer runs it before a session's tool calls; doctor runs this very command.
+const guardHook = () => ({ type: "command", command: NODE, args: [GUARD], timeout: 15, onFailure: "block" });
+// What a copy of the skill needs beside this script (a copy of scripts/ alone lacks the texts the runner reads).
+const SKILL_FILES = ["SKILL.md", ...MODES.map((m) => `references/mode-${m}.md`), "references/goal.md", "references/attended.md",
+  "references/interactive.md", "scripts/guard.mjs", "scripts/night-report.mjs", "scripts/hide-windows.cjs"];
 // Where a listed MCP server came from, for start's line, and where one is looked for (mcp.mjs).
 const MCP_SOURCE = { local: () => "yours, this repository only", project: () => "this repository's .mcp.json", user: () => "yours",
   plugin: (name) => `plugin ${name.split(":")[1]}` };
 const MCP_PLACES = (repo) => `${claudeJson(os.homedir(), process.env)}, ${path.join(repo, ".mcp.json")}`;
+// start's checks of the config, which doctor makes too. pickMode: the mode and model from start's flags (none for
+// doctor) over the config; they may come from different layers (or a flag), so an error names where each came from.
+function pickMode(opt, cfg, from) {
+  const picked = resolveMode({ mode: opt.mode ?? cfg.mode, model: typeof opt.model === "string" ? opt.model : cfg.model });
+  if (!picked.error) return picked;
+  const src = [["mode", opt.mode !== undefined ? "--mode" : from.mode], ["model", typeof opt.model === "string" ? "--model" : from.model]]
+    .filter(([, s]) => s).map(([k, s]) => `${k} from ${s}`);
+  return { error: src.length ? `${picked.error} (${src.join(", ")})` : picked.error };
+}
+function mcpCheck(cfg, from, repo) {
+  // A listed MCP server is started from its own config (mcp.mjs): one no config holds would be missing all night.
+  const found = Array.isArray(cfg.mcp) ? listedServers(cfg.mcp, { repo }) : null;
+  if (found?.missing.length) {
+    return { found, error: `"mcp" in ${from.mcp} names ${found.missing.map((n) => JSON.stringify(n)).join(", ")}, which no MCP config holds (looked in ${MCP_PLACES(repo)} and the installed plugins); ` +
+      'a claude.ai connector or a server in an .mcpb bundle starts only with "mcp": "inherit"' };
+  }
+  // The configs go on the session's command line, which Windows cuts at 32,767 characters: a session that cannot start would be retried for hours.
+  const size = found ? mcpConfigArg(found.servers).length : 0;
+  if (size > MCP_ARG_MAX) return { found, error: `the configs of the MCP servers "mcp" lists take ${size} characters, more than a session's command line holds (${MCP_ARG_MAX}); list fewer, or set "mcp": "inherit"` };
+  return { found, error: null };
+}
+// The state folder of a start without --state today: stateDir, else one in the temp folder named after the repository.
+const defaultState = (repo, cfg) => path.resolve((cfg.stateDir || path.join(tempRoot(), `night-shift-${path.basename(repo)}-{date}`)).replace("{date}", today()));
+// A start that failed before run.json (no prompt, a dirty tree) leaves only what start itself made; that is no one else's folder.
+const foreignState = (state) => !fs.existsSync(path.join(state, "run.json")) && fs.existsSync(state) && fs.readdirSync(state).some((f) => !["prompts", "next-prompt.md"].includes(f));
+
 async function start(opt) {
   const repo = repoRoot(opt.repo || process.cwd());
   const ptr = readPointer(repo);
@@ -346,13 +387,8 @@ async function start(opt) {
   // A language is never guessed from "PT" or "pt-BR": a night in English that was asked for in another language is worse than a refusal.
   if (opt.lang !== undefined && !isLangCode(opt.lang)) fail(`--lang must be a language code in lowercase, such as en or pt-br (got ${opt.lang === true ? "no value" : opt.lang})`);
   if (opt.mode !== undefined && !MODES.includes(opt.mode)) fail(`--mode must be one of ${MODES.join(", ")} (got ${opt.mode === true ? "no value" : opt.mode})`);
-  const picked = resolveMode({ mode: opt.mode ?? cfg.mode, model: typeof opt.model === "string" ? opt.model : cfg.model });
-  if (picked.error) {
-    // mode and model may come from different layers (or a flag); the user has to know which one to change.
-    const src = [["mode", opt.mode !== undefined ? "--mode" : from.mode], ["model", typeof opt.model === "string" ? "--model" : from.model]]
-      .filter(([, s]) => s).map(([k, s]) => `${k} from ${s}`);
-    fail(src.length ? `${picked.error} (${src.join(", ")})` : picked.error);
-  }
+  const picked = pickMode(opt, cfg, from);
+  if (picked.error) fail(picked.error);
   // The user's language table (lang/index.mjs) must load now, for the same reason.
   const lang = opt.lang ?? cfg.lang ?? "en";
   const table = await loadLang(lang);
@@ -360,24 +396,14 @@ async function start(opt) {
   // A file the runner would have to leave out is refused here, while the user is at the keyboard.
   const badRules = ruleStatus(repo).filter((f) => f.error);
   if (badRules.length) fail(badRules.map((f) => `${f.file} ${f.error}`).join("; "));
-  // A listed MCP server is started from its own config (mcp.mjs): one no config holds would be missing all night.
-  const mcpFound = Array.isArray(cfg.mcp) ? listedServers(cfg.mcp, { repo }) : null;
-  if (mcpFound?.missing.length) {
-    fail(`"mcp" in ${from.mcp} names ${mcpFound.missing.map((n) => JSON.stringify(n)).join(", ")}, which no MCP config holds (looked in ${MCP_PLACES(repo)} and the installed plugins); ` +
-      'a claude.ai connector or a server in an .mcpb bundle starts only with "mcp": "inherit"');
-  }
-  // The configs go on the session's command line, which Windows cuts at 32,767 characters: a session that cannot start would be retried for hours.
-  const mcpSize = mcpFound ? mcpConfigArg(mcpFound.servers).length : 0;
-  if (mcpSize > MCP_ARG_MAX) fail(`the configs of the MCP servers "mcp" lists take ${mcpSize} characters, more than a session's command line holds (${MCP_ARG_MAX}); list fewer, or set "mcp": "inherit"`);
-  let state = path.resolve(typeof opt.state === "string" ? opt.state
-    : (cfg.stateDir || path.join(tempRoot(), `night-shift-${path.basename(repo)}-{date}`)).replace("{date}", today()));
+  const { found: mcpFound, error: mcpError } = mcpCheck(cfg, from, repo);
+  if (mcpError) fail(mcpError);
+  let state = typeof opt.state === "string" ? path.resolve(opt.state) : defaultState(repo, cfg);
   // The runner writes here and a session reads its instructions from here: not a folder of the user's own.
   const wide = stateDirProblem(state, { home: os.homedir(), repo, temp: tempRoot() });
   if (wide) fail(`${typeof opt.state === "string" ? "--state" : "stateDir"} ${state} ${wide}`);
   if (typeof opt.state === "string" && !fs.existsSync(path.join(state, "run.json"))) fail(`--state ${state} holds no earlier run`);
-  // A start that failed before run.json (no prompt, a dirty tree) leaves only what start itself made; that is no one else's folder.
-  const foreign = !fs.existsSync(path.join(state, "run.json")) && fs.existsSync(state) && fs.readdirSync(state).some((f) => !["prompts", "next-prompt.md"].includes(f));
-  if (foreign) fail(`${state} is not empty and holds no earlier run; pick another state folder`);
+  if (foreignState(state)) fail(`${state} is not empty and holds no earlier run; pick another state folder`);
   fs.mkdirSync(path.join(state, "prompts"), { recursive: true });
   // In long form, so the guard, which refuses 8.3 short names, accepts the handover's path whatever way --state or %TEMP% spelled it.
   state = fs.realpathSync.native(state);
@@ -551,7 +577,7 @@ async function runChain(opt) {
     fs.writeFileSync(settings, JSON.stringify({
       ...prev,
       hooks: { ...prev.hooks, PreToolUse: [{ matcher: "Bash|PowerShell|Write|Edit|MultiEdit|NotebookEdit|mcp__.*",
-        hooks: [{ type: "command", command: NODE, args: [GUARD], timeout: 15, onFailure: "block" }] }] },
+        hooks: [guardHook()] }] },
       // A session that set this to true would turn every hook, the guard's included, off.
       disableAllHooks: false,
       // K3 (2026-11-19): a message from another of the user's sessions is not the user's word, and nothing of the chain
@@ -1166,9 +1192,124 @@ function reload(opt) {
   console.log("the runner takes up its new code after the session in progress (after a limit wait, if one runs)");
 }
 
+// ---------------------------------------------------------------- doctor
+// C4: what a start needs, checked without starting anything, one line a check: ok, warn (a start goes on, but look),
+// skip (no repository for the project's checks) or FAIL (start would refuse, or the guard would not hold); exit 1 on a
+// FAIL. The config is read as start reads it with no flags, so a cap a project's file raises fails here with start's
+// message. No network and no model call: the CLI is only looked for, and the guard runs as the hook the runner writes,
+// on sample calls. The one thing written is a probe folder in the state folder, or in its nearest folder that exists
+// when it does not yet, removed at once (the guard's self-test makes and removes its own in the temp folder).
+async function doctor(opt) {
+  const rows = [];
+  const row = (verdict, what, text) => rows.push({ verdict, line: `  ${verdict.padEnd(4)}  ${what}: ${text}` });
+  const real = (p) => { try { return fs.realpathSync.native(p); } catch { return path.resolve(p); } };
+  const same = (a, b) => (process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b);
+
+  // The skill: a whole copy, at the path whose files the guard protects.
+  const installed = path.join(claudeHome(), "skills", "night-shift");
+  const missing = SKILL_FILES.filter((f) => !fs.existsSync(path.join(SKILL_DIR, f)));
+  if (missing.length) row("FAIL", "skill", `${SKILL_DIR} lacks ${missing.join(", ")}; copy the whole skill folder again`);
+  else if (!same(real(SKILL_DIR), real(installed))) row("warn", "skill", `${SKILL_DIR}; the guard protects the skill's files only at ${installed}, so a night session could change this copy's`);
+  else row("ok", "skill", SKILL_DIR);
+  const major = Number(process.versions.node.split(".")[0]);
+  row(major >= NODE_FLOOR ? "ok" : "FAIL", "node", `${process.version}${major >= NODE_FLOOR ? "" : `; night-shift needs Node ${NODE_FLOOR} or later`}`);
+  let git = "";
+  try { git = execFileSync("git", ["--version"], { encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }).trim(); } catch { /* not on PATH */ }
+  row(git ? "ok" : "FAIL", "git", git || "not found on PATH; the runner runs git in the repository");
+  const cli = locateClaude();
+  row(cli.found ? "ok" : "FAIL", "claude", cli.found || cli.why);
+
+  // The project's checks need a repository: --repo, else the one this folder is in.
+  let repo = null;
+  if (opt.repo === true) row("FAIL", "repo", "--repo wants a folder (got no value)");
+  else if (typeof opt.repo === "string") { repo = gitRoot(opt.repo, true); row(repo ? "ok" : "FAIL", "repo", repo || `not a git repository: ${path.resolve(opt.repo)}`); }
+  else { repo = gitRoot(process.cwd(), true); row(repo ? "ok" : "skip", "repo", repo || `${process.cwd()} is in no git repository; pass --repo <dir> for the project's checks`); }
+
+  // The config files as start reads them: the user's, and the project's over it.
+  const own = globalConfigFile();
+  const merged = repo ? mergedConfig(repo) : (({ config, errors }) =>
+    ({ config, from: Object.fromEntries(Object.keys(config).map((k) => [k, own])), errors: errors.map((e) => `${own}: ${e}`) }))(readGlobalConfig());
+  for (const file of [own, ...(repo ? [projectConfigFile(repo)] : [])]) {
+    const errors = merged.errors.filter((e) => e.startsWith(`${file}: `)).map((e) => e.slice(file.length + 2));
+    row(errors.length ? "FAIL" : "ok", "config", errors.length ? `${file}: ${errors.join("; ")}` : fs.existsSync(file) ? file : `${file} (none; the defaults apply)`);
+  }
+  const { config: cfg, from } = merged;
+  const picked = pickMode({}, cfg, from);
+  row(picked.error ? "FAIL" : "ok", "model", picked.error || modelLine({ ...picked, effort: cfg.effort || MAIN_EFFORT[picked.mode],
+    fableCeiling: ratioArg(cfg.fableCeiling, 0.6), fableSessions: countArg(cfg.fableSessions, 2) }).replace(/^\s*model:\s*/, ""));
+  const rules = fileStatus(Object.values(ruleFiles(repo || process.cwd())).slice(0, repo ? 2 : 1));
+  if (!rules.length) row("ok", "rules", "none");
+  for (const f of rules) row(f.error ? "FAIL" : "ok", "rules", f.error ? `${f.file} ${f.error}` : `${f.file} (${f.bytes} bytes)`);
+  const lang = cfg.lang ?? "en";
+  const table = await loadLang(lang);
+  row(table.error ? "FAIL" : "ok", "lang", table.error ? `lang ${lang} from ${from.lang}: ${table.error}` : lang === "en" ? "en (built in)" : `${lang} (${langFile(lang)})`);
+  let state = "";
+  if (repo) {
+    const mcp = mcpCheck(cfg, from, repo);
+    row(mcp.error ? "FAIL" : "ok", "mcp", mcp.error || (mcp.found ? mcp.found.found.map((f) => f.name).join(", ") || "an empty list: no server starts" : cfg.mcp ?? "none"));
+    // The state folder a start without --state would use today: valid, not someone else's, and writable.
+    state = defaultState(repo, cfg);
+    const wide = stateDirProblem(state, { home: os.homedir(), repo, temp: tempRoot() });
+    let foreign = null;
+    try { foreign = !wide && foreignState(state) && "is not empty and holds no earlier run; start would refuse it"; } catch (e) { foreign = `cannot be read (${e.code || e.message})`; }
+    if (wide) row("FAIL", "state", `${cfg.stateDir ? "stateDir " : ""}${state} ${wide}`);
+    else if (fs.existsSync(state) && !fs.statSync(state).isDirectory()) row("FAIL", "state", `${state} is a file`);
+    else if (foreign) row("FAIL", "state", `${state} ${foreign}`);
+    else {
+      let at = state;
+      while (!fs.existsSync(at) && path.dirname(at) !== at) at = path.dirname(at);
+      let error = null;
+      try { fs.rmSync(fs.mkdtempSync(path.join(at, ".night-shift-doctor-")), { recursive: true, force: true }); } catch (e) { error = e.code || e.message; }
+      row(error ? "FAIL" : "ok", "state", error ? `${state} cannot be written (${error})`
+        : `${state}${fs.existsSync(path.join(state, "run.json")) ? " (holds a run; start --state goes on in it)" : ""}; writable`);
+    }
+  }
+
+  // The guard: its own cases, then the hook command the runner writes, on calls as a session makes them.
+  const self = spawnSync(NODE, [GUARD, "--self-test"], { encoding: "utf8", windowsHide: true, timeout: 120_000 });
+  row(self.status === 0 ? "ok" : "FAIL", "guard", `self-test: ${String(self.stdout || "").trim().split("\n").at(-1) || (self.error ? self.error.message : `exit ${self.status}`)}`);
+  const hook = guardHook(), cmd = `${hook.command} ${hook.args.join(" ")}`;
+  const env = { ...withoutEffortEnv(process.env), NIGHT_SHIFT: "1", NIGHT_SHIFT_REPO: repo || "", NIGHT_SHIFT_STATE: state };
+  const ask = (tool_name, tool_input) => {
+    const r = spawnSync(hook.command, hook.args, { input: JSON.stringify({ hook_event_name: "PreToolUse", tool_name, tool_input, cwd: repo || process.cwd() }),
+      encoding: "utf8", windowsHide: true, timeout: hook.timeout * 1000, env });
+    let out = null;
+    try { out = JSON.parse(r.stdout || "null")?.hookSpecificOutput ?? null; } catch { return { broken: `answered no JSON: ${String(r.stdout).trim().slice(0, 80)}` }; }
+    if (out?.permissionDecision === "deny") return { deny: String(out.permissionDecisionReason || "") };
+    if (r.error || r.status !== 0) return { broken: r.error ? r.error.message : `exit ${r.status}: ${String(r.stderr || "").trim().split("\n")[0]}` };
+    return {};
+  };
+  const push = ask("Bash", { command: "git push --force origin main" }), plain = ask("Bash", { command: "git status" });
+  if (push.broken || plain.broken) row("FAIL", "hook", `${cmd} ${push.broken || plain.broken}`);
+  else if (!push.deny || /could not check/.test(push.deny)) row("FAIL", "hook", `${cmd} let "git push --force origin main" through${push.deny ? `: ${push.deny}` : ""}`);
+  else if (plain.deny) row("FAIL", "hook", `${cmd} refuses "git status" too: ${plain.deny}`);
+  else row("ok", "hook", `${cmd} refuses "git push --force origin main" and lets "git status" through`);
+  // A ~/.claude that is a link (a junction to a folder elsewhere): the guard must know what it protects there by the target's path too.
+  // Only the folder itself counts as a link: a home reached through a linked parent (macOS's /var) is no link of its own.
+  // The guard must refuse the write as Claude's settings: a target outside the writable roots is refused for that alone.
+  const home = claudeHome(), target = real(home), settings = path.join(target, "settings.json");
+  const dangling = !fs.existsSync(home) && (() => { try { return fs.lstatSync(home).isSymbolicLink(); } catch { return false; } })();
+  if (dangling) row("FAIL", "home", `${home} is a link to a folder that does not exist`);
+  else if (!fs.existsSync(home)) row("warn", "home", `${home} does not exist yet; Claude Code makes it when it first runs`);
+  else if (same(target, path.join(real(path.dirname(home)), path.basename(home)))) row("ok", "home", `${home} (not a link)`);
+  else {
+    const w = ask("Write", { file_path: settings });
+    const known = w.deny && /Claude settings/.test(w.deny);
+    row(known ? "ok" : "FAIL", "home", known ? `${home} is a link to ${target}; the guard refuses a write to ${settings} too`
+      : `${home} is a link to ${target}, and the guard ${w.broken ? `cannot be asked about ${settings}: ${w.broken}`
+        : w.deny ? `does not refuse ${settings} as Claude's settings, only because ${w.deny}` : `lets a write to ${settings} through`}`);
+  }
+
+  const failed = rows.filter((r) => r.verdict === "FAIL").length, warned = rows.filter((r) => r.verdict === "warn").length;
+  console.log([`night-shift ${VERSION} doctor`, ...rows.map((r) => r.line), failed
+    ? `${failed} check${failed === 1 ? "" : "s"} failed: fix each FAIL line before a start`
+    : `all checks pass${warned ? ` (${warned} warning${warned === 1 ? "" : "s"})` : ""}`].join("\n"));
+  process.exitCode = failed ? 1 : 0;
+}
+
 // Only as a command: night-chain.test.mjs imports cutOffSession.
 const opt = parseArgs(process.argv.slice(2));
-const commands = { start, run: runChain, status, wait: waitChain, stop, reload, "--version": () => console.log(`night-shift ${VERSION}`) };
+const commands = { start, run: runChain, status, wait: waitChain, stop, reload, doctor, "--version": () => console.log(`night-shift ${VERSION}`) };
 if (!isMain(import.meta)) { /* imported */ }
 else if (commands[opt.cmd]) await commands[opt.cmd](opt);
 else {

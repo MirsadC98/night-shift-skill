@@ -9,6 +9,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+// A temp folder by its long name: a CI runner's TEMP can be an 8.3 one (RUNNER~1), which the guard refuses in a write's path.
+import { tempRoot } from "./config.mjs";
 // A CLAUDE_CONFIG_DIR of the user's own would move every file these tests read or write (claudeHome in config.mjs).
 delete process.env.CLAUDE_CONFIG_DIR;
 
@@ -55,7 +57,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
 `;
 
 function setup() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "night-chain-test-"));
+  const root = fs.mkdtempSync(path.join(tempRoot(), "night-chain-test-"));
   const home = path.join(root, "home"), repoDir = path.join(root, "repo"), state = path.join(root, "state");
   for (const d of [home, repoDir, path.join(state, "prompts")]) fs.mkdirSync(d, { recursive: true });
   execFileSync("git", ["init", "-q"], { cwd: repoDir });
@@ -2234,6 +2236,88 @@ test("--version prints the runner's version, and start keeps it in run.json", as
   assert.equal(r.status, 0);
   assert.equal(r.stdout, `night-shift ${VERSION}\n`);
   assert.equal(startRun([]).run.version, VERSION);
+});
+
+// C4: doctor, run as a user runs it, in pointerCase's throwaway home: one line a check, its verdict first, exit 1 on a FAIL.
+const doctorLine = (out, verdict, what) => out.split("\n").filter((l) => new RegExp(`^  ${verdict}\\s+${what}: `).test(l));
+const literal = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+test("doctor checks what a start needs, one line a check, and exits 0 when nothing fails", () => {
+  const c = pointerCase();
+  const r = c.run("doctor");
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const lines = r.stdout.trim().split("\n");
+  assert.match(lines[0], /^night-shift \S+ doctor$/);
+  assert.match(lines.at(-1), /^all checks pass/);
+  for (const what of ["node", "git", "claude", "repo", "config", "model", "rules", "lang", "mcp", "state", "guard", "hook", "home"]) assert.equal(doctorLine(r.stdout, "ok", what).length >= 1, true, `${what}:\n${r.stdout}`);
+  assert.equal(lines.filter((l) => /^  FAIL/.test(l)).length, 0);
+  // This copy is not the one at <home>/.claude/skills/night-shift, whose files the guard protects.
+  assert.match(doctorLine(r.stdout, "warn", "skill")[0], /the guard protects the skill's files only at .*skills.night-shift/);
+  assert.match(doctorLine(r.stdout, "ok", "claude")[0], new RegExp(literal(process.execPath)));
+  assert.equal(doctorLine(r.stdout, "ok", "config").length, 2, "the global file and the project's");
+  assert.match(doctorLine(r.stdout, "ok", "config")[1], /night-shift\.json \(none; the defaults apply\)$/);
+  assert.match(doctorLine(r.stdout, "ok", "guard")[0], /self-test: all \d+ cases pass$/);
+  assert.match(doctorLine(r.stdout, "ok", "hook")[0], /refuses "git push --force origin main" and lets "git status" through$/);
+  assert.match(doctorLine(r.stdout, "ok", "home")[0], /\(not a link\)$/);
+  assert.match(doctorLine(r.stdout, "ok", "state")[0], /night-shift-repo-\d{8}; writable$/);
+  assert.deepEqual(fs.readdirSync(path.join(c.home, "..")).filter((f) => f.startsWith(".night-shift-doctor-")), [], "the probe folder is gone");
+});
+
+test("doctor names each check that fails, with start's own messages, and exits 1", () => {
+  const c = pointerCase();
+  fs.mkdirSync(path.join(c.repo, ".claude"), { recursive: true });
+  fs.writeFileSync(path.join(c.repo, ".claude", "night-shift.json"), JSON.stringify({ fableCeiling: 0.9, modle: 1, stateDir: path.parse(c.repo).root }));
+  const own = path.join(c.home, ".claude", "night-shift");
+  fs.writeFileSync(path.join(own, "rules.md"), "x".repeat(9000));
+  fs.writeFileSync(path.join(own, "config.json"), JSON.stringify({ lang: "xx" }));
+  const r = c.run("doctor");
+  assert.equal(r.status, 1, r.stdout);
+  const fails = r.stdout.split("\n").filter((l) => /^  FAIL/.test(l));
+  assert.equal(fails.length, 5, r.stdout);
+  assert.match(doctorLine(r.stdout, "FAIL", "config")[0], /night-shift\.json: unknown key "modle"; "fableCeiling" 0\.9 is above the 0\.6 that applies without this file \(the default\); .*pass --fable-ceiling 0\.9 to start instead/);
+  assert.match(doctorLine(r.stdout, "FAIL", "rules")[0], /rules\.md is 9000 bytes, over the 8192 limit$/);
+  assert.match(doctorLine(r.stdout, "FAIL", "lang")[0], /^  FAIL  lang: lang xx from .*config\.json: no language table at /);
+  assert.match(doctorLine(r.stdout, "FAIL", "state")[0], /stateDir .* is a drive root or sits directly below one$/);
+  // The guard refuses every command while the project's file is invalid, and the hook line says why.
+  assert.match(doctorLine(r.stdout, "FAIL", "hook")[0], /refuses "git status" too: .*night-shift\.json is invalid \(unknown key "modle"\)/);
+  assert.match(r.stdout.trim().split("\n").at(-1), /^5 checks failed/);
+  const bare = c.run("doctor", ["--repo", path.join(c.repo, "..")]);
+  assert.equal(bare.status, 1);
+  assert.match(doctorLine(bare.stdout, "FAIL", "repo")[0], /not a git repository: /);
+  assert.equal(doctorLine(bare.stdout, "ok", "state").length + doctorLine(bare.stdout, "FAIL", "state").length, 0, "no repository, no project checks");
+});
+
+test("doctor runs the guard as the hook the runner writes, and finds a broken one and an incomplete copy of the skill", () => {
+  const skill = path.dirname(path.dirname(CHAIN)), copy = fs.mkdtempSync(path.join(tempRoot(), "night-skill-copy-"));
+  for (const d of ["scripts", "references"]) fs.cpSync(path.join(skill, d), path.join(copy, d), { recursive: true });
+  // A guard that allows every call and fails its self-test.
+  fs.writeFileSync(path.join(copy, "scripts", "guard.mjs"), 'if (process.argv.includes("--self-test")) { console.log("1 of 1 failed"); process.exitCode = 1; }\n');
+  const c = pointerCase();
+  const r = c.run("doctor", [], {}, path.join(copy, "scripts", "night-chain.mjs"));
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(doctorLine(r.stdout, "FAIL", "skill")[0], /lacks SKILL\.md; copy the whole skill folder again$/);
+  assert.match(doctorLine(r.stdout, "FAIL", "guard")[0], /self-test: 1 of 1 failed$/);
+  assert.match(doctorLine(r.stdout, "FAIL", "hook")[0], new RegExp(`${literal(path.join(copy, "scripts", "guard.mjs"))} let "git push --force origin main" through$`));
+  // A guard that refuses every call for one reason: refusing a linked home's settings for that reason is no proof it knows the link.
+  fs.writeFileSync(path.join(copy, "scripts", "guard.mjs"), 'process.stdin.resume(); process.stdin.on("end", () => console.log(JSON.stringify({ hookSpecificOutput: { permissionDecision: "deny", permissionDecisionReason: "writes are limited to the repository" } })));\n');
+  const claude = path.join(c.home, ".claude"), target = path.join(c.home, "claude-elsewhere");
+  fs.renameSync(claude, target);
+  fs.symlinkSync(target, claude, "junction");
+  const linked = c.run("doctor", [], {}, path.join(copy, "scripts", "night-chain.mjs"));
+  assert.match(doctorLine(linked.stdout, "FAIL", "hook")[0], /refuses "git status" too: writes are limited/);
+  assert.match(doctorLine(linked.stdout, "FAIL", "home")[0], /is a link to .*claude-elsewhere, and the guard does not refuse .*settings\.json as Claude's settings, only because writes are limited/);
+  // A link whose folder is gone.
+  fs.rmSync(target, { recursive: true });
+  assert.match(doctorLine(c.run("doctor").stdout, "FAIL", "home")[0], /\.claude is a link to a folder that does not exist$/);
+});
+
+test("doctor recognises a linked ~/.claude: the guard refuses its settings by the link's target too", () => {
+  const c = pointerCase();
+  const claude = path.join(c.home, ".claude"), target = path.join(c.home, "claude-elsewhere");
+  fs.renameSync(claude, target);
+  fs.symlinkSync(target, claude, "junction");
+  const r = c.run("doctor");
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(doctorLine(r.stdout, "ok", "home")[0], /\.claude is a link to .*claude-elsewhere; the guard refuses a write to .*claude-elsewhere.settings\.json too$/);
 });
 
 test("start refuses an --until, --max-sessions or --session-hours of the wrong shape", () => {

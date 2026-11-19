@@ -161,9 +161,10 @@ test("interactive.md names the runner's end lines at the weekly ceiling, the dol
 // C4: the repository's package.json and CHANGELOG.md name the version the code knows (version.mjs), and README the Node
 // version package.json's engines holds; an installed copy of the skill has none of the three.
 test("package.json, CHANGELOG.md and the README agree with the code on the version and the Node it needs", { skip: !fs.existsSync(readmePath) && "no README beside this copy" }, async () => {
-  const { VERSION } = await import("./version.mjs");
+  const { VERSION, NODE_FLOOR } = await import("./version.mjs");
   const pkg = JSON.parse(fs.readFileSync(path.join(root, "..", "package.json"), "utf8"));
   assert.equal(pkg.version, VERSION);
+  assert.equal(pkg.engines?.node, `>=${NODE_FLOOR}`, "the floor doctor checks");
   assert.equal(pkg.type, "module");
   assert.equal(pkg.private, true, "npm publish is refused by npm itself");
   assert.deepEqual(Object.keys(pkg.dependencies || {}), [], "Node's built-ins only");
@@ -176,6 +177,12 @@ test("package.json, CHANGELOG.md and the README agree with the code on the versi
   const base = VERSION.replace(/-.*/, "");
   assert.ok(heading?.startsWith(`## ${base} `), `CHANGELOG.md's first version: ${heading}`);
   if (base !== VERSION) assert.match(heading, /unreleased/, "a pre-release version is the unreleased part");
+});
+
+// C4: doctor is named where a user or the starting chat looks for the runner's commands.
+test("the help, interactive.md and the README name doctor", { skip: !fs.existsSync(readmePath) && "no README beside this copy" }, () => {
+  const help = fs.readFileSync(path.join(root, "scripts", "night-chain.mjs"), "utf8");
+  for (const [name, t] of [["night-chain.mjs", help], ["interactive.md", interactive], ["README.md", fs.readFileSync(readmePath, "utf8")]]) assert.ok(t.includes("night-chain.mjs doctor"), `${name}: doctor`);
 });
 
 // C4: CI runs the suite and the guard's self-test on Windows, the gate, on the oldest Node package.json's engines allows
