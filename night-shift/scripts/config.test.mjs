@@ -7,6 +7,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { readProjectConfig, readGlobalConfig, mergedConfig, globalConfigFile, CONFIG_KEYS, stateDirProblem, tempRoot, norm, isMain, isLangCode, claudeHome } from "./config.mjs";
+import { platformFor } from "./platform.mjs";
 // A CLAUDE_CONFIG_DIR of the user's own would move every file these tests read (claudeHome).
 delete process.env.CLAUDE_CONFIG_DIR;
 
@@ -95,6 +96,19 @@ test("a state folder may not sit in AppData outside temp, in Windows, Program Fi
     assert.equal(stateDirProblem(good, where), null, good);
   // The default (what night-chain builds from the temp folder) stays valid.
   assert.equal(stateDirProblem(path.join(tempRoot(), "night-shift-My Game-20261116"), { home: os.homedir(), repo: "C:/work/repo" }), null);
+});
+
+test("off Windows a state folder may not be the root, /tmp, the home or the repository, nor sit in a system or login folder", () => {
+  const deps = { tmpdir: () => "/tmp", realpath: (t) => t, homedir: () => "/home/u" };
+  const linux = platformFor("linux", deps), mac = platformFor("darwin", deps);
+  const where = { home: "/home/u", repo: "/work/My Game", temp: "/tmp", env: {}, platform: linux };
+  for (const bad of ["/", "/tmp", "/var/tmp", "/home", "/home/u", "/work/My Game", "/work", "/work/My Game/.git/night", "/home/u/.claude/night",
+    "/etc/night", "/usr/local/night", "/home/u/.config/night", "/home/u/.ssh/night"])
+    assert.ok(stateDirProblem(bad, where), bad);
+  for (const good of ["/tmp/night-shift-My Game-20261116", "/var/tmp/night", "/home/u/.local/state/night", "/work/My Game/.night", "/work/my game/.git/night"])
+    assert.equal(stateDirProblem(good, where), null, good);
+  // macOS compares names case-blind: the repository's .git in another case is still it.
+  assert.match(String(stateDirProblem("/Work/my game/.GIT/night", { ...where, platform: mac })), /inside \.git/);
 });
 
 test("tempRoot is the temp folder in long form: a short-form TEMP resolves, one that cannot be resolved is kept", () => {
@@ -272,4 +286,11 @@ test("claudeHome is CLAUDE_CONFIG_DIR when it is set, else ~/.claude, and the gl
   } finally {
     if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = saved;
   }
+});
+
+test("off Windows CLAUDE_CONFIG_DIR is resolved by that system's rules, so a state folder inside it is refused", () => {
+  const linux = platformFor("linux", { tmpdir: () => "/tmp", realpath: () => { throw new Error("ENOENT"); }, homedir: () => "/home/u" });
+  const where = { home: "/home/u", repo: "/work/r", temp: "/tmp", env: { CLAUDE_CONFIG_DIR: "/home/u/cfg" }, platform: linux };
+  assert.equal(stateDirProblem("/home/u/cfg/night", where), "is inside the Claude folder (CLAUDE_CONFIG_DIR)");
+  assert.equal(stateDirProblem("/home/u/night", where), null);
 });

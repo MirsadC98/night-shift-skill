@@ -6,7 +6,7 @@
 //   mergedConfig(repo, home, flags) -> { config, from, errors }  the global file overlaid key by key with the project's (from: key -> file);
 //                                                     a project's file may lower the four allowance caps, never raise them,
 //                                                     unless flags (start's, by name) sets that cap itself
-//   stateDirProblem(dir, { home, repo, temp, env }) null, or why dir may not be the state folder
+//   stateDirProblem(dir, { home, repo, temp, env, platform })  null, or why dir may not be the state folder
 //   claudeHome(home, env) -> CLAUDE_CONFIG_DIR's folder when set, else <home>/.claude
 //   isMain(import.meta)                              whether node was started with this script (night-chain, night-report, guard)
 
@@ -14,7 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
-import { platform } from "./platform.mjs";
+import { platform as live } from "./platform.mjs";
 
 // Whether node was started with the module whose import.meta this is, or imported it. import.meta.main
 // where Node has it (22.18, 24.2 on); else the real paths of process.argv[1] and the module compared,
@@ -32,8 +32,8 @@ export function isMain(meta, argv1 = process.argv[1], { unknown = false } = {}) 
 
 // The temp folder in long form, and a path the way the system resolves it (platform.mjs, which says how): the
 // runner, the guard and the tests take both from here.
-export const tempRoot = platform.tempRoot;
-export const norm = platform.norm;
+export const tempRoot = live.tempRoot;
+export const norm = live.norm;
 const under = (p, root) => root && (p === root || p.startsWith(root + "/"));
 
 const isStr = (v) => typeof v === "string";
@@ -149,13 +149,15 @@ export function mergedConfig(repo, home = os.homedir(), flags = {}) {
 
 // The runner writes into the state folder, trusts inbox.md and next-prompt.md there as
 // instructions, and the guard lets a night session write into it: so never a folder that holds
-// anything else the user owns.
-export function stateDirProblem(dir, { home = os.homedir(), repo = "", temp = tempRoot(), env = process.env } = {}) {
+// anything else the user owns. platform: the system whose paths these are (platform.mjs), a test's or the guard's.
+export function stateDirProblem(dir, { home = os.homedir(), repo = "", temp = tempRoot(), env = process.env, platform = live } = {}) {
+  const { norm } = platform;
   const d = norm(dir);
   if (!d) return "is empty";
   if (d.replace(/^\/\/|^[a-z]:/, "").split("/").filter(Boolean).length < 2) return "is a drive root or sits directly below one";
-  // CLAUDE_CONFIG_DIR's folder, wherever it is (claudeHome); null when it is ~/.claude, which the lines below cover.
-  const claude = home && env.CLAUDE_CONFIG_DIR ? claudeHome(home, env) : null;
+  // CLAUDE_CONFIG_DIR's folder, wherever it is (claudeHome, resolved by the system's own rules); null when it is
+  // ~/.claude, which the lines below cover.
+  const claude = home && env.CLAUDE_CONFIG_DIR ? platform.path.resolve(env.CLAUDE_CONFIG_DIR) : null;
   for (const [name, p] of [["the home folder", home], ["the repository", repo], ["the temp folder", temp], ...platform.sharedTemps, ["the Claude folder", claude]]) {
     if (p && under(norm(p), d)) return `is, or holds, ${name}`;
   }

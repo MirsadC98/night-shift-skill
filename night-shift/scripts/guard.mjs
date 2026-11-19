@@ -10,32 +10,39 @@
 // Self-test: node guard.mjs --self-test; tests: node --test guard.test.mjs
 
 import { spawnSync } from "node:child_process";
-import { readFileSync, realpathSync, mkdtempSync, mkdirSync, symlinkSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { norm, readProjectConfig, stateDirProblem, tempRoot, isMain, mcpToolName } from "./config.mjs";
-import { platform } from "./platform.mjs";
+import { readFileSync, mkdtempSync, mkdirSync, symlinkSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { readProjectConfig, stateDirProblem, tempRoot, isMain, mcpToolName } from "./config.mjs";
+import { platform as live } from "./platform.mjs";
+
+// The system whose path rules a call is judged by (platform.mjs): the live one, or the one a test hands decide() in
+// opts.platform. decide() sets it for the call and puts it back after; it runs synchronously, so no other call sees it.
+let P = live;
+const norm = (p) => P.norm(p);
+const isAbsolute = (t) => P.isAbsolute(t);
 
 const under = (p, root) => root && (p === root || p.startsWith(root + "/"));
 
 // What the runner keeps in the state folder: the settings file that loads this guard, the file
 // that names the program each session starts, its own logs and marks, the caps' count (limits.json),
-// what the user's waiter has reported (wait.json) and the user's stop (STOP-REQUEST; norm lowercases the path).
-const RUNNER_FILES = /^(night-settings\.json|run\.json|launch\.cmd|resume\.json|chain\.log|reload-request|watch\.pid|notified\.json|fable\.json|limits\.json|wait\.json|stop-request|session-\d+\.(jsonl|err))$/;
+// what the user's waiter has reported (wait.json) and the user's stop (STOP-REQUEST). In any case: Windows and macOS
+// fold the path, and on Linux the runner's STOP-REQUEST and RELOAD-REQUEST keep their capitals.
+const RUNNER_FILES = /^(night-settings\.json|run\.json|launch\.cmd|resume\.json|chain\.log|reload-request|watch\.pid|notified\.json|fable\.json|limits\.json|wait\.json|stop-request|session-\d+\.(jsonl|err))$/i;
 
 // ~/.claude may be a link (a junction to a folder elsewhere): a shell write can then name the files the
 // guard protects there by the link's target, a spelling norm() cannot know (on 2026-11-18 `echo x >
 // <target>/settings.json` passed). Each spelling of the folder, the home one first.
 // The home as the file system resolves it (platform.mjs: on Windows an MSYS drive is a drive path), not norm()'s.
-const { fsHome } = platform;
+const fsHome = (h) => P.fsHome(h);
 // A folder named by CLAUDE_CONFIG_DIR is where Claude Code keeps them instead: one more spelling (with its own
 // link's target), so it is protected as ~/.claude is, and ~/.claude stays protected too.
 function claudeSpellings(home, configDir) {
   const c = `${norm(home)}/.claude`;
   const out = [c];
   const add = (p) => { if (p && !out.includes(p)) out.push(p); };
-  const real = (dir) => { try { add(norm(realpathSync.native(dir))); } catch { /* no such folder */ } };
-  real(join(fsHome(home), ".claude"));
-  if (configDir) { add(norm(resolve(configDir))); real(resolve(configDir)); }
+  const real = (dir) => { try { add(norm(P.realpath(dir))); } catch { /* no such folder */ } };
+  real(P.path.join(fsHome(home), ".claude"));
+  if (configDir) { add(norm(P.path.resolve(configDir))); real(P.path.resolve(configDir)); }
   return out;
 }
 // p, and p under each other spelling of ~/.claude when it lies under one of them.
@@ -51,10 +58,10 @@ const spellings = (p, r) => {
 // that wide is no writable root (roots below).
 function namedFolder(value, wide) {
   if (!value) return [];
-  // A drive-relative D:x is relative too (to that drive's folder), as resolve() reads it.
+  // A drive-relative D:x is relative too (to that drive's folder), as resolve() reads it; off Windows only / starts a path.
   const raw = String(value).trim().replace(/^["']|["']$/g, ""), given = norm(raw);
-  const out = [/^([a-z]:(\/|$)|\/)/.test(given) ? given : norm(resolve(raw))];
-  try { const real = norm(realpathSync.native(resolve(fsHome(raw)))); if (!out.includes(real)) out.push(real); } catch { /* no such folder */ }
+  const out = [(P.name === "win32" ? /^([a-z]:(\/|$)|\/)/.test(given) : given.startsWith("/")) ? given : norm(P.path.resolve(raw))];
+  try { const real = norm(P.realpath(P.path.resolve(fsHome(raw)))); if (!out.includes(real)) out.push(real); } catch { /* no such folder */ }
   const drive = (d) => !d.replace(/^\/\/[^/]*(\/[^/]*)?|^[a-z]:/, "").split("/").some(Boolean);
   return out.some((d) => drive(d) || wide.some((w) => under(w, d))) ? [] : out;
 }
@@ -63,12 +70,12 @@ function namedFolder(value, wide) {
 const PLUGIN_PARTS = ["cache", "marketplaces", "installed_plugins.json", "known_marketplaces.json"];
 
 function roots(env) {
-  const home = norm(platform.home(env));
+  const home = norm(P.home(env));
   const repo = norm(env.NIGHT_SHIFT_REPO || "");
   // A state folder that is a drive, the home folder or the like (a typo in stateDir) would make
   // all of it writable: it adds nothing, and the runner refuses to start with one.
-  const state = env.NIGHT_SHIFT_STATE && !stateDirProblem(env.NIGHT_SHIFT_STATE, { home, repo, temp: tempRoot(), env }) ? norm(env.NIGHT_SHIFT_STATE) : "";
-  const wide = [home, ...platform.tempRoots(home), repo, state].filter(Boolean);
+  const state = env.NIGHT_SHIFT_STATE && !stateDirProblem(env.NIGHT_SHIFT_STATE, { home, repo, temp: P.tempRoot(), env, platform: P }) ? norm(env.NIGHT_SHIFT_STATE) : "";
+  const wide = [home, ...P.tempRoots(home), repo, state].filter(Boolean);
   // The copy of the skill the run started from (the runner puts NIGHT_SHIFT_SKILL into every session's environment),
   // wherever it is, unless the repository holds it: a chain may develop the skill in its own clone.
   const skill = namedFolder(env.NIGHT_SHIFT_SKILL, wide);
@@ -76,9 +83,9 @@ function roots(env) {
     repo,
     state,
     // Besides these, the system's temp folders (platform.mjs).
-    writable: [repo, state, ...platform.tempRoots(home)].filter(Boolean),
+    writable: [repo, state, ...P.tempRoots(home)].filter(Boolean),
     home,
-    claude: claudeSpellings(platform.home(env), env.CLAUDE_CONFIG_DIR),
+    claude: claudeSpellings(P.home(env), env.CLAUDE_CONFIG_DIR),
     skill: repo && skill.some((d) => under(d, repo)) ? [] : skill,
     // Claude Code's plugins folders: ~/.claude's under each of its spellings (spellings() maps them to the home's one),
     // and the one CLAUDE_CODE_PLUGIN_CACHE_DIR names, which adds to it.
@@ -88,7 +95,7 @@ function roots(env) {
 
 // A path that names a file the rules below never named, by a stream or a short name (platform.mjs), is refused
 // outright rather than resolved. p is already normalized.
-export const oddPath = platform.oddPath;
+export const oddPath = (p) => P.oddPath(p);
 // PowerShell's own drives (Env:FOO, Alias:ll) are no files: the colon after their name is not a stream.
 const PS_DRIVE = /^(env|alias|variable|function):(?!:)/i;
 const oddReason = (p, shown) => {
@@ -106,7 +113,7 @@ function protectedSpelling(p, r) {
   if (under(p, `${r.home}/.claude/skills/night-shift`) || r.skill.some((s) => under(p, s))) return "the night-shift skill itself";
   if (r.plugins.some((root) => PLUGIN_PARTS.some((f) => under(p, `${root}/${f}`)))) return "Claude Code's installed plugins";
   if (/^.*\/\.claude\/settings(\.local)?\.json$/.test(p)) return "Claude settings";
-  if (p === `${r.home}/.claude/claude.md`) return "the user's global CLAUDE.md";
+  if (p === norm(`${r.home}/.claude/CLAUDE.md`)) return "the user's global CLAUDE.md";
   // Config, rules and run state the user steers the night with. Before the repo roots: with the repo at ~/.claude they sit inside a writable root.
   if (under(p, `${r.home}/.claude/night-shift`)) return "the user's night-shift settings and rules";
   if (r.repo && (p === `${r.repo}/.claude/night-shift.json` || p === `${r.repo}/.claude/night-shift-rules.md`)) return "the project's night-shift rules";
@@ -126,7 +133,7 @@ function checkWrite(file, env) {
   const mem = `${r.home}/.claude/projects/`;
   if (p.startsWith(mem) && /^[^/]+\/memory(\/|$)/.test(p.slice(mem.length))) return null;
   if (!r.writable.some((root) => under(p, root)))
-    return `writes are limited to the repository, C:\\temp and the temp folder (got ${file})`;
+    return `writes are limited to the repository, ${P.name === "win32" ? "C:\\temp" : "/tmp"} and the temp folder (got ${file})`;
   return null;
 }
 
@@ -287,7 +294,7 @@ function mktempFolder(args) {
   const t = flags.some((a) => /^-\w*t/.test(a));
   if (names.length === 1 && !t && isAbsolute(names[0]) && /^[\w.:\\/-]+XXX$/.test(names[0])) return norm(names[0]);
   if (!names.every((a) => /^[\w.]+$/.test(a))) return null;
-  return names.length && !t ? null : `${norm(tempRoot())}/mktemp.XXXX`;
+  return names.length && !t ? null : `${norm(P.tempRoot())}/mktemp.XXXX`;
 }
 const mktempValue = (v) => {
   const m = /^(?:\$\(|`)\s*mktemp((?:\s+[^\s()`]+)*)\s*(?:\)|`)$/.exec(v);
@@ -320,8 +327,6 @@ function recordAssignments(words, vars, env, tmp) {
   });
 }
 
-const isAbsolute = (t) => /^[a-z]:[\\/]/i.test(t) || /^[\\/]/.test(t);
-
 // A wildcard target is not known until the shell expands it, so it is compared segment by segment
 // with what a night session must not lose: if it can be that folder or file, inside it, or a folder
 // above it (`C:/temp/x-night/run.*`, `.cl*/settings.json`, `<repo>/*`), it is refused.
@@ -347,7 +352,7 @@ function protectedTargets(r) {
     [`${r.home}/.claude/night-shift`, "the user's night-shift settings and rules"],
     [`${r.home}/.claude/settings.json`, "Claude settings"],
     [`${r.home}/.claude/settings.local.json`, "Claude settings"],
-    [`${r.home}/.claude/claude.md`, "the user's global CLAUDE.md"],
+    [norm(`${r.home}/.claude/CLAUDE.md`), "the user's global CLAUDE.md"],
   ].filter(([c]) => c).flatMap(([c, why]) => spellings(c, r).map((s) => [s, why]));
 }
 
@@ -869,7 +874,9 @@ function pathNarrows(pat, start, extra = []) {
 const NAME_TEST = /^-(i?name|i?lname|i?path|i?wholename|i?regex)$/;
 const FIND_END = /^(\\?;|\\|\+)$/;
 function findNarrowed(words, q = "", extra = []) {
-  const w = words.map(unmark).map((x) => x.toLowerCase()), start = q.split("/");
+  // In lower case on every system, the start path too: INSIDE holds git's names in lower case (HEAD is head), and a
+  // pattern's folder that is one of the start path's own must be known as such whatever the case.
+  const w = words.map(unmark).map((x) => x.toLowerCase()), start = q.toLowerCase().split("/");
   let k = 0, acted = false, pruned = false, any = false;
   const narrows = (test, pat, not) => {
     const path = /path|whole/.test(test), regex = /regex/.test(test);
@@ -1312,7 +1319,14 @@ function projectRules(env) {
   return { rules: (config.deny || []).map((d) => [new RegExp(d.pattern, d.flags ?? "i"), d.reason ?? `refused by a project rule (${d.pattern})`]) };
 }
 
+// opts.platform: the system whose path rules judge the call (platform.mjs), the live one when none is given.
 export function decide(input, env = process.env, opts = {}) {
+  const outer = P;
+  P = opts.platform || live;
+  try { return decideOn(input, env, opts); } finally { P = outer; }
+}
+
+function decideOn(input, env, opts) {
   const tool = input.tool_name;
   // Empty or unrecognisable input is not a call the guard may wave through.
   if (typeof tool !== "string" || !tool) return "the hook input names no tool, so the guard cannot check the call";
@@ -1321,13 +1335,13 @@ export function decide(input, env = process.env, opts = {}) {
     const file = ti.file_path || ti.notebook_path;
     const { rules, error } = projectRules(env);
     if (error) return `.claude/night-shift.json is invalid (${error}); the user must fix it`;
-    // The project's rules read the path with forward slashes, as given and as Windows resolves it (norm, in
-    // lower case), each from the repository down too. An MSYS /c/ is read as c:/ to line it up with the repository.
+    // The project's rules read the path with forward slashes, as given and as the system resolves it (norm, in
+    // lower case where it folds), each from the repository down too. An MSYS /c/ is read as c:/ to line it up with the repository.
     const given = String(file ?? "").replace(/\\/g, "/"), p = norm(given), repo = roots(env).repo;
     const lined = given.replace(/^\/([a-z])(?=\/)/i, "$1:"), forms = [given, p];
     if (repo && p.startsWith(repo + "/")) {
       forms.push(p.slice(repo.length + 1));
-      if (lined.toLowerCase().startsWith(repo + "/")) forms.push(lined.slice(repo.length + 1));
+      if (P.fold(lined).startsWith(repo + "/")) forms.push(lined.slice(repo.length + 1));
     }
     // lastIndex goes back to 0 for each form: a rule with the g or y flag keeps its place between tests.
     for (const [re, reason] of rules) if (forms.some((f) => { re.lastIndex = 0; return re.test(f); })) return reason;

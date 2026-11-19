@@ -2,17 +2,19 @@
 // session write, and how the runner starts itself detached, finds the CLI, watches, waits for and stops processes
 // and keeps the machine awake. Imports only node, since the guard loads it on every call. platformFor(name, deps)
 // builds the object for a system, and `platform` is this system's.
-// Every method is Windows' code under every name, apart from where that code itself asked for Windows (norm's Git Bash
-// /tmp, fsHome); macOS and Linux come behind it next. No environment variable picks the system: a project's settings
-// could hand one to the guard's hook and change its path rules. deps stand in for Node's calls in a unit test
-// (platform.test.mjs), which then sees what a method would do without doing it. The methods are closures, so a
-// caller may take one out (const { norm } = platform).
+// Under win32 every method is the Windows code the tool always had; under darwin and linux (and any other name) the
+// POSIX one. No environment variable picks the system: a project's settings could hand one to the guard's hook and
+// change its path rules. deps stand in for Node's calls in a unit test (platform.test.mjs), which then sees what a
+// method would do without doing it, and builds a Linux object on Windows. The methods are closures, so a caller may
+// take one out (const { norm } = platform).
+//   path, realpath                     Node's path functions for this system's paths; the file system's real path of one
 //   tempRoot()                         the temp folder in long form
-//   norm(p)                            a path the way Windows resolves it, for comparing two spellings of one file
-//   foldsCase, samePath(a, b)          two paths, resolved, compared as the system compares them
+//   norm(p)                            a path the way the system resolves it, for comparing two spellings of one file
+//   fold(p), samePath(a, b)            a path in the case the file system compares it in; two paths, resolved, compared so
+//   isAbsolute(word)                   whether a word a session typed names a path from the root
 //   fsHome(home), home(env)            the home as the file system resolves it; the home the guard's env names
 //   oddPath(p)                         why a normalized path names a file the guard cannot tell, else null
-//   tempRoots(home), sharedTemps       the guard's writable temp folders; the shared ones a state folder may not hold
+//   tempRoots(home), sharedTemps       the guard's writable temp folders; the shared ones a state folder may not be
 //   systemDirProblem(dir, { home, temp })  null, or why a normalized dir is where the system runs things from
 //   alive(pid, { denied })             whether a process lives; denied: what a process it may not signal counts as
 //   commandLine(pid)                   a process's command line: "" when it is gone, null when it could not be asked
@@ -36,6 +38,8 @@ const under = (p, root) => root && (p === root || p.startsWith(root + "/"));
 export const psQuote = (s) => `'${String(s).replace(/['‘’‚‛]/g, "$&$&")}'`;
 
 export function platformFor(name = process.platform, deps = {}) {
+  const win = name === "win32";
+  const pp = win ? path.win32 : path.posix;
   const tmpdir = deps.tmpdir || os.tmpdir;
   const homedir = deps.homedir || os.homedir;
   const realpath = deps.realpath || fs.realpathSync.native;
@@ -53,17 +57,26 @@ export function platformFor(name = process.platform, deps = {}) {
     try { return realpath(t); } catch { return t; }
   };
 
+  // A path in the case its file system compares it in: lower case on Windows; on macOS lower case and in Unicode's
+  // composed form (APFS and HFS+ ignore case and the form unless formatted otherwise); on Linux as it is, apart from a
+  // Windows drive that WSL mounts at /mnt/<letter>, which ignores case as Windows does.
+  const fold = (p) => {
+    const s = String(p);
+    if (name === "darwin") return s.normalize("NFC").toLowerCase();
+    return win || /^\/mnt\/[a-z](\/|$)/.test(s) ? s.toLowerCase() : s;
+  };
+
   // A path the way Windows resolves it, so that two spellings of one file compare equal: one kind
   // of slash, lower case, an MSYS drive (/c/…) and \\?\C:\… as a drive path, Git Bash's /tmp as the
   // temp folder, . and .. resolved, and a segment's trailing dots and spaces dropped (Windows opens
   // "settings.json." as settings.json). The 2026-11-15 review wrote the guard itself through
   // C:/temp/../Users/….
-  const norm = (p) => {
+  const winNorm = (p) => {
     let s = String(p || "").trim().replace(/^["']|["']$/g, "").replace(/\\/g, "/").toLowerCase();
     s = s.replace(/^\/\/[?.]\/(?=[a-z]:)/, "");
     const msys = /^\/([a-z])\//.exec(s);
     if (msys) s = `${msys[1]}:/${s.slice(3)}`;
-    else if (name === "win32" && /^\/tmp(\/|$)/.test(s)) s = `${tempRoot().replace(/\\/g, "/").toLowerCase()}${s.slice(4)}`;
+    else if (/^\/tmp(\/|$)/.test(s)) s = `${tempRoot().replace(/\\/g, "/").toLowerCase()}${s.slice(4)}`;
     const lead = /^\/{0,2}/.exec(s)[0].slice(0, 2);
     const out = [];
     for (const raw of s.slice(lead.length).split("/")) {
@@ -75,39 +88,81 @@ export function platformFor(name = process.platform, deps = {}) {
     }
     return lead + out.join("/");
   };
-
-  // Case folded under every name for now, as norm folds; the second C5 session sets it per system, with norm.
-  const foldsCase = true;
-  const samePath = (a, b) => {
-    const [x, y] = [path.resolve(a), path.resolve(b)];
-    return foldsCase ? x.toLowerCase() === y.toLowerCase() : x === y;
+  // A path the way macOS and Linux resolve it: . and .. resolved, and every run of slashes one slash (both open //home
+  // as /home). A backslash, a colon and a trailing dot or space are ordinary characters of a name there, so they stay:
+  // read as a slash, /work/repo\x, a file beside the repository, would count as inside it. Then fold, and on macOS the
+  // short form of what the system itself links: /private/tmp, /private/var and /private/etc are /tmp, /var and /etc
+  // (Node's temp folder resolves into /private/var while a session's TMPDIR says /var), and /System/Volumes/Data/x is /x.
+  const posixNorm = (p) => {
+    const s = String(p || "").replace(/^["']|["']$/g, "");
+    const lead = s.startsWith("/") ? "/" : "";
+    const out = [];
+    for (const seg of s.split("/")) {
+      if (!seg || seg === ".") continue;
+      if (seg !== "..") out.push(seg);
+      else if (out.length && out.at(-1) !== "..") out.pop();
+      else if (!lead) out.push(seg);
+    }
+    const f = fold(lead + out.join("/"));
+    // The data volume first: /System/Volumes/Data/private/tmp is /private/tmp, which is /tmp.
+    return name === "darwin" ? f.replace(/^\/system\/volumes\/data(?=\/)/, "").replace(/^\/private(?=\/(tmp|var|etc)(\/|$))/, "") : f;
   };
+  const norm = win ? winNorm : posixNorm;
+
+  const samePath = (a, b) => fold(pp.resolve(a)) === fold(pp.resolve(b));
+  // Whether a word a session typed names a path from the root: on Windows a drive (C:\, C:/) or a slash of either kind;
+  // elsewhere only /, since C:/x and \x are names in the folder the command stands in.
+  const isAbsolute = (t) => (win ? /^[a-z]:[\\/]/i.test(t) || /^[\\/]/.test(t) : String(t).startsWith("/"));
 
   // The home as the file system resolves it: on Windows an MSYS drive (Git Bash's HOME, /c/Users/u) is a drive path.
   // Not norm(): it lowercases, and a case-sensitive file system resolves a path only as typed.
-  const fsHome = (home) => (name === "win32" ? String(home).replace(/^\/([a-zA-Z])(?=\/)/, "$1:") : String(home));
-  // The home the guard protects ~/.claude under: the hook's environment first, then Node's answer.
-  const home = (env = process.env) => env.USERPROFILE || env.HOME || homedir();
+  const fsHome = (home) => (win ? String(home).replace(/^\/([a-zA-Z])(?=\/)/, "$1:") : String(home));
+  // The home the guard protects ~/.claude under: the hook's environment first, then Node's answer. USERPROFILE names
+  // no home off Windows.
+  const home = (env = process.env) => (win ? env.USERPROFILE || env.HOME : env.HOME) || homedir();
 
   // Windows opens a path through a stream name (a.ts:x, .git::$INDEX_ALLOCATION) or an 8.3 short
   // name (SETTIN~1.JSO) as a file the rules below never named, so these are refused outright
-  // rather than resolved. p is already normalized.
+  // rather than resolved; macOS opens a file's resource fork as f/..namedfork/rsrc, and Linux any file
+  // through /proc (/proc/self/cwd/.git is the current folder's .git), so those are refused too. A colon and ~1
+  // are ordinary characters of a name off Windows. p is already normalized.
   const oddPath = (p) => {
+    if (name === "darwin" && p.split("/").includes("..namedfork")) return "a resource fork (..namedfork)";
+    if (name === "linux" && /^\/proc(\/|$)/.test(p)) return "a /proc path (a link to another file)";
+    // A Windows drive that WSL mounts at /mnt/<letter> resolves short names as Windows does (its colons are not streams).
+    const short = p.split("/").some((s) => /~\d/.test(s));
+    if (!win) return name === "linux" && /^\/mnt\/[a-z]\//.test(p) && short ? "a short (8.3) name" : null;
     if (p.replace(/^[a-z]:(?=\/|$)/, "").includes(":")) return "an NTFS stream name";
-    if (p.split("/").some((s) => /~\d/.test(s))) return "a short (8.3) name";
+    if (short) return "a short (8.3) name";
     return null;
   };
 
   // The temp folders a night session may write besides the repository and the state folder; home is normalized.
-  const tempRoots = (home) => ["c:/temp", norm(tempRoot()), `${home}/appdata/local/temp`];
+  // Off Windows: /tmp and the temp folder as given and as resolved.
+  const tempRoots = (home) => (win ? ["c:/temp", norm(tempRoot()), `${home}/appdata/local/temp`] : [...new Set(["/tmp", norm(tmpdir()), norm(tempRoot())])]);
   // Temp folders other programs share, as [name, normalized path]: a state folder may be inside one, never one itself.
-  const sharedTemps = [["C:/temp", "c:/temp"]];
-  // The guard lets a night session write into the state folder, so not where Windows runs things from:
-  // the Startup folder lives in AppData\Roaming, and the system's own folders hold programs. dir is normalized.
+  const sharedTemps = win ? [["C:/temp", "c:/temp"]]
+    : [["/tmp", "/tmp"], ["/var/tmp", "/var/tmp"]];
+  // The guard lets a night session write into the state folder, so not where the system runs things from. On Windows the
+  // Startup folder lives in AppData\Roaming, and the system's own folders hold programs. On macOS and Linux, outside the
+  // temp folders: the system's own folders, and the home's folders a login runs things from (autostart and systemd user
+  // units in ~/.config and ~/.local/share, ~/bin and ~/.local/bin on the PATH, ~/.ssh, LaunchAgents in ~/Library). dir is normalized.
+  // In the case norm gives: macOS's /System, /Library and /Applications are folded by then, Linux has none of them.
+  const POSIX_SYSTEM = /^\/(etc|usr|bin|sbin|lib[^/]*|boot|dev|proc|sys|run|var|opt|private|system|library|applications)(\/|$)/;
+  const LOGIN_DIRS = [".config", ".local/bin", ".local/share", "bin", ".ssh", "Library"];
   const systemDirProblem = (dir, { home = "", temp = tempRoot() } = {}) => {
-    if (home && under(dir, `${norm(home)}/appdata`) && !under(dir, norm(temp))) return "is inside AppData, outside the temp folder";
-    if (/^c:\/(windows|program files[^/]*|programdata)(\/|$)/.test(dir)) return "is inside a system or program folder";
-    return null;
+    if (win) {
+      if (home && under(dir, `${norm(home)}/appdata`) && !under(dir, norm(temp))) return "is inside AppData, outside the temp folder";
+      if (/^c:\/(windows|program files[^/]*|programdata)(\/|$)/.test(dir)) return "is inside a system or program folder";
+      return null;
+    }
+    const h = home ? norm(home) : "";
+    if ([norm(temp), ...tempRoots(h), ...sharedTemps.map(([, t]) => t)].some((t) => under(dir, t))) return null;
+    // The home first: a service account's home may sit in /var or /opt (/var/lib/jenkins), and is the user's own.
+    const login = h && LOGIN_DIRS.find((d) => under(dir, norm(`${h}/${d}`)));
+    if (login) return `is inside ~/${login}, where the login reads programs and settings from`;
+    if (h && under(dir, h)) return null;
+    return POSIX_SYSTEM.test(dir) ? "is inside a system or program folder" : null;
   };
 
   // Signal 0 only asks. No pid is no process (on Windows, process.kill(0, 0) asks about this process).
@@ -177,7 +232,7 @@ export function platformFor(name = process.platform, deps = {}) {
     return task;
   };
 
-  return { name, tempRoot, norm, foldsCase, samePath, fsHome, home, oddPath, tempRoots, sharedTemps, systemDirProblem, alive,
+  return { name, path: pp, realpath, tempRoot, norm, fold, samePath, isAbsolute, fsHome, home, oddPath, tempRoots, sharedTemps, systemDirProblem, alive,
     commandLine, killTree, keepAwake, waitExit, cliName, cliCandidates, psQuote, schedule };
 }
 

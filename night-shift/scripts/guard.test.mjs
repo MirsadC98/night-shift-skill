@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { decide } from "./guard.mjs";
 import { tempRoot } from "./config.mjs";
+import { platformFor } from "./platform.mjs";
 
 const env = { NIGHT_SHIFT_REPO: "C:/work/repo", NIGHT_SHIFT_STATE: "C:/temp/x-night", USERPROFILE: "C:\\Users\\u" };
 const bash = (command, e = env) => decide({ tool_name: "Bash", tool_input: { command } }, e);
@@ -1245,4 +1246,101 @@ test("a linked home's and a linked skill folder's targets are protected too", ()
     assert.equal(bash(`echo x > "${r}/SKILL.md"`, inRepo), null);
     assert.equal(decide({ tool_name: "Write", tool_input: { file_path: `${r}/SKILL.md` } }, inRepo), null);
   } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+// C5: the path rules of macOS and Linux, judged on any system through decide()'s platform (platform.mjs).
+const posixOf = (name, deps = {}) => platformFor(name, { tmpdir: () => "/tmp", realpath: () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); }, homedir: () => "/home/node", ...deps });
+const LINUX = posixOf("linux"), MAC = posixOf("darwin");
+const penv = { NIGHT_SHIFT_REPO: "/work/Repo", NIGHT_SHIFT_STATE: "/tmp/x-night", HOME: "/home/u" };
+const pbash = (command, platform, e = penv, cwd) => decide({ tool_name: "Bash", tool_input: { command }, ...(cwd ? { cwd } : {}) }, e, { platform });
+const pwrite = (file_path, platform, e = penv) => decide({ tool_name: "Write", tool_input: { file_path } }, e, { platform });
+
+test("on Linux the repository is the folder in its own case; on macOS any case of it is the repository", () => {
+  assert.equal(pwrite("/work/Repo/src/a.ts", LINUX), null);
+  assert.match(pwrite("/work/repo/src/a.ts", LINUX), /writes are limited to the repository, \/tmp and the temp folder/);
+  assert.equal(pwrite("/work/repo/src/a.ts", MAC), null);
+  assert.match(pbash("rm -rf /work/REPO", MAC), /recursive delete of the repository/);
+  assert.match(pbash("rm -rf /work/REPO", LINUX), /limited to the repository and temp folders/);
+  assert.match(pwrite("/work/Repo/.GIT/config", MAC), /\.git directory/);
+});
+
+test("off Windows ~/.claude is found by HOME, and USERPROFILE names no home", () => {
+  for (const P of [LINUX, MAC]) {
+    assert.match(pbash("echo x > /home/u/.claude/CLAUDE.md", P), /global CLAUDE\.md/);
+    assert.match(pbash("cp a.mjs /home/u/.claude/skills/night-shift/scripts/guard.mjs", P), /night-shift skill itself/);
+    assert.match(pbash("echo x > ~/.claude/night-shift/rules.md", P), /night-shift settings and rules/);
+  }
+  const profile = { NIGHT_SHIFT_REPO: "/work/Repo", USERPROFILE: "/home/u" };
+  assert.equal(pbash("echo x > /home/u/.claude/CLAUDE.md", LINUX, profile), null);
+  assert.match(pbash("echo x > /home/node/.claude/CLAUDE.md", LINUX, profile), /global CLAUDE\.md/);
+});
+
+test("off Windows a drive, a backslash and a doubled slash are read as POSIX reads them", () => {
+  // C:/.. is a folder named C: and its parent, so from ~/.claude this names ~/.claude/settings.json.
+  assert.match(pbash("cd /home/u/.claude && echo x > C:/../settings.json", LINUX), /Claude settings/);
+  assert.match(pbash("cd /home/u/.claude && cp a C:/../CLAUDE.md", LINUX), /global CLAUDE\.md/);
+  assert.match(pbash("echo x > //home/u/.claude/skills/night-shift/SKILL.md", LINUX), /night-shift skill itself/);
+  // A backslash is part of a name: /work/Repo\x is a file beside the repository.
+  assert.match(pwrite("/work/Repo\\x.ts", LINUX), /writes are limited/);
+  assert.equal(pwrite("/work/Repo/a\\b.ts", LINUX), null);
+});
+
+test("off Windows the runner's files keep their capitals and the user's CLAUDE.md its name, and both stay protected", () => {
+  for (const P of [LINUX, MAC]) {
+    for (const f of ["STOP-REQUEST", "RELOAD-REQUEST", "chain.log", "run.json", "night-settings.json"])
+      assert.match(pwrite(`/tmp/x-night/${f}`, P), /runner's own files/, f);
+    assert.equal(pwrite("/tmp/x-night/next-prompt.md", P), null);
+    assert.match(pwrite("/home/u/.claude/CLAUDE.md", P), /global CLAUDE\.md/);
+  }
+});
+
+test("off Windows /tmp is a temp root, and a colon or ~1 in a name is ordinary", () => {
+  for (const P of [LINUX, MAC]) {
+    assert.equal(pwrite("/tmp/a.md", P), null);
+    assert.equal(pbash("rm -rf /tmp/build-x", P), null);
+    assert.equal(pbash("rm /work/Repo/a:b /work/Repo/a~1", P), null);
+    assert.match(pbash("rm -rf /tmp", P), /refusing a (recursive )?delete/);
+  }
+  assert.equal(pbash("rm -rf /private/tmp/build-x", MAC), null);
+  assert.match(pbash("rm -rf /private/tmp/build-x", LINUX), /limited to the repository and temp folders/);
+  // C:/temp/x is a relative path there: a folder named C: in the repository.
+  assert.equal(pbash("rm C:/temp/x", LINUX), null);
+  assert.match(pbash("cd /home/u && rm C:/temp/x", LINUX), /limited to the repository and temp folders/);
+  assert.match(pwrite("/users/u/.claude/settings.json/..namedfork/rsrc", MAC), /resource fork/);
+});
+
+test("on macOS /private/var and /var, and the data volume and /, are one spelling, so a session's TMPDIR meets the runner's state folder", () => {
+  const mac = posixOf("darwin", { tmpdir: () => "/var/folders/ab/X/T", realpath: (t) => (t === "/var/folders/ab/X/T" ? "/private/var/folders/ab/X/T" : t) });
+  const e = { NIGHT_SHIFT_REPO: "/Users/u/work/Repo", NIGHT_SHIFT_STATE: "/private/var/folders/ab/X/T/night-shift-Repo", HOME: "/Users/u" };
+  assert.match(pbash("echo x > /var/folders/ab/X/T/night-shift-Repo/run.json", mac, e), /runner's own files/);
+  assert.match(pbash("echo x > /private/var/folders/ab/X/T/night-shift-Repo/chain.log", mac, e), /runner's own files/);
+  assert.equal(pwrite("/var/folders/ab/X/T/night-shift-Repo/next-prompt.md", mac, e), null);
+  assert.equal(pwrite("/var/folders/ab/X/T/build/a.txt", mac, e), null);
+  assert.match(pbash("echo x > /System/Volumes/Data/Users/u/.claude/CLAUDE.md", mac, e), /global CLAUDE\.md/);
+  assert.match(pbash("echo x > /private/tmp/Repo/.git/config", mac, { ...e, NIGHT_SHIFT_REPO: "/tmp/Repo" }), /\.git directory/);
+});
+
+test("on Linux a path through /proc is refused, and /dev/null stays writable", () => {
+  assert.match(pbash("echo x > /proc/self/cwd/.git/hooks/pre-commit", LINUX), /\/proc path/);
+  assert.match(pbash("rm -rf /proc/self/root/home/u/x", LINUX), /\/proc path/);
+  assert.equal(pbash("echo x > /dev/null 2> /dev/stderr", LINUX), null);
+});
+
+test("off Windows a state folder in a system or login folder is no writable root", () => {
+  assert.match(pwrite("/home/u/.config/autostart/x.desktop", LINUX, { ...penv, NIGHT_SHIFT_STATE: "/home/u/.config/autostart" }), /writes are limited/);
+  assert.match(pwrite("/etc/night/x", LINUX, { ...penv, NIGHT_SHIFT_STATE: "/etc/night" }), /writes are limited/);
+  assert.equal(pwrite("/home/u/.local/state/night/x.md", LINUX, { ...penv, NIGHT_SHIFT_STATE: "/home/u/.local/state/night" }), null);
+});
+
+test("on Linux find's narrowing reads a mixed-case start path in lower case, as it reads the patterns", () => {
+  assert.match(pbash("find /work/Repo -path '*/Repo/*' -delete", LINUX), /find delete from the repository/);
+  assert.match(pbash("find /work/Repo -name HEAD -delete", LINUX), /find delete from the repository/);
+  assert.equal(pbash("find /work/Repo -name '*.tmp' -delete", LINUX), null);
+});
+
+test("on Linux a Windows drive under /mnt/<letter> compares in any case and refuses an 8.3 name", () => {
+  const e = { ...penv, NIGHT_SHIFT_REPO: "/mnt/c/Work/Repo" };
+  assert.match(pwrite("/mnt/c/work/repo/.GIT/config", LINUX, e), /\.git directory/);
+  assert.match(pbash("echo x > /mnt/c/Work/Repo/GIT~1/config", LINUX, e), /short \(8\.3\) name/);
+  assert.equal(pwrite("/mnt/c/WORK/REPO/src/a.ts", LINUX, e), null);
 });
