@@ -215,14 +215,26 @@ export function statusCard(f, T = strings()) {
 
 // The night report's section for one job: its heading names the session number and the
 // time it started (run 1 and run 2 both have a "session 7"), "**Next:**" what follows.
-export function reportSection(text, nn, hhmm) {
+// ymd, the day the job started, is compared with the heading's date when both are known: last
+// night's "session 07" at the same time is another job. A job that started late may head its
+// section with the day it ended. `lacks` names the fixed words the cards read that the section does not hold.
+export function reportSection(text, nn, hhmm, ymd = null) {
   const toMin = (t) => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
   const near = (a, b) => { const d = Math.abs(toMin(a) - toMin(b)); return Math.min(d, 1440 - d) <= 15; };
+  // How far a heading is from the job's start (lower is closer, null is no match): the same day first, a
+  // heading without a date (or a caller without one) by its time, the day after last. Of equals, the last wins.
+  const stamp = (d, t) => Date.parse(`${d}T${t}:00Z`), DAY = 86_400_000, SLACK = 15 * 60_000;
+  const distance = (d, t) => {
+    if (!ymd || !d) return near(t, hhmm) ? SLACK : null;
+    const diff = stamp(d, t) - stamp(ymd, hhmm);
+    return Math.abs(diff) <= SLACK ? Math.abs(diff) : Math.abs(diff - DAY) <= SLACK ? DAY + Math.abs(diff - DAY) : null;
+  };
   const lines = String(text).split(/\r?\n/);
   let found = null;
   lines.forEach((l, i) => {
-    const m = /^## .*?\bsession (\d+) \((\d{2}:\d{2})[^)]*\) · (.+)$/.exec(l);
-    if (m && Number(m[1]) === Number(nn) && near(m[2], hhmm)) found = { i, title: plain(m[3]) };
+    const m = /^## (?:(\d{4}-\d{2}-\d{2})\b)?.*?\bsession (\d+) \((\d{2}:\d{2})[^)]*\) · (.+)$/.exec(l);
+    const d = m && Number(m[2]) === Number(nn) ? distance(m[1], m[3]) : null;
+    if (d != null && (!found || d <= found.d)) found = { i, d, title: plain(m[4]) };
   });
   if (!found) return null;
   const end = lines.findIndex((l, i) => i > found.i && l.startsWith("## "));
@@ -256,5 +268,6 @@ export function reportSection(text, nn, hhmm) {
     remaining: left ? Number(left[1]) : null,
     waits: fresh.length ? fresh.flatMap((i) => i.children) : carried.length ? [] : items.map((i) => i.text),
     older: carried.reduce((a, i) => a + i.children.length, 0),
+    lacks: [...(at < 0 ? ["**Waits for you**"] : []), ...(left ? [] : ["**Remaining:** <n>"])],
   };
 }

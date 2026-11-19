@@ -60,6 +60,9 @@ export default {
   failed: "ended with an error",
   noResult: "ended without a result line",
   denied: (n) => `guard refused ${n} time${s(n)}`,
+  // a finished job's night-report section the cards cannot read; `words` are the skill's fixed words, kept as they are
+  noSection: "no night-report section names this job, so its card has no title, waits or count",
+  sectionLacks: (words) => `its night-report section lacks ${words.join(" and ")}, so its card shows no waits or count from it`,
   quietFor: (t) => `quiet for ${t}`,
   limitWaited: (until) => `usage limit reached, waited until ${until}`,
   retriedTransient: (nn) => `#${nn} connection or API error, retried`,

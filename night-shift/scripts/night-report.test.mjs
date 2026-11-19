@@ -1,0 +1,137 @@
+// The report and the cards read from a state folder built by hand: no runner, no CLI. node --test scripts/night-report.test.mjs
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { buildReport, sessionMessage, chainMessage } from "./night-report.mjs";
+import { reportSection } from "./telegram-cards.mjs";
+
+const FIXTURE = new URL("./fixtures/session-guard-text-2026-11-19.jsonl", import.meta.url);
+const line = (j) => JSON.stringify(j);
+const SID = "00000000-0000-4000-8000-000000000012";
+const success = (modelUsage, total) => line({ type: "result", subtype: "success", is_error: false, num_turns: 3, session_id: SID, total_cost_usd: total, modelUsage });
+const used = (inputTokens, outputTokens, costUSD) => ({ inputTokens, outputTokens, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD });
+
+// A finished one-job run: chain.log, run.json (English, so the user's own config is not read), the job's
+// stream, and a night report in the repository when `report` is given.
+function finished(stream, { report = null, start = "2026-11-19 03:27:12", end = "2026-11-19 04:10:00", runStart = start } = {}) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "night-report-test-"));
+  const state = path.join(base, "state"), repo = path.join(base, "repo");
+  fs.mkdirSync(state);
+  fs.mkdirSync(repo);
+  fs.writeFileSync(path.join(state, "run.json"), line({ repo, report: "NIGHT_RUNS.md", lang: "en", mode: "opus", startedAt: runStart }));
+  fs.writeFileSync(path.join(state, "chain.log"), [`[${start}] chain starts`, `[${start}] session 01 starts: the piece`, `[${end}] session 01 ends: ok`, `[${end}] chain ends: STOP: done`, ""].join("\n"));
+  fs.writeFileSync(path.join(state, "session-01.jsonl"), [line({ type: "system", subtype: "init", session_id: SID }), ...stream, ""].join("\n"));
+  fs.writeFileSync(path.join(state, "next-prompt.md"), "STOP: done");
+  if (report != null) fs.writeFileSync(path.join(repo, "NIGHT_RUNS.md"), report);
+  return state;
+}
+
+const guardText = fs.readFileSync(FIXTURE, "utf8").trim().split("\n");
+// A failed command whose output shows the guard's source: an error, but not the hook's.
+const failedRead = [
+  line({ type: "assistant", message: { id: "msg_fixture_x", model: "claude-opus-5-5", role: "assistant", content: [{ type: "tool_use", id: "toolu_fixture_x", name: "Bash", input: { command: "grep -n 'night-shift guard:' guard.mjs; false" } }], usage: { input_tokens: 1, output_tokens: 1 } } }),
+  line({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_fixture_x", is_error: true, content: "Exit code 1\n2:// night-shift guard: a PreToolUse hook for unattended runs. It denies the\n1417:      permissionDecisionReason: `night-shift guard: ${reason}. Do not work around it; note it for the morning and take other work.`," }] } }),
+];
+
+test("a guard denial is counted only when the hook refused a call, and its reason is one short line", () => {
+  // Sessions 01, 02 and 08 of the chain that found it: the guard's source read and grepped, the hook run by hand
+  // (its JSON printed), and two real refusals, one of them with a reason that ran over many lines.
+  const state = finished([...guardText, ...failedRead, success({ "claude-opus-5-5": used(10, 7, 1.2) }, 1.2)]);
+  const plain = buildReport(state, { focus: "all", pid: 0 }).plain;
+  const refused = plain.split("\n").filter((l) => /guard refused/.test(l));
+  assert.equal(refused.length, 1, plain);
+  assert.match(refused[0], /^⚠️ #01 guard refused 2 times: a command named by a variable cannot be read; refusing a path with an NTFS stream name \( import\('\.\/guard\.mjs'\)/);
+  assert.ok(refused[0].length < 400, refused[0]);
+  assert.doesNotMatch(plain, /\$\{reason\}|PreToolUse hook for unattended runs|hookSpecificOutput/);
+  const card = sessionMessage(state, "01", 0).text;
+  assert.match(card, /guard refused 2 times: a command named by a variable cannot be read/);
+  assert.doesNotMatch(card, /\$\{reason\}|hookSpecificOutput/);
+  // one line of at most 160 characters, the cut marked
+  const long = buildReport(finished([guardText.at(-2), guardText.at(-1).replace("NTFS stream name (", "NTFS stream name (" + "x".repeat(300))]), { focus: "all", pid: 0 }).plain;
+  const reason = /guard refused 1 time: (.*)$/m.exec(long)?.[1] ?? "";
+  assert.ok(reason.length <= 160 && reason.endsWith("…"), reason);
+});
+
+test("a session that only reads or greps the guard's source shows no denial", () => {
+  const readOnly = guardText.filter((l) => !/hook error: night-shift guard/.test(l));
+  const state = finished([...readOnly, ...failedRead, success({ "claude-opus-5-5": used(10, 7, 1.2) }, 1.2)]);
+  assert.doesNotMatch(buildReport(state, { focus: "all", pid: 0 }).plain, /guard refused/);
+  assert.doesNotMatch(sessionMessage(state, "01", 0).text, /guard refused/);
+});
+
+test("a model with dollars in the totals but no rows in the transcripts keeps its dollars", () => {
+  // The stream holds Opus's calls only; the totals also bill Haiku (calls no transcript records).
+  const opusCall = line({ type: "assistant", message: { id: "msg_a", model: "claude-opus-5-5", role: "assistant", content: [{ type: "text", text: "ok" }], usage: { input_tokens: 10, output_tokens: 7 } } });
+  const state = finished([opusCall, success({ "claude-opus-5-5": used(10, 7, 1.2), "claude-haiku-5-5": used(3000, 200, 0.3) }, 1.5)]);
+  const plain = buildReport(state, { focus: "all", pid: 0 }).plain;
+  assert.match(plain, /main haiku 5\.5\s+—\s+\$0\.30\n\s+in 3k read 0 write 0 out 200/);
+  assert.match(plain, /main opus 5\.5\s+1 call\s+\$1\.20/);
+  // the night total is the sessions' own total
+  assert.match(plain.split("Night total")[1] ?? "", /total \$1\.50/);
+});
+
+test("two keys of one model in the totals (the plain id and its [1m] form) add up, on a row of its own too", () => {
+  const opusCall = line({ type: "assistant", message: { id: "msg_a", model: "claude-opus-5-5", role: "assistant", content: [{ type: "text", text: "ok" }], usage: { input_tokens: 10, output_tokens: 7 } } });
+  const usage = { "claude-opus-5-5": used(10, 7, 1), "claude-opus-5-5[1m]": used(0, 0, 0.5), "claude-haiku-5-5": used(3000, 200, 0.3), "claude-haiku-5-5[1m]": used(1000, 100, 0.2) };
+  const plain = buildReport(finished([opusCall, success(usage, 2)]), { focus: "all", pid: 0 }).plain;
+  assert.match(plain, /main opus 5\.5\s+1 call\s+\$1\.50/);
+  assert.equal(plain.split("Night total")[0].match(/main haiku 5\.5/g)?.length, 1, plain);
+  assert.match(plain, /main haiku 5\.5\s+—\s+\$0\.50\n\s+in 4k read 0 write 0 out 300/);
+  assert.match(plain.split("Night total")[1] ?? "", /total \$2\.00/);
+});
+
+// A report with session nn of two runs: last night's at the same clock time, and tonight's when given.
+const twoNights = (tonight, nn = "07") => [
+  "# Night runs", "",
+  `## 2026-11-18 · run 1 · session ${nn} (19:24–20:00) · last night's piece`, "", "**Waits for you**", "- New: the old question. Detail: `a.md:1`.", "", "**Remaining:** 3 sessions", "",
+  ...(tonight ? [`## 2026-11-19 · run 2 · session ${nn} (19:25–20:10) · tonight's piece`, "", "**Waits for you**", "- New: none.", "", "**Remaining:** 1 sessions", ""] : []),
+].join("\n");
+const sevens = (tonight) => twoNights(tonight);
+
+test("a report section is found by its date and start time, not by the time alone", () => {
+  assert.equal(reportSection(sevens(false), "07", "19:24", "2026-11-19"), null);
+  assert.equal(reportSection(sevens(true), "07", "19:24", "2026-11-19").title, "tonight's piece");
+  assert.equal(reportSection(sevens(true), "07", "19:24", "2026-11-18").title, "last night's piece");
+  // Without a date (an older caller) the time decides, as before.
+  assert.equal(reportSection(sevens(false), "07", "19:24").title, "last night's piece");
+  // Near midnight: a heading that names the day the session ended, or a start a few minutes the other side.
+  const late = "## 2026-11-19 · run 1 · session 03 (23:55–00:40) · late piece\n\n**Remaining:** 2 sessions\n";
+  assert.equal(reportSection(late, "03", "23:55", "2026-11-18").title, "late piece");
+  const early = "## 2026-11-18 · run 1 · session 04 (23:58–00:40) · early piece\n\n**Remaining:** 2 sessions\n";
+  assert.equal(reportSection(early, "04", "00:03", "2026-11-19").title, "early piece");
+  assert.equal(reportSection(early, "04", "00:03", "2026-11-20"), null);
+  // A heading with no date is read by its time.
+  assert.equal(reportSection("## run 1 · session 05 (10:00–11:00) · undated\n", "05", "10:05", "2026-11-19").title, "undated");
+});
+
+test("a session card does not show last night's section of the same number when tonight's is missing", () => {
+  const job = [success({ "claude-opus-5-5": used(10, 7, 1.2) }, 1.2)], at = { start: "2026-11-19 19:24:30", end: "2026-11-19 20:05:00" };
+  assert.doesNotMatch(sessionMessage(finished(job, { report: twoNights(false, "01"), ...at }), "01", 0).text, /last night's piece|the old question/);
+  assert.match(sessionMessage(finished(job, { report: twoNights(true, "01"), ...at }), "01", 0).text, /tonight's piece/);
+});
+
+test("a section the cards cannot read says so: no section at all, or one without its fixed words", () => {
+  const job = [success({ "claude-opus-5-5": used(10, 7, 1.2) }, 1.2)];
+  const head = "## 2026-11-19 · run 1 · session 01 (03:27–04:10) · the piece\n\n";
+  const card = (report) => sessionMessage(finished(job, { report }), "01", 0).text;
+  const plain = (report) => buildReport(finished(job, { report }), { focus: "all", pid: 0 }).plain;
+  // A translated heading: no section is found.
+  assert.match(card("## 2026-11-19 · lauf 1 · sitzung 01 (03:27–04:10) · das Ziel\n"), /no night-report section names this job/);
+  assert.match(plain("## 2026-11-19 · lauf 1 · sitzung 01 (03:27–04:10) · das Ziel\n"), /⚠️ #01 no night-report section names this job/);
+  // Translated fixed words inside a found section.
+  assert.match(card(`${head}**Wartet auf dich**\n- Neu: nichts.\n\n**Verbleibend:** 2\n`), /its night-report section lacks \*\*Waits for you\*\* and \*\*Remaining:\*\* &lt;n&gt;,/);
+  assert.match(card(`${head}**Waits for you**\n- New: none.\n\n**Verbleibend:** 2\n`), /section lacks \*\*Remaining:\*\* &lt;n&gt;,/);
+  // The word without a count: the count is what is missing.
+  assert.match(plain(`${head}**Waits for you**\n- New: none.\n\n**Remaining:** none\n`), /⚠️ #01 its night-report section lacks \*\*Remaining:\*\* <n>,/);
+  // A section with both says nothing; nor does a run without a report file (the repository may keep none).
+  for (const c of [card(`${head}**Waits for you**\n- New: none.\n\n**Remaining:** 0 sessions\n`), card(null)]) assert.doesNotMatch(c, /night-report section/);
+  assert.doesNotMatch(chainMessage(finished(job, { report: `${head}**Waits for you**\n- New: none.\n\n**Remaining:** 0 sessions\n` }), "STOP: done", 0).text, /night-report section/);
+  // Not for a job that failed (its failure is the problem), nor for an earlier run's job in the same state folder.
+  const failed = [line({ type: "result", subtype: "error_during_execution", is_error: true, session_id: SID, total_cost_usd: 1, modelUsage: {} })];
+  const failedPlain = buildReport(finished(failed, { report: "# Night runs\n" }), { focus: "all", pid: 0 }).plain;
+  assert.match(failedPlain, /#01 ended with an error/);
+  assert.doesNotMatch(failedPlain, /night-report section/);
+  assert.doesNotMatch(buildReport(finished(job, { report: "# Night runs\n", runStart: "2026-11-19 05:00:00" }), { focus: "all", pid: 0 }).plain, /night-report section/);
+});

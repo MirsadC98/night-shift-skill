@@ -138,6 +138,25 @@ function agentRows(dir) {
 }
 
 // ---------------------------------------------------------------- one session
+// A guard denial is a failed call whose first line is the hook's (`PreToolUse:Bash hook error: night-shift guard:
+// <reason>. Do not work around it; …`). Output that only shows the guard's text, its source read or the hook run
+// by hand, is none (2026-11-19: a session that read guard.mjs counted as refused, its source as the reason).
+const DENIAL = /^[^\n]*night-shift guard: /;
+const denialReason = (t) => {
+  const r = t.slice(t.indexOf("night-shift guard: ") + 19).split(". Do not work around it")[0].replace(/\s+/g, " ").trim();
+  return r.length > 160 ? `${r.slice(0, 159)}…` : r;
+};
+
+// A model billed in the totals that no transcript row names (calls the transcripts do not record): its own row,
+// with the totals' tokens and dollars and no count of calls. A second key of that model ("…[1m]") adds to the row.
+function addUntracked(row, mu) {
+  add(row.usage, { input_tokens: mu.inputTokens, cache_read_input_tokens: mu.cacheReadInputTokens, cache_creation_input_tokens: mu.cacheCreationInputTokens, output_tokens: mu.outputTokens });
+  row.usage.calls = 0;
+  row.cost += mu.costUSD || 0;
+  return row;
+}
+const untrackedRow = (model, mu) => addUntracked({ kind: "ana", model, agents: 0, usage: blank(), cost: 0, untracked: true }, mu);
+
 function parseSession(state, nn) {
   const file = path.join(state, `session-${nn}.jsonl`);
   const entries = jsonl(file);
@@ -161,6 +180,8 @@ function parseSession(state, nn) {
     for (const [key, mu] of Object.entries(result.modelUsage)) {
       const model = key.replace(/\[.*\]$/, "");
       const mine = rows.filter((r) => r.model === model);
+      if (!mine.length) { if (mu.costUSD || mu.inputTokens || mu.outputTokens) rows.push(untrackedRow(model, mu)); continue; }
+      if (mine.every((r) => r.untracked)) { addUntracked(mine[0], mu); continue; }
       const counted = mine.reduce((s, r) => s + r.usage.output, 0);
       const agentsOf = mine.filter((r) => r.kind !== "ana");
       const calls = agentsOf.reduce((s, r) => s + r.usage.calls, 0);
@@ -171,7 +192,8 @@ function parseSession(state, nn) {
         r.usage.units += extra * WEIGHT.output;
       }
       const units = mine.reduce((s, r) => s + r.usage.units, 0);
-      for (const r of mine) r.cost = units ? (mu.costUSD || 0) * r.usage.units / units : 0;
+      // Added up: two keys of one model ("…[1m]" and the plain id) both bill its rows.
+      for (const r of mine) r.cost = (r.cost || 0) + (units ? (mu.costUSD || 0) * r.usage.units / units : 0);
     }
   }
   const tools = entries.filter((j) => j.type === "assistant" && !j.parent_tool_use_id)
@@ -185,8 +207,7 @@ function parseSession(state, nn) {
     // The effort each main-thread call really ran at (settings can drift: 2026-10-30, xhigh → high).
     efforts: [...new Set(mainEntries.filter((j) => j.type === "assistant" && !j.isSidechain && j.perTurnEffort).map((j) => j.perTurnEffort))],
     limits: entries.filter((j) => j.type === "rate_limit_event").map((j) => j.rate_limit_info).filter(Boolean),
-    denials: toolResults.map(text).filter((t) => t.includes("night-shift guard:"))
-      .map((t) => t.slice(t.indexOf("night-shift guard:") + 19).split(". Do not")[0]),
+    denials: toolResults.filter((c) => c.is_error === true).map(text).filter((t) => DENIAL.test(t)).map(denialReason),
     toolErrors: toolResults.filter((c) => c.is_error).length,
     compactions: entries.filter((j) => j.type === "system" && /compact/.test(j.subtype || "")).length,
     lastStep: last ? (last.input?.description || last.input?.skill || last.input?.file_path || last.name) : null,
@@ -293,7 +314,9 @@ function collect(state, pid = null) {
   }
   if (!ended && !running) issues.push(`🛑 ${T.runnerGone}`);
   const nextPrompt = read(path.join(state, "next-prompt.md")).trim();
-  return { state, run, T, events, parsed, ended, running, issues, nextPrompt, sections: new Map() };
+  const c = { state, run, T, events, parsed, ended, running, issues, nextPrompt, sections: new Map() };
+  for (const s of runJobs(c)) { const p = sectionProblem(c, s); if (p) issues.push(`⚠️ #${s.nn} ${esc(p)}`); }
+  return c;
 }
 
 // The run's main model when it is Fable or Mythos (fable or mythos mode), else null: a cut-off session's piece
@@ -337,8 +360,19 @@ function sectionOf(c, s) {
   if (!c.run.repo) return null;
   c.reportText ??= read(path.resolve(c.run.repo, c.run.report || "NIGHT_RUNS.md"));
   const key = `${s.nn} ${s.start}`;
-  if (!c.sections.has(key)) c.sections.set(key, reportSection(c.reportText, s.nn, hm(when(s.start))));
+  if (!c.sections.has(key)) c.sections.set(key, reportSection(c.reportText, s.nn, hm(when(s.start)), /^\d{4}-\d{2}-\d{2}/.exec(s.start)?.[0] ?? null));
   return c.sections.get(key);
+}
+
+// Why the cards cannot read a finished job's section, when they cannot: none found by its heading, or one
+// without the fixed words (a model that translated them). Nothing when the repository keeps no report, and
+// nothing for a job that failed: its failure is the problem, and it may have ended before writing a section.
+function sectionProblem(c, s) {
+  if (!s.end || !okOf(s)) return null;
+  const section = sectionOf(c, s);
+  if (!c.reportText?.trim()) return null;
+  if (!section) return c.T.noSection;
+  return section.lacks.length ? c.T.sectionLacks(section.lacks) : null;
 }
 
 // This run's jobs: the day's state folder can also hold an earlier run's (a fresh start the same day).
@@ -397,7 +431,7 @@ export function buildReport(state, { headline = "", focus = null, pid = null } =
 
   const order = { ana: 0, alt: 1, wf: 2 };
   const rowLines = (rows) => rows.sort((a, b) => order[a.kind] - order[b.kind] || b.usage.units - a.usage.units).map((r) => {
-    const count = r.kind === "ana" ? T.calls(r.usage.calls) : T.agents(r.agents);
+    const count = r.untracked ? "—" : r.kind === "ana" ? T.calls(r.usage.calls) : T.agents(r.agents);
     const cost = r.cost != null ? `${r.estimated ? "≈" : ""}${usd(r.cost)}` : "";
     const u = r.usage;
     return `${`${T.kinds[r.kind]} ${modelName(r.model)}`.padEnd(15)} ${count.padEnd(10)} ${cost}\n  ${T.tokenRow(tokens(u.input), tokens(u.read), tokens(u.write), tokens(u.output))}`;
@@ -423,11 +457,13 @@ export function buildReport(state, { headline = "", focus = null, pid = null } =
   if (parsed.length > 1 || focus === "all") {
     const total = {};
     for (const r of parsed.flatMap((s) => s.rows)) {
-      const t = (total[`${r.kind}|${r.model}`] ||= { kind: r.kind, model: r.model, agents: 0, usage: blank(), cost: 0 });
+      const t = (total[`${r.kind}|${r.model}`] ||= { kind: r.kind, model: r.model, agents: 0, usage: blank(), cost: 0, untracked: true });
       merge(t.usage, r.usage);
       t.agents += r.agents;
       t.cost += r.cost || 0;
       t.estimated ||= r.estimated;
+      // calls are counted once any session has a transcript row for the model
+      t.untracked &&= Boolean(r.untracked);
     }
     const sum = Object.values(total).reduce((a, r) => a + r.cost, 0);
     out.push(`<b>${T.nightTotal(parsed.length)}</b>\n<pre>${esc(rowLines(Object.values(total)))}\n${T.totalLabel} ${parsed.some((s) => !s.result) ? "≈" : ""}${usd(sum)}\n${T.limitLabel} ${limitSpan(parsed)}</pre>`);
@@ -504,6 +540,7 @@ function jobFacts(c, s) {
       ...(s.result && !okOf(s) ? [`${T.failed} (${s.result.subtype})`] : []),
       ...(s.end && !s.result ? [T.noResult] : []),
       ...(s.denials.length ? [`${T.denied(s.denials.length)}: ${s.denials[0]}`] : []),
+      ...[sectionProblem(c, s)].filter(Boolean),
       ...(effortOff(c.state, c.run, s) ? [T.effortOff(s.efforts.join("/"), wantOf(c.state, c.run, s.nn).effort)] : []),
       ...(s.notes || []),
     ],
