@@ -22,7 +22,7 @@ Not on `main` yet: the commits after `2c14b8b`.
 
 ### Changed
 
-- What differs by system is in one module, `scripts/platform.mjs`, with Windows behind it and no change in behaviour. On macOS and Linux the guard reads paths as those systems do (case, backslashes, `/tmp`, their system and login folders), and the runner finds, watches, waits for and stops processes, keeps the machine awake (`caffeinate`, `systemd-inhibit`) and looks for `claude` as they do; the detached start comes next.
+- What differs by system is in one module, `scripts/platform.mjs`, with Windows behind it and no change in behaviour. On macOS and Linux the guard reads paths as those systems do (case, backslashes, `/tmp`, their system and login folders), and the runner finds, watches, waits for and stops processes, keeps the machine awake (`caffeinate`, `systemd-inhibit`) and looks for `claude` as they do; `start` runs the runner there as a detached process (its own session, Node's errors in `<state>/runner.err`, which the guard protects), and `--window` is for Windows only.
 - README opens with what the skill is for, by night or by day, and a quick start: install, `init`, `doctor`, a first chain from `examples/`.
 - `--max-sessions <n>` counts the sessions a `start` runs; it was the number of the last session.
 - English is the only language in the repository: the bundled Turkish table left it, and any other language is a table you keep in `~/.claude/night-shift/lang/<code>.mjs`.

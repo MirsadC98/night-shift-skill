@@ -64,7 +64,9 @@
 // (conhost --headless): no window shows, the log is <state>/chain.log, and
 // `stop --now` is the emergency stop. --window keeps a visible console, whose
 // closing stops the chain. A `run` that finds itself in a visible console
-// without --window moves itself to a hidden one through the task. run also
+// without --window moves itself to a hidden one through the task. On macOS and
+// Linux start runs `run` as a detached process (its own session, no terminal;
+// Node's own errors in <state>/runner.err), and --window is refused. run also
 // starts night-report.mjs watch, which sends each session's report to
 // Telegram when it is set up. Every session reads <state>/night-settings.json
 // anew; runChain rewrites only its own keys there.
@@ -308,6 +310,8 @@ const defaultState = (repo, cfg) => path.resolve((cfg.stateDir || path.join(temp
 const foreignState = (state) => !fs.existsSync(path.join(state, "run.json")) && fs.existsSync(state) && fs.readdirSync(state).some((f) => !["prompts", "next-prompt.md"].includes(f));
 
 async function start(opt) {
+  // No terminal opens the same way on every macOS and Linux desktop; tail -f <state>/chain.log shows what a console would.
+  if (opt.window && platform.name !== "win32") fail("--window (a visible console) is for Windows only; follow <state>/chain.log instead (tail -f)");
   const repo = repoRoot(opt.repo || process.cwd());
   const ptr = readPointer(repo);
   if (ptr && !ptr.finished) {
@@ -458,7 +462,7 @@ async function start(opt) {
   // session to learn the window is still over the ceiling; the stream fields seen stay, what was told goes (keepLimits).
   const week = keepLimits(state);
   let task;
-  try { task = scheduleRun(run); } catch (e) { fail(`Task Scheduler: ${String(e.stderr || e.message).trim().split("\n")[0]}`); }
+  try { task = scheduleRun(run); } catch (e) { fail(`${platform.name === "win32" ? "Task Scheduler" : "the detached start"}: ${String(e.stderr || e.message).trim().split("\n")[0]}`); }
   writePointer(repo, { pid: 0, state, task, scheduledAt: now(), finished: false });
   console.log(`night-shift started for ${repo}`);
   if (cut) console.log(`  resumes session ${cut.nn} (${cut.sessionId}), which the last runner left unfinished`);
@@ -505,7 +509,7 @@ async function runChain(opt) {
   if (!run.window && !opt.headless) {
     try {
       scheduleRun(run, reloaded ? ["--reloaded"] : []);
-      log("runner moves to a hidden console (conhost --headless) through the scheduled task");
+      log(`runner moves to a hidden console ${platform.name === "win32" ? "(conhost --headless) through the scheduled task" : "(a detached process with no terminal)"}`);
       process.exit(0);
     } catch (e) { log(`could not move to a hidden console (${String(e.stderr || e.message).trim().split("\n")[0]}); runs here`); }
   }

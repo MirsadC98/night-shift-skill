@@ -1344,3 +1344,10 @@ test("on Linux a Windows drive under /mnt/<letter> compares in any case and refu
   assert.match(pbash("echo x > /mnt/c/Work/Repo/GIT~1/config", LINUX, e), /short \(8\.3\) name/);
   assert.equal(pwrite("/mnt/c/WORK/REPO/src/a.ts", LINUX, e), null);
 });
+
+test("runner.err, where a detached runner's start failures go, is the runner's own file on every system", () => {
+  assert.match(write("C:/temp/x-night/runner.err"), /runner's own/);
+  assert.match(pwrite("/tmp/x-night/runner.err", LINUX), /runner's own/);
+  assert.match(pbash("echo x > /tmp/x-night/runner.err", MAC), /runner's own/);
+  assert.equal(pwrite("/tmp/x-night/runner.errors.md", LINUX), null);
+});

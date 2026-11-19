@@ -27,7 +27,7 @@ const under = (p, root) => root && (p === root || p.startsWith(root + "/"));
 // that names the program each session starts, its own logs and marks, the caps' count (limits.json),
 // what the user's waiter has reported (wait.json) and the user's stop (STOP-REQUEST). In any case: Windows and macOS
 // fold the path, and on Linux the runner's STOP-REQUEST and RELOAD-REQUEST keep their capitals.
-const RUNNER_FILES = /^(night-settings\.json|run\.json|launch\.cmd|resume\.json|chain\.log|reload-request|watch\.pid|notified\.json|fable\.json|limits\.json|wait\.json|stop-request|session-\d+\.(jsonl|err))$/i;
+const RUNNER_FILES = /^(night-settings\.json|run\.json|launch\.cmd|runner\.err|resume\.json|chain\.log|reload-request|watch\.pid|notified\.json|fable\.json|limits\.json|wait\.json|stop-request|session-\d+\.(jsonl|err))$/i;
 
 // ~/.claude may be a link (a junction to a folder elsewhere): a shell write can then name the files the
 // guard protects there by the link's target, a spelling norm() cannot know (on 2026-11-18 `echo x >

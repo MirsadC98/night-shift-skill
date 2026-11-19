@@ -24,7 +24,8 @@
 //   cliCandidates(nodeDir), cliName    where Claude Code's CLI is looked for, after NIGHT_SHIFT_CLAUDE, and its file's name
 //   psQuote(s)                         a PowerShell single-quoted string
 //   schedule({ task, node, script, args, window, state, title })  starts node script args detached, outside the
-//                                      editor and the shell that ran it, and returns what started it (the task's name)
+//                                      editor and the shell that ran it, and returns what started it (the task's name,
+//                                      or "detached" off Windows)
 
 import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
@@ -36,6 +37,9 @@ const under = (p, root) => root && (p === root || p.startsWith(root + "/"));
 // A PowerShell single-quoted string. PowerShell ends one at ' and at the typographic quotes
 // ‘ ’ ‚ ‛ alike, so each is doubled: a state folder or a repository named with one must stay text.
 export const psQuote = (s) => `'${String(s).replace(/['‘’‚‛]/g, "$&$&")}'`;
+
+// The variables Claude Code sets in its own session and the processes it starts.
+const SESSION_MARKS = /^(AI_AGENT|CLAUDECODE|CLAUDE_PID|CLAUDE_EFFORT|CLAUDE_CODE_(ENTRYPOINT|SESSION_ID|CHILD_SESSION|CHILD_NOTES_DIR|SESSION_ATTENDED|MESSAGING_SOCKET|MESSAGING_TOKEN|EXECPATH|SSE_PORT|EFFORT_LEVEL))$/;
 
 export function platformFor(name = process.platform, deps = {}) {
   const win = name === "win32";
@@ -49,6 +53,8 @@ export function platformFor(name = process.platform, deps = {}) {
   const writeFile = deps.writeFileSync || fs.writeFileSync;
   const readFile = deps.readFileSync || fs.readFileSync;
   const readDir = deps.readdirSync || fs.readdirSync;
+  const openFile = deps.openSync || fs.openSync;
+  const closeFile = deps.closeSync || fs.closeSync;
   const env = () => deps.env || process.env;
   const self = deps.pid ?? process.pid;
   const pollMs = deps.pollMs ?? 1000;
@@ -285,7 +291,23 @@ export function platformFor(name = process.platform, deps = {}) {
   // next one. A visible console (window) runs <state>/launch.cmd, titled night-shift <title>; a hidden one is conhost
   // --headless, which no default terminal (Windows Terminal) takes over, so every child shares that hidden console
   // too. A failure throws, with PowerShell's error in its stderr.
+  // Off Windows a detached process: the leader of a new session and process group, so closing the terminal or the
+  // editor does not end it, with no terminal of its own (window is Windows' only). What Node prints before the runner's
+  // own log is up (a broken reload, a missing run.json) is appended to <state>/runner.err. Its environment is this
+  // one without the marks of the Claude Code session that may have run start, which a task Task Scheduler starts
+  // never had. A process that could not start throws.
   const schedule = ({ task, node, script, args, window = false, state, title = "" }) => {
+    if (!win) {
+      const e = Object.fromEntries(Object.entries(env()).filter(([k]) => !SESSION_MARKS.test(k)));
+      const err = openFile(pp.join(state, "runner.err"), "a");
+      try {
+        const child = start(node, [script, ...args], { detached: true, stdio: ["ignore", "ignore", err], env: e });
+        child.on("error", () => {});
+        if (!child.pid) throw new Error(`could not start ${node}`);
+        child.unref();
+      } finally { closeFile(err); }
+      return "detached";
+    }
     const launcher = path.join(state, "launch.cmd");
     // The title goes into a cmd line: only what cmd reads as plain text.
     writeFile(launcher, `@echo off\r\ntitle night-shift ${String(title).replace(/[^\w .-]/g, "_")}\r\n"${node}" "${script}" %*\r\n`);

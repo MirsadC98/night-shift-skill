@@ -407,3 +407,32 @@ test("cliCandidates off Windows are claude beside node, in the native installer'
     "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]);
   assert.deepEqual(posixRec("darwin").p.cliCandidates("/usr/local/bin"), ["/usr/local/bin/claude", "/home/u/.local/bin/claude", "/opt/homebrew/bin/claude"]);
 });
+
+test("schedule off Windows starts node detached, its errors appended to runner.err, without the starting session's marks", () => {
+  const opened = [], closed = [], spawned = [];
+  let pid = 4321, unref = 0;
+  const env = { PATH: "/usr/bin", HOME: "/home/u", AI_AGENT: "claude-code", CLAUDECODE: "1", CLAUDE_PID: "77", CLAUDE_EFFORT: "high", CLAUDE_CODE_ENTRYPOINT: "cli",
+    CLAUDE_CODE_SESSION_ID: "s", CLAUDE_CODE_EFFORT_LEVEL: "max", CLAUDE_CONFIG_DIR: "/home/u/cfg", CLAUDE_CODE_USE_BEDROCK: "1", NIGHT_SHIFT_X: "y" };
+  const p = platformFor("linux", { env,
+    openSync: (f, flags) => { opened.push([f, flags]); return 9; }, closeSync: (fd) => closed.push(fd),
+    spawn: (file, args, opts) => { const c = new EventEmitter(); c.pid = pid; c.unref = () => unref++; spawned.push([file, args, opts, c]); return c; },
+    execFileSync: () => { throw new Error("no command runs"); }, writeFileSync: () => { throw new Error("no file is written"); } });
+  const at = { task: "night-shift-demo", node: "/usr/bin/node", script: "/s/night-chain.mjs", args: ["run", "--state", "/tmp/st", "--headless"], state: "/tmp/st", title: "demo" };
+  assert.equal(p.schedule(at), "detached");
+  assert.deepEqual(opened, [["/tmp/st/runner.err", "a"]]);
+  assert.deepEqual(closed, [9]);
+  assert.equal(unref, 1);
+  const [file, args, opts] = spawned[0];
+  assert.equal(spawned.length, 1);
+  assert.equal(file, "/usr/bin/node");
+  assert.deepEqual(args, ["/s/night-chain.mjs", "run", "--state", "/tmp/st", "--headless"]);
+  assert.deepEqual({ ...opts, env: undefined }, { detached: true, stdio: ["ignore", "ignore", 9], env: undefined });
+  assert.deepEqual(opts.env, { PATH: "/usr/bin", HOME: "/home/u", CLAUDE_CONFIG_DIR: "/home/u/cfg", CLAUDE_CODE_USE_BEDROCK: "1", NIGHT_SHIFT_X: "y" });
+  assert.doesNotThrow(() => spawned[0][3].emit("error", new Error("late")));
+  pid = undefined;
+  assert.throws(() => p.schedule(at), /could not start \/usr\/bin\/node/);
+  assert.deepEqual(closed, [9, 9]);
+  const mac = platformFor("darwin", { env, openSync: () => 3, closeSync: () => {}, spawn: (f, a, o) => { spawned.push([f, a, o]); return Object.assign(new EventEmitter(), { pid: 5, unref() {} }); } });
+  assert.equal(mac.schedule(at), "detached");
+  assert.equal(spawned.at(-1)[2].detached, true);
+});
