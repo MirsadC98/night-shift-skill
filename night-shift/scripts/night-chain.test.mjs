@@ -3118,10 +3118,16 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
   assert.match(one.out, /^The chain asks \(it goes on meanwhile\):\nQ1 · 10:12 · Push the branch\? · yes: the suite passes · otherwise it stays local$/m);
   assert.ok(one.out.includes(`append a line A<n>: <answer> to ${path.join(state, "inbox.md")}`), one.out);
   assert.match(one.out, new RegExp(`wait --repo "${lit(repo)}"`));
-  // A waiter started again reports only what is new; the chain still runs.
+  // A waiter started again reports only what is new; the chain still runs. Q2 is there before it starts: it reports
+  // it at once, and the answer hint is the last thing it prints (session 32's final review: a "waiting" line followed it).
   fs.writeFileSync(path.join(state, "go-1"), "");
+  const qFile = path.join(state, "questions.md");
+  for (const end = Date.now() + 60_000; !/^Q2 /m.test(fs.readFileSync(qFile, "utf8")); await new Promise((r) => setTimeout(r, 100)))
+    if (Date.now() > end) throw new Error(`Q2 never came:\n${fs.readFileSync(qFile, "utf8")}`);
   const two = await waitFor(repo, e, root).done;
   assert.equal(two.code, 3, two.out);
+  assert.match(two.out.trimEnd(), new RegExp(`\\nWait again: node "[^"]+" wait --repo "${lit(repo)}"$`), two.out);
+  assert.doesNotMatch(two.out, /waiting: runner pid|has not started yet/);
   assert.doesNotMatch(two.out, /Q1 /);
   assert.match(two.out, /^Q2 · 10:20 · Merge it\?/m);
   assert.doesNotMatch(fs.readFileSync(path.join(state, "chain.log"), "utf8"), /chain ends: /);
@@ -3498,6 +3504,59 @@ test("a start that fails after making the worktree removes it and the branch it 
   assert.equal(fs.existsSync(nightDir(c.repo)), false);
 });
 
+// Session 32's final review: the real launch fails after platform.schedule wrote its file (launch.cmd on Windows, runner.err
+// elsewhere), which NIGHT_SHIFT_LAUNCH=fail never reaches. A powershell.exe that is a copy of node rejects -NoProfile, so
+// the Task Scheduler step fails and no task is registered (NOTES, "Tests and gates").
+test("a worktree start whose real launch fails leaves a new state folder as it found it, so the next start is not refused",
+  { skip: process.platform !== "win32" && "the failing launch is a powershell.exe stand-in, which only Windows' launch runs" }, () => {
+  const c = pointerCase();
+  gitT(c.repo, "commit", "-q", "--allow-empty", "-m", "base");
+  const root = path.dirname(c.state), bin = path.join(root, "bin");
+  fs.mkdirSync(bin);
+  fs.copyFileSync(process.execPath, path.join(bin, "powershell.exe"));
+  const gitDir = path.dirname(execFileSync("where", ["git"], { encoding: "utf8", windowsHide: true }).split(/\r?\n/)[0].trim());
+  const launch = { NIGHT_SHIFT_LAUNCH: undefined, Path: undefined, PATH: [bin, gitDir].join(path.delimiter) };
+  for (let i = 1; i <= 2; i++) {
+    const r = c.run("start", ["--prompt", "x", "--worktree"], launch);
+    assert.match(r.stderr, /Task Scheduler: powershell: bad option/, `start ${i}: ${r.stderr}`);
+    const fresh = fs.readdirSync(root).find((f) => /^night-shift-repo-\d{8}$/.test(f));
+    assert.deepEqual(fs.readdirSync(path.join(root, fresh)).filter((f) => !["prompts", "next-prompt.md"].includes(f)), [], `start ${i}`);
+  }
+  assert.equal(fs.existsSync(nightDir(c.repo)), false);
+  assert.equal(worktreeCount(c.repo), 1);
+});
+
+// Session 32's final review: two repositories with one folder name share the default state folder on one day, and --state
+// may name another repository's folder; its prompt, resume.json and worktree are not this repository's.
+test("start refuses a state folder whose run belongs to another repository that still exists, and writes nothing", () => {
+  const c = pointerCase();
+  const root = path.dirname(c.state);
+  const made0 = path.join(root, "elsewhere", "repo");
+  fs.mkdirSync(made0, { recursive: true });
+  execFileSync("git", ["init", "-q"], { cwd: made0 });
+  const other = path.resolve(execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: made0, encoding: "utf8" }).trim());
+  const listing = (dir) => fs.readdirSync(dir).sort().map((f) => [f, fs.statSync(path.join(dir, f)).isFile() ? fs.readFileSync(path.join(dir, f), "utf8") : "/"]);
+  const before = listing(c.state);
+  const refused = (r) => {
+    assert.match(r.stderr, new RegExp(` holds a run of ${lit(c.repo)}, not of ${lit(other)}; pass --state with a run folder of this repository's, or set "stateDir" in its \\.claude/night-shift\\.json for a new one`));
+    assert.doesNotMatch(r.stderr, /launch refused/);
+  };
+  // --state on the other repository's folder, going on or with a new prompt.
+  refused(c.run("start", ["--repo", other, "--state", c.state]));
+  refused(c.run("start", ["--repo", other, "--state", c.state, "--prompt", "y"]));
+  assert.deepEqual(listing(c.state), before);
+  // The default folder, made by a start of this repository and then found by the other one.
+  assert.match(c.run("start", ["--prompt", "x"]).stderr, /launch refused \(test\)/);
+  const fresh = path.join(root, fs.readdirSync(root).find((f) => /^night-shift-repo-\d{8}$/.test(f)));
+  const made = listing(fresh);
+  refused(c.run("start", ["--repo", other, "--prompt", "y"]));
+  assert.deepEqual(listing(fresh), made);
+  // A run whose repository is gone (moved by the user) goes on.
+  const run = JSON.parse(fs.readFileSync(path.join(c.state, "run.json"), "utf8"));
+  fs.writeFileSync(path.join(c.state, "run.json"), JSON.stringify({ ...run, repo: path.join(root, "moved-away") }));
+  assert.match(c.run("start", ["--state", c.state]).stderr, /launch refused \(test\)/);
+});
+
 test("start uses the worktree git lists on night-shift, moves a branch HEAD contains up to HEAD, and keeps one with its own commits", async () => {
   // A worktree on night-shift somewhere else, behind the main tree: kept, and moved up.
   const moved = await treeStart(["--worktree"], ({ repo, root }) => {
@@ -3581,6 +3640,15 @@ test("a start that goes on keeps its run's tree whatever the flag and the config
   put({ tree, branch: "night-shift" });
   gitT(c.repo, "worktree", "remove", "--force", dir);
   refused(goOn(), new RegExp(`the worktree ${lit(tree)} is gone; put it back \\(git worktree add ${lit(tree)} night-shift\\), or start with a new prompt`));
+  // A tree that is there but is no longer the run's worktree (session 32's final review): a plain folder in its place, and
+  // the worktree put back on another branch.
+  fs.mkdirSync(dir);
+  refused(goOn(), new RegExp(`the worktree ${lit(tree)} is no longer a git worktree \\([^)]*\\); make it the night-shift worktree again, or start with a new prompt`));
+  fs.rmSync(dir, { recursive: true });
+  gitT(c.repo, "worktree", "add", "-q", dir, "night-shift");
+  gitT(dir, "switch", "-q", "-c", "other");
+  refused(goOn(), new RegExp(`the worktree ${lit(tree)} is on the branch other, not on night-shift; make it the night-shift worktree again, or start with a new prompt`));
+  assert.deepEqual([ran().tree, ran().branch], [tree, "night-shift"], "run.json as it was");
 });
 
 // ---------------------------------------------------------------- K6 task 4: a terminal in the worktree, status, the end card

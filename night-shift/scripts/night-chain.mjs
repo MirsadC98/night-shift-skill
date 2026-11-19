@@ -388,11 +388,13 @@ function treeChoice({ repo, state, opt, cfg, from, prev, fresh }) {
 // lines about it. A branch HEAD contains is moved up to HEAD, losing nothing: before a worktree is made, or by a
 // fast-forward in a kept one that is clean (a dirty one holds a resumed session's work). One with commits HEAD lacks
 // stays as it is. A start that fails after this removes the worktree it made and the branch it made (or puts a branch it
-// moved back), and puts back the state folder's files it writes before the launch (run.json, fable.json, limits.json), so
+// moved back), and puts back the state folder's files written before the launch fails (UNDONE_FILES), so
 // that the next start finds the folder as it was; from the exit handler it returns, which start drops once the chain is
 // launched. It never touches a worktree it did not make: the handler removes one only after git has made it.
 // copy: copyChoice's answer; its paths go into a worktree made now, and only then: never into a kept one, never back.
-const UNDONE_FILES = ["run.json", "fable.json", "limits.json"];
+// The launcher's files are among them: platform.schedule writes launch.cmd (Windows) or opens runner.err before a launch
+// can fail, and a folder left with either is no one's to the next start (foreignState).
+const UNDONE_FILES = ["run.json", "fable.json", "limits.json", "launch.cmd", "runner.err"];
 function makeTree(repo, wt, { dirty, state, copy = { copies: [], missing: [] } }) {
   const head = gitIn(repo, ["rev-parse", "HEAD"]);
   const mine = (gitIn(repo, ["symbolic-ref", "--quiet", "HEAD"]) || "").replace(/^refs\/heads\//, "") || "HEAD";
@@ -596,6 +598,12 @@ async function start(opt) {
   if (wide) fail(`${typeof opt.state === "string" ? "--state" : "stateDir"} ${state} ${wide}`);
   if (typeof opt.state === "string" && !fs.existsSync(path.join(state, "run.json"))) fail(`--state ${state} holds no earlier run`);
   if (foreignState(state)) fail(`${state} is not empty and holds no earlier run; pick another state folder`);
+  // Two repositories with one folder name share the default state folder on one day, and --state may name another
+  // repository's: its prompt, resume.json and worktree are not this one's. One whose repository is gone (moved) goes on.
+  const owner = fs.existsSync(path.join(state, "run.json")) ? parseOr(read(path.join(state, "run.json")), {}).repo : null;
+  if (typeof owner === "string" && owner && fs.existsSync(owner) && !sameDir(owner, repo)) {
+    fail(`${state} holds a run of ${owner}, not of ${repo}; pass --state with a run folder of this repository's, or set "stateDir" in its .claude/night-shift.json for a new one`);
+  }
   // K6: the tree, chosen before the state folder is made, so that a refused one leaves nothing inside it.
   const fresh = Boolean(planning) || Boolean(opt["prompt-file"]) || typeof opt.prompt === "string";
   const wt = treeChoice({ repo, state, opt, cfg, from, fresh, prev: fs.existsSync(path.join(state, "run.json")) ? parseOr(read(path.join(state, "run.json")), {}) : null });
@@ -1346,6 +1354,8 @@ async function waitChain(opt) {
     try { fs.watch(state, (ev, name) => { if (!name || name === "questions.md") look(); }).unref(); } catch {}
     setInterval(look, 2_000).unref();
     look();
+    // A question already there: its text is going out, and the exit follows it; nothing more is printed.
+    if (woken) return;
   }
 
   let pid = first.pid;

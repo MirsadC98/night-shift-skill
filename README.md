@@ -144,7 +144,7 @@ Put a `.claude/night-shift.json` in the target repository. Every key is optional
 }
 ```
 
-- `stateDir`: the folder for the chain's log, prompts and inbox. The default is `<temp>/night-shift-<repo>-{date}`, inside your own profile. A folder under `C:/temp` is shorter to type, but on a PC with other accounts those users can write there too, and the next session reads `inbox.md` and `next-prompt.md` from this folder as instructions. On a shared PC keep the default. A drive root, a folder directly below one, your home folder, the repository, the temp folder itself, `.git` and `~/.claude` are refused, and with `--worktree` a folder inside the worktree.
+- `stateDir`: the folder for the chain's log, prompts and inbox. The default is `<temp>/night-shift-<repo>-{date}`, inside your own profile. A folder under `C:/temp` is shorter to type, but on a PC with other accounts those users can write there too, and the next session reads `inbox.md` and `next-prompt.md` from this folder as instructions. On a shared PC keep the default. A drive root, a folder directly below one, your home folder, the repository, the temp folder itself, `.git` and `~/.claude` are refused, and with `--worktree` a folder inside the worktree. So is a folder whose run belongs to another repository that is still there: two repositories with one folder name share the default folder on the same day, so give one of them a `stateDir` of its own.
 - `report`: the night report. The default is `NIGHT_RUNS.md`.
 - `lessons`: the notes file where sessions keep lessons that outlast one session.
 - `mode`: `"opus"` (the default), `"fable"` or `"mythos"` (see "Modes").

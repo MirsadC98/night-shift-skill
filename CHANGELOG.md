@@ -38,7 +38,7 @@ Not on `main` yet: the commits after `2c14b8b`.
 
 ### Fixed
 
-- A session that writes STOP after `--until` ends the chain with its reason; a killed or crashed session counts against `--max-usd`; the report counts only real guard denials; many smaller fixes (`git log 2c14b8b..`).
+- A session that writes STOP after `--until` ends the chain with its reason; a killed or crashed session counts against `--max-usd`; the report counts only real guard denials; `start` refuses a state folder whose run belongs to another repository; many smaller fixes (`git log 2c14b8b..`).
 
 ## 0.2.0 (2026-11-16 to 2026-11-18, `c83fae8..2c14b8b`)
 
