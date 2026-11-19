@@ -12,7 +12,7 @@ npm test
 
 It runs the suite (`node --test "scripts/*.test.mjs"` in `night-shift/`, a few minutes) and then the guard's self-test (`node scripts/guard.mjs --self-test`). It installs nothing: there are no dependencies. The tests start a stand-in for the `claude` CLI, never the real one, so they cost no tokens and send nothing anywhere; they make their folders under the system's temp folder.
 
-Both must pass on Windows before a change is merged. CI runs them on every push and pull request (`.github/workflows/test.yml`): Windows is the gate; macOS and Linux run too but may fail, since the runner still uses Windows' own tools there.
+Both must pass on Windows before a change is merged. CI runs them on every push and pull request (`.github/workflows/test.yml`): Windows is the gate; macOS and Linux run too but may fail until they have passed there, since no real machine has run them yet.
 
 ## Rules for a change
 

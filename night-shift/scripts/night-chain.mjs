@@ -10,6 +10,8 @@
 //                               [--max-wait-hours 6] [--weekly-ceiling <share>] [--max-usd <dollars>]
 //                               [--mode opus|fable|mythos] [--attended [true|false]]
 //                               [--lang <code>] [--state <dir>] [--window]
+//   (--window, Windows only: the chain in a visible console instead of a hidden one; on macOS and Linux start runs
+//    it as a detached process, its error output in <state>/runner.err)
 //   (a goal needs no roadmap: the runner wraps it in references/goal.md's planning prompt, and session 1 writes a
 //    roadmap for it, approves it and hands its first piece on; a goal starts fresh as a prompt does)
 //   (--attended, "attended": true: the user is at hand but not watching. No session waits for them; each

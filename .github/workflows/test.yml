@@ -1,6 +1,6 @@
-# The suite and the guard's self-test. Windows is the gate: the runner, the watcher and their tests use Windows' own
-# tools (Task Scheduler, PowerShell, taskkill) today. macOS and Linux run the same commands but do not fail the
-# workflow until the code has a seam for what differs by system; their results show what is left to port.
+# The suite and the guard's self-test. Windows is the gate: the skill is built and run there. macOS and Linux run the
+# same commands behind scripts/platform.mjs, with the tests that need Windows itself skipped, but do not fail the
+# workflow until they have passed on real machines; their results show what is left to port.
 name: test
 
 on:

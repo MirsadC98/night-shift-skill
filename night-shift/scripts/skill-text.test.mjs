@@ -331,3 +331,23 @@ test("CONTRIBUTING.md and the issue forms ask for what a change and a report nee
   for (const f of forms) assert.match(read(`.github/ISSUE_TEMPLATE/${f}`), /^name: [^"'\s].{3,}\ndescription: .+\n/, f);
   assert.ok(fs.readFileSync(readmePath, "utf8").includes("(CONTRIBUTING.md)"), "README links CONTRIBUTING.md");
 });
+
+// C5 (U11): the README says what differs by system, that macOS and Linux are untested, and no longer that the skill
+// runs on Windows only; --help says --window is Windows' only; interactive.md's reload names both starts.
+test("the README's Systems part says what differs by system and that macOS and Linux are untested", { skip: !fs.existsSync(readmePath) && "no README beside this copy" }, () => {
+  const readme = fs.readFileSync(readmePath, "utf8").replace(/\r\n/g, "\n");
+  assert.doesNotMatch(readme, /\*\*Windows only\.\*\*/, "the old warning");
+  const part = readme.split(/^### Systems\n/m)[1]?.split(/^##/m)[0] ?? "";
+  assert.ok(readme.indexOf("\n### Systems\n") > readme.indexOf("\n## Requirements\n") && readme.indexOf("\n### Systems\n") < readme.indexOf("\n## Install\n"), "under Requirements");
+  for (const w of ["`scripts/platform.mjs`", "untested on real machines", "Task Scheduler", "`conhost --headless`", "detached process", "`<state>/runner.err`",
+    "`--window` is refused", "`caffeinate`", "`systemd-inhibit`", "`/proc`", "`ps`", "`KillUserProcesses=yes`", "`claude.exe`", "`/Volumes/<boot disk>`"]) {
+    assert.ok(part.includes(w), `Systems: ${w}`);
+  }
+  for (const at of [readme.slice(0, readme.indexOf("\n## Quick start\n")), readme.slice(readme.indexOf("\n## Requirements\n"), readme.indexOf("\n### Systems\n"))]) {
+    assert.match(at, /untested/, "the warnings and Requirements say so too");
+    assert.match(at, /"Systems"/, "and point at it");
+  }
+  const help = fs.readFileSync(path.join(root, "scripts", "night-chain.mjs"), "utf8").split(/^import /m)[0];
+  assert.match(help, /--window, Windows only/);
+  assert.match(interactive, /on macOS and Linux as a detached process/);
+});

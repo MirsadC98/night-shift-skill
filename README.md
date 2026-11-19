@@ -6,13 +6,13 @@ Give it a plan (a roadmap of pieces) or only a goal, and it works through it in 
 
 ## Read this first
 
-- **Windows only.** The runner starts itself through Task Scheduler in a hidden console (`conhost --headless`) and uses PowerShell, so it keeps running after your editor closes.
+- **Built and run on Windows; untested on macOS and Linux.** The runner starts itself apart from your editor and shell, so it keeps running after they close: through Task Scheduler in a hidden console on Windows, as a detached process on macOS and Linux. Those two have not run on a real machine yet ("Systems" says what differs).
 - **It runs unattended with no permission prompts.** Sessions run with `--permission-mode auto --permission-prompts none`, and `AskUserQuestion` and plan mode are turned off. `scripts/guard.mjs` is a hook that blocks dangerous commands (see below). It is a safety net, not a sandbox. Run it only on a repository you have committed and can restore. The runner's settings layer also sets `crossSessionInbound` to `refuse`: a message from another of your Claude Code sessions is not your word, so the chain's sessions take none (each still gets its own subagents' results).
 - **It costs tokens.** By default (mode `opus`) every session runs Opus at `xhigh`, subagents run Sonnet at `medium` and Haiku at `high`, and the chain has no end time. Use `--max-sessions` or `--until` if you want a limit. A session whose prompt opens with `MODEL: fable` runs on Fable at `high`; `references/mode-opus.md`, the rules every session of mode `opus` gets in its header, allows that for one hard piece only. Fable has its own weekly allowance, so the runner grants it only while less than 60 % of that allowance is used, and to at most two sessions in a chain while the share is unknown. A piece it refuses, or one the allowance cuts off, runs on Opus at `max`. Mythos, which Anthropic opens only to organizations it has verified, is the same model as Fable under another name and draws on the same weekly allowance: everything this page says about Fable's allowance, its ceiling and its count holds for the two together, and `MODEL: mythos` works as `MODEL: fable` does. See "Modes" for the other modes.
 
 ## Quick start
 
-The setup takes about five minutes, on Windows with Node.js 22 or later, git and the Claude Code CLI ("Requirements" has the details); the chain then runs as long as its pieces take.
+The setup takes about five minutes, on Windows (or, untested, macOS and Linux) with Node.js 22 or later, git and the Claude Code CLI ("Requirements" has the details); the chain then runs as long as its pieces take.
 
 1. Install the skill outside the repositories it will work on, where the guard protects it ("Install" has the plugin route too):
 
@@ -47,10 +47,19 @@ The setup takes about five minutes, on Windows with Node.js 22 or later, git and
 
 ## Requirements
 
-- Windows 10 or 11
+- Windows 10 or 11; macOS and Linux are untested ("Systems" below)
 - Node.js 22 or later; nothing to install from npm, the skill uses Node's built-ins only
 - The Claude Code CLI, installed globally with npm or with the native installer (`~/.local/bin/claude.exe`; on macOS and Linux `claude` beside `node`, in `~/.local/bin`, or in Homebrew's `/opt/homebrew/bin` or `/usr/local/bin`). The runner looks only in those places, not on `PATH`; for any other location, set `NIGHT_SHIFT_CLAUDE` to the path of the CLI.
 - git; the target repository must have no uncommitted changes before a start
+
+### Systems
+
+What differs by system lives in one module, `scripts/platform.mjs`. Windows is where the skill is built and run every night; macOS and Linux are untested on real machines until CI has run there.
+
+- **Windows.** `start` registers a Task Scheduler task that runs the chain in a hidden console (`conhost --headless`; `--window` keeps a visible one). PowerShell keeps the machine awake while the runner lives and tells what a process is; `taskkill` ends a process tree.
+- **macOS and Linux.** `start` runs the chain as a detached process in a session of its own, with no terminal, so a closed shell or editor does not end it. Its error output goes to `<state>/runner.err`, which keeps what Node prints if the runner fails before its log opens; `--window` is refused (`tail -f <state>/chain.log` shows the same). `caffeinate` (macOS) or `systemd-inhibit` (Linux) keeps the machine awake while the runner lives; without it the chain still runs. A process is read from `/proc` on Linux and through `ps` on macOS. On Linux with systemd-logind's `KillUserProcesses=yes`, logging out ends the session's processes, a detached runner among them: stay logged in while the chain runs.
+- **The CLI** is `claude.exe` on Windows and `claude` elsewhere, looked for in the places "Requirements" names.
+- **Paths.** The guard compares paths as each system's file system does ("The guard" has the rules), and follows a link only for the folders it protects by name (`~/.claude` or the folder `CLAUDE_CONFIG_DIR` names, the run's skill folder, `CLAUDE_CODE_PLUGIN_CACHE_DIR`'s folder): any other link is read by the spelling a command uses (on macOS `/Volumes/<boot disk>` is one).
 
 ## Install
 
@@ -238,7 +247,7 @@ node scripts/guard.mjs --self-test
 
 In a clone of this repository, `npm test` at its root runs both. The tests use a temporary home folder and launch nothing through Task Scheduler.
 
-On GitHub, `.github/workflows/test.yml` runs both on every push and pull request. On Windows they must pass, on Node 22 and on the newest LTS. On macOS and Linux they run but may fail without failing the workflow: the runner, the watcher and their tests use Windows' own tools (Task Scheduler, PowerShell, `taskkill`) today, and those systems are untested on real machines.
+On GitHub, `.github/workflows/test.yml` runs both on every push and pull request. On Windows they must pass, on Node 22 and on the newest LTS. On macOS and Linux they run but may fail without failing the workflow until they have passed there: those systems are untested on real machines. The guard's tests judge their Windows-shaped cases by Windows' rules on every system, and a test that needs Windows itself (PowerShell and `taskkill`, `TEMP` with an 8.3 name, a path spelled with backslashes) skips elsewhere and says why.
 
 To change the code, read [CONTRIBUTING.md](CONTRIBUTING.md): what a pull request keeps (no dependencies, English and LF line endings, no part of the guard loosened without a test). A bug report goes through the issue form, which asks for `--version` and `doctor`'s output.
 
