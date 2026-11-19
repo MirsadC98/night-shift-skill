@@ -1442,6 +1442,14 @@ test("off Windows a worktree run's project rules hold for the main tree's path, 
   assert.equal(pbash(`echo x > ${worktree.toUpperCase()}/private/a.txt`, LINUX, e), null);
   assert.equal(pbash(`echo x > ${worktree.toUpperCase()}/private/a.txt`, MAC, e), "the main tree's private folder");
   assert.equal(pwrite(`${worktree}/exact/a.txt`, LINUX, e), null);
+  // macOS reads some paths in a shorter form (/System/Volumes/Data/x is /x, /private/var is /var): a rule that names
+  // the main tree as the runner wrote it still holds for a worktree written in the long form (the first CI run on
+  // macOS, whose temp folder is under /private/var, found Write let through).
+  const long = `/System/Volumes/Data${worktree}`;
+  assert.equal(pwrite(`${long}/Exact/a.txt`, MAC, { ...e, NIGHT_SHIFT_REPO: long }), "in its own case");
+  assert.equal(pwrite(`${long}/src/../Exact/a.txt`, MAC, { ...e, NIGHT_SHIFT_REPO: long }), "in its own case");
+  // A folder whose name only starts with the worktree's is not read as the main tree: the rule is not what answers.
+  assert.notEqual(pwrite(`${long}x/Exact/a.txt`, MAC, { ...e, NIGHT_SHIFT_REPO: long }), "in its own case");
 });
 
 test("on Linux the repository is the folder in its own case; on macOS any case of it is the repository", () => {

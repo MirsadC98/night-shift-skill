@@ -1362,6 +1362,17 @@ function asMainTree(cmd, env) {
   return out === cmd ? null : out;
 }
 
+// A forward-slash path with . and .. resolved and nothing else changed: its letters, its case and its root stay.
+function unDot(p) {
+  const out = [];
+  for (const seg of p.split("/")) {
+    if (!seg || seg === ".") continue;
+    if (seg === "..") out.pop();
+    else out.push(seg);
+  }
+  return (p.startsWith("/") ? "/" : "") + out.join("/");
+}
+
 // opts.platform: the system whose path rules judge the call (platform.mjs), the live one when none is given.
 export function decide(input, env = process.env, opts = {}) {
   const outer = P;
@@ -1389,6 +1400,13 @@ function decideOn(input, env, opts) {
       if (P.fold(lined).startsWith(repo + "/")) {
         forms.push(lined.slice(repo.length + 1));
         if (main) forms.push(`${String(env.NIGHT_SHIFT_MAIN_TREE).replace(/\\/g, "/").replace(/\/+$/, "")}/${lined.slice(repo.length + 1)}`);
+      }
+      // The same in the letters the runner gave both trees, . and .. resolved: where the system reads a path in a
+      // shorter form (macOS: /private/var is /var), the forms above no longer start as the main tree's path is written.
+      if (main) {
+        const fwd = (s) => String(s).trim().replace(/\\/g, "/").replace(/\/+$/, "");
+        const plain = unDot(lined), wt = fwd(env.NIGHT_SHIFT_REPO);
+        if (P.fold(plain).startsWith(P.fold(wt) + "/")) forms.push(`${fwd(env.NIGHT_SHIFT_MAIN_TREE)}/${plain.slice(wt.length + 1)}`);
       }
     }
     // lastIndex goes back to 0 for each form: a rule with the g or y flag keeps its place between tests.

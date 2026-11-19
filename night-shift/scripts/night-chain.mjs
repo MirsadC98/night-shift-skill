@@ -1378,7 +1378,12 @@ async function waitChain(opt) {
     let next = pointerOr(repo);
     if (!next || !runner(pid)(next)) {
       const event = lastRunnerEvent(state);
-      if (event === "chain ends: ") return over();
+      if (event === "chain ends: ") {
+        // A runner that took over and ended between two looks at the old one (off Windows the look is a poll): the
+        // ended chain's pointer still names it.
+        if (pid && next?.pid && next.pid !== pid && next.state && same(next.state)) console.log(T.cli.handedOver(pid, next.pid));
+        return over();
+      }
       const handover = event.startsWith("runner ");
       next = handover
         // A reload starts the next runner before this one exits; it may not have written the pointer yet.

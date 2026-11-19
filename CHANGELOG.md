@@ -4,7 +4,7 @@ What each version brought, newest first. The code knows its version (`scripts/ve
 
 ## 0.3.0 (unreleased)
 
-Not on `main` yet: the commits after `2c14b8b`.
+The commits after `2c14b8b`; no tag and no release yet.
 
 ### Added
 
@@ -41,6 +41,7 @@ Not on `main` yet: the commits after `2c14b8b`.
 
 ### Fixed
 
+- macOS: in a worktree run, a project rule that names the main tree's full path now holds for Write and Edit when the system reads the path in a shorter form (`/private/var` as `/var`). `wait` off Windows names a hand-over to a runner that ended before `wait` looked again. Both found by the first CI run on macOS and Linux.
 - A session that writes STOP after `--until` ends the chain with its reason; a killed or crashed session counts against `--max-usd`; the report counts only real guard denials; `start` refuses a state folder whose run belongs to another repository, and `doctor` names one; many smaller fixes (`git log 2c14b8b..`).
 
 ## 0.2.0 (2026-11-16 to 2026-11-18, `c2f071d..2c14b8b`)
