@@ -72,6 +72,15 @@ test("the goal's planning prompt has a handover's shape and plans, reviews, appr
   assert.doesNotMatch(goal.split("\n")[0], /^(MODEL|EFFORT|STOP):/);
   for (const w of ["out of scope", "one fresh reviewer subagent", "Approved: night delegate (night-shift, <date>)", "nothing beyond it", "piece 1"]) assert.ok(goal.includes(w), w);
 });
+// K5 (2026-11-19): the chat is told when a chain costs more than it gives, with the numbers the analysis measured (B3).
+test("interactive.md says when not to chain, with what each session's fresh start costs", () => {
+  const part = interactive.replace(/\r\n/g, "\n").split(/^## When not to chain\n/m)[1]?.split(/^## /m)[0];
+  assert.ok(part, "a part headed ## When not to chain");
+  assert.ok(interactive.indexOf("## When not to chain") < interactive.indexOf("## Starting, checking, stopping"), "before the start's steps");
+  // "as asked": the part never lets the chat refuse a start (the rule above the start's steps: ask nothing once told to start).
+  for (const w of ["one piece", "done in the chat", "38.4k tokens", "15 %", "`--goal`", "planning session", "start it as asked"]) assert.ok(part.includes(w), w);
+  assert.ok(part.trim().split("\n").length <= 3, "short");
+});
 test("the report's fixed words are still in the skill", () => {
   for (const w of ["**Waits for you**", "- New:", "- Still waiting (session <nn>):", "**Remaining:** <n> sessions", "## Rules", "## State", "## This piece", "## Lessons for this piece"]) assert.ok(skill.includes(w), w);
 });

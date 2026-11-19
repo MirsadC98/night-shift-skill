@@ -2,6 +2,10 @@
 
 For an interactive session (the user's chat), not for a night session. Paths are relative to this skill's folder, the one that holds `SKILL.md` (a session finds it in `$NIGHT_SHIFT_SKILL`; the header names it too).
 
+## When not to chain
+
+A job of one piece (a fix, a review, a small feature) is done in the chat that asked for it. Each session of a chain starts fresh: it writes its fixed context again, about 38.4k tokens that every one of its calls then reads (the fixed part is about 15 % of a session's coordinator cost), and it ends with a night report and a handover that a chat does not need; `--goal` adds a planning session with its reviewer before the work begins. A chain pays off when the job has several pieces or has to go on while the user is away. When the user asks for a chain for a job of one piece, start it as asked, and say in the start message what the chain adds over the chat.
+
 ## Starting, checking, stopping
 
 **Ask nothing once the user says to start a run**; the user wants no questions after saying so, since a question before the start left the chain waiting while the user thought it ran. An open choice, such as whether the chain may use the desktop or how far it goes, is decided from the recorded preferences (the project's last chain, its plan, memory), recorded with the work, started, and named in the start message. The user changes it afterwards through `inbox.md` or `stop`.
