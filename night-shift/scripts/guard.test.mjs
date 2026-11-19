@@ -279,6 +279,22 @@ test("the runner's files and the state folder cannot be deleted", () => {
   assert.match(bash("rm C:/work/repo/.claude/night-shift.json"), /refusing a delete of the project's night-shift rules/);
 });
 
+test("the caps' count, the waiter's marks and the user's stop are the runner's own files too; what a session writes is not", () => {
+  const edit = (file_path) => decide({ tool_name: "Edit", tool_input: { file_path } }, env);
+  for (const f of ["limits.json", "wait.json", "STOP-REQUEST", "stop-request"]) {
+    const at = `C:/temp/x-night/${f}`;
+    for (const r of [write(at), edit(at), bash(`echo {} > ${at}`), bash(`sed -i s/1/0/ ${at}`)])
+      assert.match(r ?? "", /the runner's own files in the state folder/, f);
+    assert.match(bash(`rm -f ${at}`) ?? "", /refusing a delete of the runner's own files/, f);
+  }
+  for (const f of ["questions.md", "inbox.md", "next-prompt.md", "prompts/21-inbox.md"]) {
+    const at = `C:/temp/x-night/${f}`;
+    assert.equal(write(at), null, f);
+    assert.equal(edit(at), null, f);
+    assert.equal(bash(`echo x >> ${at}`), null, f);
+  }
+});
+
 test("the hook answers deny when it cannot read its input or throws", () => {
   const GUARD = fileURLToPath(new URL("./guard.mjs", import.meta.url));
   for (const input of ["{ not json", "null"]) {
@@ -711,7 +727,8 @@ test("a git config write that moves where a fetch or push goes is a change to th
     "git config --file .git/config remote.origin.url x", "git -C sub config remote.origin.url x", "git config -- remote.origin.url x",
     "git config --rename-section zz url.https://example.com/", "git config --rename-section remote.origin remote.old",
     "git config --remove-section remote.origin", "git config remove-section url.x", "git config --unse remote.origin.pushurl",
-    "git -c url.https://example.com/.insteadOf=https://github.com/ push", "git -c remote.origin.pushurl=x push origin main", "git --config-env=remote.origin.url=V push"])
+    "git -c url.https://example.com/.insteadOf=https://github.com/ push", "git -c remote.origin.pushurl=x push origin main", "git --config-env=remote.origin.url=V push",
+    "git config --unset-all remote.origin.url"])
     assert.match(git(c) ?? "", /remotes needs the user/, c);
   for (const c of ["git config --get remote.origin.url", "git config remote.origin.url", "git config --get-regexp '^url[.]'", "git config get remote.origin.pushurl",
     "git config --get-urlmatch http https://example.com", "git config branch.night.remote origin", "git config --list", "git -c user.name=x push origin night",
@@ -722,10 +739,12 @@ test("a git config write that moves where a fetch or push goes is a change to th
 test("a push to a URL instead of a remote's name is refused: the place a push goes is the user's", () => {
   for (const c of ["git push https://example.com/o/r.git HEAD:main", "git push git@example.com:o/r.git main", "git push --repo=https://example.com/o/r.git",
     "git push --repo https://example.com/o/r.git", "git push file:///c/temp/x main", "git push -u ssh://git@example.com/o/r night", "git push -- https://example.com/o/r.git night",
-    "git push example.com:o/r.git main", "git push --repo=host:o/r.git", "git push --rep host:o/r.git", "git push -o ci.skip https://example.com/o/r.git night"])
+    "git push example.com:o/r.git main", "git push --repo=host:o/r.git", "git push --rep host:o/r.git", "git push -o ci.skip https://example.com/o/r.git night",
+    "git push -uo ci:skip https://example.com/x.git night", "git push -uoci:skip https://example.com/x.git night"])
     assert.match(git(c) ?? "", /URL/, c);
   for (const c of ["git push origin HEAD:refs/heads/night", "git push -u origin night", "git push origin main:main", "git push", "git push ../bare night", "git push origin 'HEAD@{1}:night'",
-    "git push origin night@2:night", "git push -o ci.skip origin night", "git push --push-option ci@x:y origin night", "git push C:/temp/bare night", "git push -- origin night"])
+    "git push origin night@2:night", "git push -o ci.skip origin night", "git push --push-option ci@x:y origin night", "git push C:/temp/bare night", "git push -- origin night",
+    "git push -uo ci:skip origin night", "git push -qo ci:skip -u origin night", "git push -uoci:skip origin night"])
     assert.equal(git(c), null, c);
 });
 
@@ -740,8 +759,11 @@ import('./guard.mjs').then(({ decide }) => {
 });"`;
   assert.equal(bash(probe), null);
   for (const c of [`node -p "process.env.A + ':' + 'rm -rf x'"`, `node -e "f('rm -rf C:/Users/u/x')"`, `node --eval "f('rm -rf C:/Users/u/x')"`,
-    `node --print="f('rm -rf C:/Users/u/x')"`, `node -pe "'rm -rf a:b'"`, `C:/tools/node.exe -e "f('rm -rf C:/Users/u/x')"`, `node --input-type=module -e "f('rm -rf C:/x')"`])
+    `node --print="f('rm -rf C:/Users/u/x')"`, `node -pe "'rm -rf a:b'"`, `C:/tools/node.exe -e "f('rm -rf C:/Users/u/x')"`, `node --input-type=module -e "f('rm -rf C:/x')"`,
+    `node -ep "f('rm -rf C:/Users/u/x')"`, `node --eval="f('rm -rf C:/Users/u/x')"`])
     assert.equal(bash(c), null, c);
+  // An option with a value before the script ends the search (decisions, session 12): the script is read, a false refusal kept on purpose.
+  assert.ok(bash(`node -r x.js -e "'rm -rf a:b'"`));
   // What the shell does around the script is still read: a substitution in it, a redirect, a pipe, the next command, words after it.
   for (const c of [`node -e "x" > C:/Users/u/.claude/settings.json`, `node -e "x" && rm -rf C:/Users/u/Documents`, `node -e "$(rm -rf /c/Users/u/Documents)"`,
     `node -p "1" | tee C:/temp/x-night/run.json`, `node -e "x" rm -rf C:/Users/u/Documents`, `bash -c 'node -e "x"; rm -rf ~/Documents'`, `node -e "x" -- rm -rf C:/Users/u/Documents`,

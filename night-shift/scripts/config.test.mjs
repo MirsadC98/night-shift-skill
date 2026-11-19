@@ -139,6 +139,36 @@ test("telegramInbox lives in the global file only: true or false there, refused 
   assert.deepEqual(errors, [`"telegramInbox" belongs in the user's own ${globalConfigFile()}, not in a project's file`]);
 });
 test("a missing global file is no error", () => assert.deepEqual(readGlobalConfig(emptyHome()), { config: {}, errors: [] }));
+test("mergedConfig refuses a project's telegramInbox with the project's file named, and takes its attended", () => {
+  const home = tmpHome({ telegramInbox: true }), repo = repoWith({ telegramInbox: true, attended: true });
+  const m = mergedConfig(repo, home);
+  assert.deepEqual(m.errors, [`${path.join(repo, ".claude", "night-shift.json")}: "telegramInbox" belongs in the user's own ${globalConfigFile()}, not in a project's file`]);
+  assert.deepEqual(m.config, { telegramInbox: true, attended: true });
+  assert.equal(m.from.telegramInbox, globalConfigFile(home));
+});
+test("a project's file may lower the four allowance caps, never raise them: a raise is its error, naming the flag", () => {
+  const pf = (repo) => path.join(repo, ".claude", "night-shift.json");
+  // Lower and equal values are taken, a ratio and a percentage compared as one share.
+  for (const [g, p] of [[{ maxUsd: 20 }, { maxUsd: 5 }], [{ maxUsd: 20 }, { maxUsd: 20 }], [{ fableCeiling: 0.6 }, { fableCeiling: 50 }], [{ fableCeiling: 60 }, { fableCeiling: 0.6 }],
+    [{}, { fableCeiling: 0.4 }], [{}, { fableSessions: 2 }], [{ fableSessions: 3 }, { fableSessions: 0 }], [{ weeklyCeiling: 0.8 }, { weeklyCeiling: 70 }],
+    [{}, { maxUsd: 100000 }], [{}, { weeklyCeiling: 1 }]]) {
+    const m = mergedConfig(repoWith(p), tmpHome(g));
+    assert.deepEqual(m.errors, [], JSON.stringify([g, p]));
+    assert.deepEqual(m.config, { ...g, ...p });
+  }
+  const cases = [
+    [{ maxUsd: 20 }, { maxUsd: 100000 }, '"maxUsd" 100000 is above the 20 that applies without this file (the user\'s own file); a project\'s file may lower it, not raise it: pass --max-usd 100000 to start instead'],
+    [{}, { fableCeiling: 0.8 }, '"fableCeiling" 0.8 is above the 0.6 that applies without this file (the default); a project\'s file may lower it, not raise it: pass --fable-ceiling 0.8 to start instead'],
+    [{}, { fableSessions: 3 }, '"fableSessions" 3 is above the 2 that applies without this file (the default); a project\'s file may lower it, not raise it: pass --fable-sessions 3 to start instead'],
+    [{ weeklyCeiling: 80 }, { weeklyCeiling: 0.9 }, '"weeklyCeiling" 0.9 is above the 80 that applies without this file (the user\'s own file); a project\'s file may lower it, not raise it: pass --weekly-ceiling 0.9 to start instead'],
+  ];
+  for (const [g, p, msg] of cases) {
+    const repo = repoWith({ ...p, effort: "high" }), m = mergedConfig(repo, tmpHome(g));
+    assert.deepEqual(m.errors, [`${pf(repo)}: ${msg}`]);
+    // The raise is not applied: a reader that went on would get what applies without the file.
+    assert.deepEqual(m.config, { ...g, effort: "high" });
+  }
+});
 test("the project file wins over the global one, key by key", () => {
   const home = tmpHome({ lang: "xx", effort: "high" }), repo = repoWith({ effort: "max" });
   assert.deepEqual(mergedConfig(repo, home).config, { lang: "xx", effort: "max" });

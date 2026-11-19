@@ -18,8 +18,9 @@ import { norm, readProjectConfig, stateDirProblem, tempRoot, isMain, mcpToolName
 const under = (p, root) => root && (p === root || p.startsWith(root + "/"));
 
 // What the runner keeps in the state folder: the settings file that loads this guard, the file
-// that names the program each session starts, and its own logs and marks.
-const RUNNER_FILES = /^(night-settings\.json|run\.json|launch\.cmd|resume\.json|chain\.log|reload-request|watch\.pid|notified\.json|fable\.json|session-\d+\.(jsonl|err))$/;
+// that names the program each session starts, its own logs and marks, the caps' count (limits.json),
+// what the user's waiter has reported (wait.json) and the user's stop (STOP-REQUEST; norm lowercases the path).
+const RUNNER_FILES = /^(night-settings\.json|run\.json|launch\.cmd|resume\.json|chain\.log|reload-request|watch\.pid|notified\.json|fable\.json|limits\.json|wait\.json|stop-request|session-\d+\.(jsonl|err))$/;
 
 // ~/.claude may be a link (a junction to a folder elsewhere): a shell write can then name the files the
 // guard protects there by the link's target, a spelling norm() cannot know (on 2026-11-18 `echo x >
@@ -451,7 +452,8 @@ function pushRepos(a) {
       const repo = Boolean(m) && m[1].length >= 3 && "repo".startsWith(m[1]);
       if (repo && m[2] != null) out.push(m[2]);
       else if (repo) out.push(a[++i] ?? "");
-      else if (w === "-o" || (m && m[2] == null && m[1].length >= 6 && "push-option".startsWith(m[1]))) i++;
+      // -o takes the next word as its value, also at the end of a cluster (-uo ci:skip); -uoci:skip holds its own.
+      else if (/^-[^-o]*o$/.test(w) || (m && m[2] == null && m[1].length >= 6 && "push-option".startsWith(m[1]))) i++;
       continue;
     }
     if (positional++ === 0) out.push(w);
@@ -1385,6 +1387,8 @@ function selfTest() {
     [write("C:/work/repo/.git/config"), true],
     // The 2026-11-15 review: the runner's own files, a path through .., a delete after a cd, quoted and joined flags.
     [write("C:/temp/x-night/night-settings.json"), true], [write("C:/temp/x-night/run.json"), true],
+    [write("C:/temp/x-night/limits.json"), true], [bash("echo {} > C:/temp/x-night/wait.json"), true], [bash("rm -f C:/temp/x-night/STOP-REQUEST"), true],
+    [write("C:/temp/x-night/questions.md"), false], [bash("git push -uo ci:skip origin night"), false],
     [write("C:/temp/../Users/u/.claude/skills/night-shift/scripts/guard.mjs"), true], [write("C:/work/repo/.claude/settings.json."), true],
     [bash("cd /c/Users/u && rm -rf Documents"), true], [bash("cd app && rm -rf dist"), false],
     [bash(`cd "/c/Users/u/R\u00e9sum\u00e9s/My Game/.." && rm -rf Documents`), true], [bash(`cd "/c/temp/R\u00e9sum\u00e9s/My Game/.." && rm -rf old`), false],

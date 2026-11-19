@@ -124,7 +124,7 @@ Each file is at most 8 KB (UTF-8 bytes) and is read again at every session start
 
 ### Global settings
 
-`~/.claude/night-shift/config.json` holds defaults for every project. It takes ten keys: `mode`, `lang`, `effort`, `fableCeiling`, `fableSessions`, `maxWaitHours`, `weeklyCeiling`, `maxUsd`, `attended` and `telegramInbox` (only here: a project file that holds it stops `start`). Any other key, bad JSON or a value of the wrong type stops `start` and names the file. A setting comes from the first of these that has it: the command-line flag, the project file `.claude/night-shift.json`, the global file, the default.
+`~/.claude/night-shift/config.json` holds defaults for every project. It takes ten keys: `mode`, `lang`, `effort`, `fableCeiling`, `fableSessions`, `maxWaitHours`, `weeklyCeiling`, `maxUsd`, `attended` and `telegramInbox` (only here: a project file that holds it stops `start`). Any other key, bad JSON or a value of the wrong type stops `start` and names the file. A setting comes from the first of these that has it: the command-line flag, the project file `.claude/night-shift.json`, the global file, the default. The four caps on what a chain spends, `fableCeiling`, `fableSessions`, `weeklyCeiling` and `maxUsd`, are the exception: a repository's file may come from someone else, so it may lower what applies without it (your global value, else the default) but not raise it. A raise stops `start`, naming the key, both values and the flag to pass instead (`--max-usd 100`): a flag is your own word and wins.
 
 ## The guard
 
@@ -134,7 +134,7 @@ Each file is at most 8 KB (UTF-8 bytes) and is read again at every session start
 - changes to remotes (also as `git config` of a remote's `url` or `pushurl` or of `url.<base>.insteadOf`, and a push to a URL instead of a remote's name), to global git config and to git settings that run a command, and a git command started with another home folder;
 - publishing: `npm publish`, `gh release`, GitHub API writes and store uploads;
 - deletes and moves outside the repository and temp folders, recursive or not, with the target read from the folder the command stands in (`cd elsewhere && rm -rf x` is refused);
-- file writes (Write, Edit) outside the repository and temp folders, and writes to the skill itself, Claude settings, your global `CLAUDE.md`, the project's `.claude/night-shift.json`, the rule files, `~/.claude/night-shift/`, `.git`, and the runner's own files in the state folder (`night-settings.json`, `run.json`, `launch.cmd`, the logs); the same files are protected from a shell redirect and from the common commands that write a file in place (`sed -i`, `tee`, `cp`, `Set-Content` and the like);
+- file writes (Write, Edit) outside the repository and temp folders, and writes to the skill itself, Claude settings, your global `CLAUDE.md`, the project's `.claude/night-shift.json`, the rule files, `~/.claude/night-shift/`, `.git`, and the runner's own files in the state folder (`night-settings.json`, `run.json`, `launch.cmd`, `fable.json`, the caps' count `limits.json`, the waiter's `wait.json`, your `STOP-REQUEST`, the logs); the same files are protected from a shell redirect and from the common commands that write a file in place (`sed -i`, `tee`, `cp`, `Set-Content` and the like);
 - registry writes, system-level commands, and killing `node`, `claude`, the editor or the shell;
 - MCP tools, unless the project lists their server (`mcp` above);
 - anything your project's `deny` rules match, in a command or in the path of a file write.
