@@ -1525,7 +1525,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
 });
 
 test("psQuote doubles every character PowerShell reads as a single quote", async () => {
-  const { psQuote } = await import("./night-chain.mjs");
+  const { psQuote } = await import("./platform.mjs");
   assert.equal(psQuote("C:\temp\it's"), "'C:\temp\it''s'");
   assert.equal(psQuote("x\u2019; calc; \u2018y"), "'x\u2019\u2019; calc; \u2018\u2018y'");
   assert.equal(psQuote("a\u201Ab\u201Bc"), "'a\u201A\u201Ab\u201B\u201Bc'");

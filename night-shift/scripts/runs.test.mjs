@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { platformFor } from "./platform.mjs";
 
 // Every pointer these tests write sits in a throwaway Claude folder, never the user's (claudeHome reads the variable per call).
 const claude = fs.mkdtempSync(path.join(os.tmpdir(), "ns-runs-"));
@@ -31,6 +32,8 @@ const fakeRunner = (dir) => {
   return spawn(process.execPath, [file], { stdio: "ignore", windowsHide: true });
 };
 const exited = (p) => new Promise((r) => p.on("exit", r));
+// The system's processes as a test sets them (platform.mjs): a live runner by default, whose kill does nothing.
+const fakePlatform = (over) => ({ ...platformFor(), alive: () => true, commandLine: () => "node night-chain.mjs run", killTree: () => {}, ...over });
 
 test("the pointer lives in the Claude folder's night-shift/runs, one file per repository", () => {
   const { repo } = scene();
@@ -126,4 +129,37 @@ test("stopRun with now goes on to the kill when the answer before it fails", asy
     await until(() => !alive(runner.pid), 5_000, "the runner to be killed");
     assert.equal(readPointer(repo).reason, "stopped now by the user");
   } finally { runner.kill(); }
+});
+
+test("stopRun with now kills nothing and says unsure when what the pid is cannot be told", async () => {
+  const { repo, state } = scene();
+  writePointer(repo, { pid: 424242, state, finished: false });
+  const killed = [];
+  let asked = false;
+  const platform = fakePlatform({ commandLine: () => null, killTree: (pid) => killed.push(pid) });
+  assert.deepEqual(await stopRun(repo, { now: true, state, platform, before: async () => { asked = true; } }), { outcome: "unsure", pid: 424242 });
+  assert.deepEqual(killed, []);
+  assert.equal(asked, false);
+  assert.equal(readPointer(repo).finished, false);
+  assert.ok(fs.existsSync(path.join(state, "STOP-REQUEST")));
+});
+
+test("stopRun with now says failed and puts the pointer back when the runner outlives the kill", async () => {
+  const { repo, state } = scene();
+  writePointer(repo, { pid: 424242, state, finished: false, startedAt: "test" });
+  const killed = [];
+  const platform = fakePlatform({ killTree: (pid) => killed.push(pid) });
+  assert.deepEqual(await stopRun(repo, { now: true, state, platform }), { outcome: "failed", pid: 424242 });
+  assert.deepEqual(killed, [424242]);
+  assert.deepEqual(readPointer(repo), { pid: 424242, state, finished: false, startedAt: "test" });
+});
+
+test("stopRun takes a pid whose command line names no runner for gone, and kills nothing", async () => {
+  const { repo, state } = scene();
+  writePointer(repo, { pid: 424242, state, finished: false });
+  const killed = [];
+  const platform = fakePlatform({ commandLine: () => "C:\\Windows\\notepad.exe", killTree: (pid) => killed.push(pid) });
+  assert.deepEqual(await stopRun(repo, { now: true, state, platform }), { outcome: "gone", pid: 424242 });
+  assert.deepEqual(killed, []);
+  assert.equal(readPointer(repo).reason, "its runner was already gone");
 });

@@ -4,6 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
+import { EventEmitter } from "node:events";
 import { platform, platformFor } from "./platform.mjs";
 
 const fail = (code) => () => { throw Object.assign(new Error(code), { code }); };
@@ -89,4 +90,72 @@ test("alive asks with signal 0, counts no pid as no process, and EPERM as alive 
   assert.equal(p(fail("EPERM")).alive(42), false);
   assert.equal(p(fail("EPERM")).alive(42, { denied: true }), true);
   assert.equal(platform.alive(process.pid), true);
+});
+
+// What a method ran: [file, args, options] for each call, and a fake child for spawn.
+const recorder = (answer = () => "") => {
+  const calls = [];
+  const child = new EventEmitter();
+  const p = platformFor("win32", {
+    execFileSync: (file, args, opts) => { calls.push([file, args, opts]); return answer(); },
+    spawn: (file, args, opts) => { calls.push([file, args, opts]); return child; },
+  });
+  return { p, calls, child };
+};
+
+test("commandLine asks PowerShell's CIM for the pid as a number, and is null when it cannot ask", () => {
+  const { p, calls } = recorder(() => "node night-chain.mjs run\r\n");
+  assert.equal(p.commandLine("12"), "node night-chain.mjs run\r\n");
+  assert.equal(p.commandLine("12; calc"), "node night-chain.mjs run\r\n");
+  assert.deepEqual(calls.map((c) => c[1].at(-1)), ['(Get-CimInstance Win32_Process -Filter "ProcessId=12").CommandLine',
+    '(Get-CimInstance Win32_Process -Filter "ProcessId=NaN").CommandLine']);
+  assert.deepEqual(calls[0].slice(0, 1).concat([calls[0][1].slice(0, 3), calls[0][2]]),
+    ["powershell", ["-NoProfile", "-NonInteractive", "-Command"], { encoding: "utf8", windowsHide: true }]);
+  assert.equal(recorder(() => { throw new Error("no powershell"); }).p.commandLine(12), null);
+});
+
+test("killTree runs taskkill on the whole tree and swallows its failure", () => {
+  const { p, calls } = recorder();
+  assert.equal(p.killTree(42), undefined);
+  assert.deepEqual(calls, [["taskkill", ["/T", "/F", "/PID", "42"], { stdio: "ignore", windowsHide: true }]]);
+  assert.doesNotThrow(() => recorder(() => { throw new Error("not found"); }).p.killTree(42));
+});
+
+test("keepAwake starts a hidden PowerShell that holds the system awake until the pid is gone, and returns it", () => {
+  const { p, calls, child } = recorder();
+  assert.equal(p.keepAwake(42), child);
+  const [file, args, opts] = calls[0];
+  assert.equal(file, "powershell");
+  assert.deepEqual(opts, { stdio: "ignore", windowsHide: true });
+  assert.match(args.at(-1), /SetThreadExecutionState\(\[uint32\]2147483649\); while \(Get-Process -Id 42 -ErrorAction SilentlyContinue\) \{ Start-Sleep -Seconds 60 \}$/);
+});
+
+test("waitExit resolves the PowerShell's exit code, \"woken\" on an abort, and rejects any other error", async () => {
+  const signal = new AbortController().signal;
+  const one = recorder();
+  const exit = one.p.waitExit(42, { signal, unless: "night-chain\\.mjs" });
+  const [file, args, opts] = one.calls[0];
+  assert.equal(file, "powershell");
+  assert.deepEqual(opts, { stdio: "ignore", windowsHide: true, signal });
+  assert.equal(args.at(-1), '$p = Get-Process -Id 42 -ErrorAction SilentlyContinue; if (-not $p) { exit 0 }; ' +
+    '$c = (Get-CimInstance Win32_Process -Filter "ProcessId=42").CommandLine; ' +
+    "if ($c -and $c -notmatch 'night-chain\\.mjs') { exit 3 }; $p.WaitForExit(); exit 0");
+  one.child.emit("exit", 3);
+  assert.equal(await exit, 3);
+  const two = recorder();
+  const woken = two.p.waitExit(42, { unless: "x" });
+  two.child.emit("error", Object.assign(new Error("aborted"), { name: "AbortError" }));
+  assert.equal(await woken, "woken");
+  const three = recorder();
+  const broken = three.p.waitExit(42, { unless: "x" });
+  three.child.emit("error", Object.assign(new Error("spawn powershell ENOENT"), { code: "ENOENT" }));
+  await assert.rejects(broken, /ENOENT/);
+});
+
+test("cliCandidates are claude.exe beside node, in npm's global folder and the native installer's", () => {
+  const p = platformFor("win32", { homedir: () => path.join(path.sep, "home", "u") });
+  const home = path.join(path.sep, "home", "u"), bin = path.join("node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe");
+  assert.equal(p.cliName, "claude.exe");
+  assert.deepEqual(p.cliCandidates(path.join(path.sep, "node")), [path.join(path.sep, "node", bin),
+    path.join(home, "AppData", "Roaming", "npm", bin), path.join(home, ".local", "bin", "claude.exe")]);
 });

@@ -1,5 +1,6 @@
 // What differs by system, in one place (C5): how the guard compares paths and which temp folders it lets a night
-// session write, and how the runner tells whether a process lives. Imports only node, since the guard loads it on
+// session write, and how the runner finds the CLI, watches, waits for and stops processes and keeps the machine
+// awake. Imports only node, since the guard loads it on
 // every call. platformFor(name, deps) builds the object for a system, and `platform` is this system's.
 // Every method is Windows' code under every name, apart from where that code itself asked for Windows (norm's Git Bash
 // /tmp, fsHome); macOS and Linux come behind it next. No environment variable picks the system: a project's settings
@@ -14,18 +15,31 @@
 //   tempRoots(home), sharedTemps       the guard's writable temp folders; the shared ones a state folder may not hold
 //   systemDirProblem(dir, { home, temp })  null, or why a normalized dir is where the system runs things from
 //   alive(pid, { denied })             whether a process lives; denied: what a process it may not signal counts as
+//   commandLine(pid)                   a process's command line: "" when it is gone, null when it could not be asked
+//   killTree(pid)                      ends a process and every process it started, errors swallowed
+//   keepAwake(pid)                     keeps the machine awake while pid lives; returns the helper, for its kill()
+//   waitExit(pid, { signal, unless })  0 once pid is gone, 3 when its command line does not match unless, "woken" on abort
+//   cliCandidates(nodeDir), cliName    where Claude Code's CLI is looked for, after NIGHT_SHIFT_CLAUDE, and its file's name
+//   psQuote(s)                         a PowerShell single-quoted string
 
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 const under = (p, root) => root && (p === root || p.startsWith(root + "/"));
 
+// A PowerShell single-quoted string. PowerShell ends one at ' and at the typographic quotes
+// ‘ ’ ‚ ‛ alike, so each is doubled: a state folder or a repository named with one must stay text.
+export const psQuote = (s) => `'${String(s).replace(/['‘’‚‛]/g, "$&$&")}'`;
+
 export function platformFor(name = process.platform, deps = {}) {
   const tmpdir = deps.tmpdir || os.tmpdir;
   const homedir = deps.homedir || os.homedir;
   const realpath = deps.realpath || fs.realpathSync.native;
   const kill = deps.kill || ((pid, signal) => process.kill(pid, signal));
+  const run = deps.execFileSync || execFileSync;
+  const start = deps.spawn || spawn;
 
   // The temp folder in long form. %TEMP% is often written as an 8.3 short name (C:\Users\JOHNSM~1\…),
   // which the guard refuses in any path, so the tool's own temp paths all come from this one spelling.
@@ -98,7 +112,47 @@ export function platformFor(name = process.platform, deps = {}) {
     try { kill(pid, 0); return true; } catch (e) { return denied && e.code === "EPERM"; }
   };
 
-  return { name, tempRoot, norm, foldsCase, samePath, fsHome, home, oddPath, tempRoots, sharedTemps, systemDirProblem, alive };
+  const commandLine = (pid) => {
+    try {
+      return run("powershell", ["-NoProfile", "-NonInteractive", "-Command",
+        `(Get-CimInstance Win32_Process -Filter "ProcessId=${Number(pid)}").CommandLine`], { encoding: "utf8", windowsHide: true });
+    } catch { return null; }
+  };
+
+  // taskkill /T ends the tree by parent process id, so a detached child (the watcher) goes with the runner's tree.
+  const killTree = (pid) => {
+    try { run("taskkill", ["/T", "/F", "/PID", String(pid)], { stdio: "ignore", windowsHide: true }); } catch {}
+  };
+
+  // A hidden PowerShell that holds the system awake (ES_CONTINUOUS | ES_SYSTEM_REQUIRED) and exits once pid is gone.
+  const keepAwake = (pid) => start("powershell", ["-NoProfile", "-NonInteractive", "-Command",
+    `$k=Add-Type -MemberDefinition '[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);' -Name K -Namespace NightShift -PassThru; ` +
+    `[void]$k::SetThreadExecutionState([uint32]2147483649); while (Get-Process -Id ${pid} -ErrorAction SilentlyContinue) { Start-Sleep -Seconds 60 }`],
+  { stdio: "ignore", windowsHide: true });
+
+  // No polling: a hidden PowerShell waits on the process handle. unless is a PowerShell regex: a live pid whose command
+  // line does not match it belongs to another program now (Windows reuses numbers), so what was waited for is gone.
+  // Aborting signal kills the PowerShell and resolves "woken"; any other error rejects.
+  const waitExit = (pid, { signal, unless } = {}) => new Promise((resolve, reject) => {
+    const ps = start("powershell", ["-NoProfile", "-NonInteractive", "-Command",
+      `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if (-not $p) { exit 0 }; ` +
+      `$c = (Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine; ` +
+      `if ($c -and $c -notmatch ${psQuote(unless)}) { exit 3 }; $p.WaitForExit(); exit 0`],
+    { stdio: "ignore", windowsHide: true, signal });
+    ps.on("error", (e) => (e.name === "AbortError" ? resolve("woken") : reject(e)));
+    ps.on("exit", resolve);
+  });
+
+  // Beside node (an npm install next to it), npm's global folder, and the native installer's.
+  const cliName = "claude.exe";
+  const cliCandidates = (nodeDir) => [
+    path.join(nodeDir, "node_modules", "@anthropic-ai", "claude-code", "bin", cliName),
+    path.join(homedir(), "AppData", "Roaming", "npm", "node_modules", "@anthropic-ai", "claude-code", "bin", cliName),
+    path.join(homedir(), ".local", "bin", cliName),
+  ];
+
+  return { name, tempRoot, norm, foldsCase, samePath, fsHome, home, oddPath, tempRoots, sharedTemps, systemDirProblem, alive,
+    commandLine, killTree, keepAwake, waitExit, cliName, cliCandidates, psQuote };
 }
 
 export const platform = platformFor();

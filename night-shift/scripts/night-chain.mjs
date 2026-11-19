@@ -218,13 +218,8 @@ const ruleLines = (found) => (found.length ? found : [{ none: true }])
 
 // Where start looks for the CLI, in order; doctor looks in the same places.
 function locateClaude() {
-  const candidates = [
-    process.env.NIGHT_SHIFT_CLAUDE,
-    path.join(path.dirname(NODE), "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe"),
-    path.join(os.homedir(), "AppData", "Roaming", "npm", "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe"),
-    path.join(os.homedir(), ".local", "bin", "claude.exe"),
-  ].filter(Boolean);
-  return { found: candidates.find((c) => fs.existsSync(c)), why: `claude.exe not found; set NIGHT_SHIFT_CLAUDE (tried ${candidates.join(", ")})` };
+  const candidates = [process.env.NIGHT_SHIFT_CLAUDE, ...platform.cliCandidates(path.dirname(NODE))].filter(Boolean);
+  return { found: candidates.find((c) => fs.existsSync(c)), why: `${platform.cliName} not found; set NIGHT_SHIFT_CLAUDE (tried ${candidates.join(", ")})` };
 }
 const findClaude = () => { const { found, why } = locateClaude(); return found || fail(why); };
 
@@ -260,10 +255,6 @@ export function cutOffSession(state) {
   return sessionId ? { nn, sessionId, ...(runs ? { model: runs[2] || runs[1].toLowerCase(), effort: runs[3] } : {}) } : null;
 }
 
-// A PowerShell single-quoted string. PowerShell ends one at ' and at the typographic quotes
-// ‘ ’ ‚ ‛ alike, so each is doubled: a state folder or a repository named with one must stay text.
-export const psQuote = (s) => `'${String(s).replace(/['‘’‚‛]/g, "$&$&")}'`;
-
 // Starts `run` for this state through the project's scheduled task and returns the task's name.
 // No trigger, so only start (or a runner handing over) runs it and a finished chain never comes
 // back on its own; no time limit (schtasks' default stops a task after 72 h) and no battery stop,
@@ -285,7 +276,7 @@ function scheduleRun(run, extra = []) {
   const [exe, argv] = run.window ? [launcher, argLine]
     : [path.join(process.env.SystemRoot || "C:\\Windows", "System32", "conhost.exe"), `--headless "${NODE}" "${SELF}" ${argLine}`];
   const task = `night-shift-${slug(run.repo)}`;
-  const q = psQuote;
+  const q = platform.psQuote;
   execFileSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference = 'Stop'; " +
     `$a = New-ScheduledTaskAction -Execute ${q(exe)} -Argument ${q(argv)}; ` +
     "$s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances Parallel; " +
@@ -544,11 +535,8 @@ async function runChain(opt) {
     if (!p || p.pid !== process.pid || p.finished) writePointer(repo, pointer);
   }, Number(process.env.NIGHT_SHIFT_HEAL_MS) || 30_000);
 
-  // Keep Windows awake while this process lives; the helper exits with it.
-  const awake = spawn("powershell", ["-NoProfile", "-NonInteractive", "-Command",
-    `$k=Add-Type -MemberDefinition '[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);' -Name K -Namespace NightShift -PassThru; ` +
-    `[void]$k::SetThreadExecutionState([uint32]2147483649); while (Get-Process -Id ${process.pid} -ErrorAction SilentlyContinue) { Start-Sleep -Seconds 60 }`],
-  { stdio: "ignore", windowsHide: true });
+  // Keep the machine awake while this process lives; the helper exits with it.
+  const awake = platform.keepAwake(process.pid);
   // Telegram reports come from a process of its own, so it can still report this one dying.
   const startWatcher = (announce) => spawn(NODE, [REPORT, "watch", "--state", state, "--pid", String(process.pid), ...(announce ? ["--announce"] : [])],
     { detached: true, stdio: "ignore", windowsHide: true }).unref();
@@ -615,11 +603,9 @@ async function runChain(opt) {
   const watcherPid = () => {
     const w = Number(read(path.join(state, "watch.pid")));
     if (!w || !alive(w)) return 0;
-    try {
-      const cmd = execFileSync("powershell", ["-NoProfile", "-NonInteractive", "-Command",
-        `(Get-CimInstance Win32_Process -Filter "ProcessId=${w}").CommandLine`], { encoding: "utf8", windowsHide: true }).toLowerCase();
-      return /night-report\.mjs"?\s+watch\b/.test(cmd) && cmd.includes(state.toLowerCase()) ? w : 0;
-    } catch { return 0; }
+    // A command line not known is no watcher's.
+    const cmd = (platform.commandLine(w) ?? "").toLowerCase();
+    return /night-report\.mjs"?\s+watch\b/.test(cmd) && cmd.includes(state.toLowerCase()) ? w : 0;
   };
   // reload: a fresh `run` of the code on disk takes the chain over, started through the scheduled
   // task like the first one, and this process ends. The watcher is replaced too, so no editor or
@@ -998,7 +984,7 @@ function runSession(run, session, plan, nn, resume, rules = "", mcp = ["--strict
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      try { execFileSync("taskkill", ["/T", "/F", "/PID", String(child.pid)], { stdio: "ignore", windowsHide: true }); } catch {}
+      platform.killTree(child.pid);
     }, run.sessionHours * 3_600_000);
     child.on("error", (e) => {
       clearTimeout(timer);
@@ -1035,7 +1021,7 @@ async function status(opt) {
 }
 
 // wait: for an interactive session that runs it in the background and tells the user when the
-// chain is over. No polling: a hidden PowerShell waits on the runner's process handle, and the
+// chain is over. No polling: the system waits on the runner's process (platform.mjs, waitExit), and the
 // pointer file's changes (fs.watch) bring the next runner of a reload. A usage-limit wait passes
 // inside the runner, so it does not wake this. Exit 0 when the chain ended (STOP, two failed
 // handovers, stop, a limit the user set), 2 when its runner died without an end line.
@@ -1044,15 +1030,7 @@ const pointerOr = (repo) => { try { return readPointer(repo); } catch { return n
 // Resolves with the PowerShell's exit code once the process is gone; 3: the pid now belongs to a
 // program that is no runner (Windows reused it), so the runner is gone too (not wait's own exit 3).
 // signal: aborting it kills the PowerShell and resolves "woken", so a wait woken by a question leaves none behind.
-const exitOf = (pid, signal) => new Promise((resolve, reject) => {
-  const ps = spawn("powershell", ["-NoProfile", "-NonInteractive", "-Command",
-    `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if (-not $p) { exit 0 }; ` +
-    `$c = (Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine; ` +
-    "if ($c -and $c -notmatch 'night-chain\\.mjs') { exit 3 }; $p.WaitForExit(); exit 0"],
-  { stdio: "ignore", windowsHide: true, signal });
-  ps.on("error", (e) => (e.name === "AbortError" ? resolve("woken") : reject(e)));
-  ps.on("exit", resolve);
-});
+const exitOf = (pid, signal) => platform.waitExit(pid, { signal, unless: "night-chain\\.mjs" });
 
 // The pointer once ok(pointer) holds, or null after ms; woken by the pointer file's changes.
 const pointerChange = (repo, ok, ms) => new Promise((resolve) => {
