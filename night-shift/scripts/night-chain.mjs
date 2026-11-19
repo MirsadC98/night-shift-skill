@@ -56,8 +56,9 @@
 //   node night-chain.mjs doctor [--repo <dir>]     (checks what a start needs, one line a check: the skill's copy
 //                                                   and whether the guard protects its files from a night session,
 //                                                   Node, git and the CLI, the config and rule files, the language
-//                                                   table, the MCP list, the state folder, the guard's self-test and
-//                                                   the hook the runner writes, a linked ~/.claude; exit 1 on a FAIL;
+//                                                   table, a webhook, the MCP list, the state folder, the guard's
+//                                                   self-test and the hook the runner writes, a linked ~/.claude;
+//                                                   exit 1 on a FAIL;
 //                                                   no network and no model call)
 //   node night-chain.mjs --version                 (this copy's version, which start keeps in run.json)
 //
@@ -88,6 +89,7 @@ import { listedServers, mcpArgs, claudeJson, mcpConfigArg, MCP_ARG_MAX } from ".
 import { ruleFiles, readRuleFile, rulesBlock } from "./rules.mjs";
 import { VERSION, NODE_FLOOR } from "./version.mjs";
 import { platform } from "./platform.mjs";
+import { webhookFile, webhookConfig } from "./webhook.mjs";
 import { MAIN_MODEL, SUB_MODEL, MAIN_EFFORT, subEffortText, MAX_NOTE, nightModelSettings, sessionPlan, promptDirectives,
   directiveLines, fableGate, mainGate, fallbackNote, resolveMode, familyOf, isPremium, modelName, runModelIds, premiumNote,
   deniedNote, runsOn } from "./effort.mjs";
@@ -1215,6 +1217,16 @@ async function doctor(opt) {
   const lang = cfg.lang ?? "en";
   const table = await loadLang(lang);
   row(table.error ? "FAIL" : "ok", "lang", table.error ? `lang ${lang} from ${from.lang}: ${table.error}` : lang === "en" ? "en (built in)" : `${lang} (${langFile(lang)})`);
+  // C6: the webhook, only when its file exists (nothing about one missing), named by its kind and host: the URL is a
+  // secret. A problem is a warn, since a start goes on and only the webhook's cards are lost. Nothing is posted.
+  const hookFile = webhookFile();
+  if (fs.existsSync(hookFile)) {
+    let hook;
+    try { hook = webhookConfig(fs.readFileSync(hookFile, "utf8")); } catch (e) { hook = { error: `webhook.json: cannot be read (${e.code || e.message})` }; }
+    if (hook.error) row("warn", "webhook", `${hookFile}: ${hook.error.replace(/^webhook\.json: /, "")}; no card reaches the webhook`);
+    else if (hook.clear) row("warn", "webhook", `${hook.kind} at ${hook.host} over http: the URL, a secret, crosses the network unencrypted; use https`);
+    else row("ok", "webhook", `${hook.kind} at ${hook.host}`);
+  }
   let state = "";
   if (repo) {
     const mcp = mcpCheck(cfg, from, repo);

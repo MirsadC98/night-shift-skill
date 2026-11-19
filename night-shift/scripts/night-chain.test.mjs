@@ -2289,6 +2289,38 @@ test("doctor checks what a start needs, one line a check, and exits 0 when nothi
   assert.match(doctorLine(r.stdout, "ok", "home")[0], /\(not a link\)$/);
   assert.match(doctorLine(r.stdout, "ok", "state")[0], /night-shift-repo-\d{8}; writable$/);
   assert.deepEqual(fs.readdirSync(path.join(c.home, "..")).filter((f) => f.startsWith(".night-shift-doctor-")), [], "the probe folder is gone");
+  assert.doesNotMatch(r.stdout, /webhook/, "no webhook.json, no line about one");
+});
+
+// C6: the webhook's row, only when its file exists; the URL, a secret, never shows, only its kind and host.
+test("doctor's webhook row: ok with the kind and host, warn for a file it cannot use or plain http off the local network, never the URL", () => {
+  const c = pointerCase();
+  const file = path.join(c.home, ".claude", "night-shift", "webhook.json"), secret = "s3cret-topic";
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const doctor = (text) => { fs.writeFileSync(file, text); const r = c.run("doctor"); assert.equal(r.stdout.includes(secret), false, r.stdout); return r; };
+  let r = doctor(JSON.stringify({ url: `https://ntfy.sh/${secret}` }));
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(doctorLine(r.stdout, "ok", "webhook")[0], /^  ok    webhook: ntfy at ntfy\.sh$/);
+  r = doctor(JSON.stringify({ url: `https://hooks.slack.com/services/T0/B0/${secret}` }));
+  assert.match(doctorLine(r.stdout, "ok", "webhook")[0], /webhook: slack at hooks\.slack\.com$/);
+  r = doctor(JSON.stringify({ url: `http://192.168.1.10:8080/${secret}` }));
+  assert.match(doctorLine(r.stdout, "ok", "webhook")[0], /webhook: ntfy at 192\.168\.1\.10:8080$/, "plain http on the local network");
+  r = doctor(JSON.stringify({ url: `http://ntfy.example.org/${secret}` }));
+  assert.equal(r.status, 0, "a warn does not fail");
+  assert.match(doctorLine(r.stdout, "warn", "webhook")[0], /webhook: ntfy at ntfy\.example\.org over http: the URL, a secret, crosses the network unencrypted; use https$/);
+  r = doctor(`{ "url": "https://ntfy.sh/${secret}"`);
+  assert.match(doctorLine(r.stdout, "warn", "webhook")[0], new RegExp(`webhook: ${literal(file)}: not JSON; no card reaches the webhook$`));
+  r = doctor(JSON.stringify({ url: `https://ntfy.sh/${secret}`, kind: "teams" }));
+  assert.match(doctorLine(r.stdout, "warn", "webhook")[0], /: kind must be ntfy, slack or discord; no card reaches the webhook$/);
+  // A user name and password in the URL show neither; the host is shown without them.
+  r = doctor(JSON.stringify({ url: `http://someone:Pa55w0rd-x@ntfy.example.org/${secret}` }));
+  assert.match(doctorLine(r.stdout, "warn", "webhook")[0], /webhook: ntfy at ntfy\.example\.org over http: /);
+  for (const s of ["Pa55w0rd-x", "someone"]) assert.equal(r.stdout.includes(s), false, s);
+  // A folder where the file should be.
+  fs.rmSync(file);
+  fs.mkdirSync(file);
+  r = c.run("doctor");
+  assert.match(doctorLine(r.stdout, "warn", "webhook")[0], /webhook\.json: cannot be read \(EISDIR\); no card reaches the webhook$/);
 });
 
 // C4 follow-up: the skill row asks the guard as the hook the runner writes, with the run's skill folder in its environment:

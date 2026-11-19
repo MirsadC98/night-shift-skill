@@ -1023,10 +1023,10 @@ test("a run whose repository is ~/.claude still cannot touch the global rule and
 
 test("a find or a listing from a repository at ~/.claude cannot reach the global rule and config files by name", () => {
   const inHome = { ...env, NIGHT_SHIFT_REPO: "C:/Users/u/.claude" };
-  for (const c of ["find . -name rules.md -delete", "find . -name config.json -delete", "find . -path '*/night-shift/*' -delete", "find . -name rules.md -exec rm {} +",
+  for (const c of ["find . -name rules.md -delete", "find . -name config.json -delete", "find . -name webhook.json -delete", "find . -name telegram.json -delete", "find . -path '*/night-shift/*' -delete", "find . -name rules.md -exec rm {} +",
     "find . -name night-shift -exec rm -rf {} +", "find . -path './night-shift/*' -delete", "find . -path './night-shift/rules.md' -delete", "find . -path './night-*/*' -delete", "find C:/Users/u/.claude -iname 'RULES.MD' -delete", "find . -name 'rules*' -delete"])
     assert.ok(bash(c, inHome), c);
-  for (const c of ["Get-ChildItem . -Recurse -Filter config.json | Remove-Item", "gci -Recurse -Include rules.md | ri"]) assert.ok(ps(c, inHome), c);
+  for (const c of ["Get-ChildItem . -Recurse -Filter config.json | Remove-Item", "gci -Recurse -Include rules.md | ri", "Get-ChildItem . -Recurse -Filter webhook.json | Remove-Item"]) assert.ok(ps(c, inHome), c);
   for (const c of ["find . -name notes.md -delete", "find . -path './projects/*' -delete", "find . -path './skills/*' -delete", "find ./skills -name x.md -delete"]) assert.equal(bash(c, inHome), null, c);
   assert.equal(ps("Get-ChildItem . -Recurse -Filter notes.md | Remove-Item", inHome), null);
   // Only a start path that covers the folder reads those names as inside it: elsewhere they are ordinary names.

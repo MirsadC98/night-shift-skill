@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
-import { webhookConfig, plainText, textParts, postWebhook, sendWebhook } from "./webhook.mjs";
+import { webhookConfig, plainText, textParts, postWebhook, sendWebhook, localHost } from "./webhook.mjs";
 import { tempRoot } from "./config.mjs";
 // A CLAUDE_CONFIG_DIR of the user's own would move the file sendWebhook reads (claudeHome in config.mjs).
 delete process.env.CLAUDE_CONFIG_DIR;
@@ -64,6 +64,22 @@ test("webhookConfig names what is wrong with a file, never the URL itself", () =
   assert.match(err(JSON.stringify({ url: `https://u:p%zz${secret}@ntfy.sh/t` })), /^webhook\.json: the url's user name or password is not valid percent-encoding$/);
   // A file Windows PowerShell 5 or Notepad saved with a BOM still reads.
   assert.equal(webhookConfig(`\uFEFF${JSON.stringify({ url: "https://ntfy.sh/x" })}`).kind, "ntfy");
+});
+
+test("plain http is marked clear only for a host that is not local: the loopback, private addresses and local names are spared", () => {
+  for (const h of ["localhost", "127.0.0.1", "10.1.2.3", "192.168.1.10", "172.16.0.1", "172.31.255.1", "169.254.1.1", "[::1]", "[fd00::1]", "[fc12:3::1]", "[fe80::1]",
+    "nas", "nas.local", "pi.lan", "ntfy.internal", "box.home.arpa", "app.localhost", "nas.", "localhost.", "box.local.", "NAS.LOCAL",
+    "100.64.0.1", "100.127.255.254", "[::ffff:7f00:1]", "[::ffff:c0a8:1]"]) assert.equal(localHost(h), true, h);
+  for (const h of ["ntfy.sh", "example.org", "172.32.0.1", "172.15.0.1", "8.8.8.8", "11.0.0.1", "[2001:db8::1]", "local.example.com", "ntfy.sh.",
+    "100.63.0.1", "100.128.0.1", "[::ffff:808:808]"]) assert.equal(localHost(h), false, h);
+  const clear = (url) => webhookConfig(JSON.stringify({ url })).clear;
+  assert.equal(clear("http://ntfy.example.org/t"), true);
+  assert.equal(clear("https://ntfy.example.org/t"), false);
+  assert.equal(clear("http://192.168.1.10:8080/t"), false);
+  assert.equal(clear("http://[::1]:8080/t"), false);
+  assert.equal(clear("http://127.1/t"), false, "URL writes 127.1 as 127.0.0.1");
+  assert.equal(clear("http://[::ffff:127.0.0.1]/t"), false);
+  assert.equal(clear("http://nas.:8080/t"), false);
 });
 
 test("plainText drops the cards' tags and reads their entities back", () => {

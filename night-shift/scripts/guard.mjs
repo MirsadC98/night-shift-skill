@@ -850,9 +850,10 @@ const INSIDE = `.git .claude night-shift.json night-shift-rules.md settings.json
   packed-refs commit_editmsg hooks info exclude objects pack refs heads tags remotes origin main master logs pre-commit.sample 0a
   0123456789abcdef0123456789abcdef012345 pack-0123456789abcdef0123456789abcdef01234567.pack pack-0123456789abcdef0123456789abcdef01234567.idx
   pack-0123456789abcdef0123456789abcdef01234567.rev`.split(/\s+/);
-// What the user's ~/.claude/night-shift folder holds (config, rules, the runs the runner keeps, the Telegram token): names a find
-// or a listing must also steer clear of, but only when its start path covers that folder, so no other find reads them as inside.
-const NS_NAMES = ["night-shift", "rules.md", "config.json", "runs", "telegram.json"];
+// What the user's ~/.claude/night-shift folder holds (config, rules, the runs the runner keeps, the Telegram token, the webhook's
+// URL): names a find or a listing must also steer clear of, but only when its start path covers that folder, so no other find
+// reads them as inside.
+const NS_NAMES = ["night-shift", "rules.md", "config.json", "runs", "telegram.json", "webhook.json"];
 const nsNames = (q, r) => r.claude.some((c) => under(`${c}/night-shift`, q)) ? NS_NAMES : [];
 const meetsInside = (pat, extra = []) => [...INSIDE, ...extra].some((n) => segMatch(pat, n));
 // A -path test keeps a find out of .git when it stays below one folder of the start path (./dist/*), or
@@ -1506,6 +1507,7 @@ function selfTest() {
     [write("C:/Users/u/.claude/night-shift/lang/tr.mjs", inHome), true], [bash("echo 'export default {}' > C:/Users/u/.claude/night-shift/lang/xx.mjs", inHome), true],
     [bash("rm night-shift/rules.md", inHome), true], [write("C:/Users/u/.claude/notes.md", inHome), false],
     [bash("find . -name rules.md -delete", inHome), true], [bash("find . -name config.json -delete", inHome), true],
+    [bash("find . -name webhook.json -delete", inHome), true],
     [bash("find . -path '*/night-shift/*' -delete", inHome), true], [bash("find . -name rules.md -exec rm {} +", inHome), true],
     [ps("Get-ChildItem . -Recurse -Filter config.json | Remove-Item", inHome), true], [bash("find . -name notes.md -delete", inHome), false],
     [bash("find . -path './night-shift/*' -delete", inHome), true], [bash("find . -path './night-shift/rules.md' -delete", inHome), true],

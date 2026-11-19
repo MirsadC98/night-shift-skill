@@ -51,7 +51,26 @@ const json = (o) => ({ headers: { "content-type": "application/json" }, body: JS
 const DISCORD = /^(?:[a-z0-9-]+\.)?discord(?:app)?\.com$/;
 const kindOf = (u) => (u.hostname === "hooks.slack.com" ? "slack" : DISCORD.test(u.hostname) && u.pathname.startsWith("/api/webhooks/") ? "discord" : "ntfy");
 
-// webhook.json's text -> { url, kind, host, auth, hide } or { error }. An error names the problem, never the URL.
+// A host where a receiver of one's own usually lives, so that plain http to it is no warning (doctor): the loopback, a
+// private, link-local or shared address (10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10 as Tailscale uses it,
+// fc00::/7, fe80::/10), or a local name (no dot, or .local, .lan, .internal, .home.arpa, .localhost), a name's trailing
+// dot left out. URL keeps an IPv6 host in its brackets and writes an IPv4 address mapped into IPv6 as two groups
+// ([::ffff:7f00:1] for ::ffff:127.0.0.1), which is read as that IPv4 address.
+const PRIVATE4 = /^(?:127|10|192\.168|169\.254|172\.(?:1[6-9]|2\d|3[01])|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7]))\./;
+export function localHost(hostname) {
+  const h = String(hostname).toLowerCase().replace(/\.$/, "");
+  const mapped = /^\[::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})\]$/.exec(h);
+  if (mapped) {
+    const [a, b] = [parseInt(mapped[1], 16), parseInt(mapped[2], 16)];
+    return localHost(`${a >> 8}.${a & 255}.${b >> 8}.${b & 255}`);
+  }
+  if (h.startsWith("[")) return /^\[(?:::1\]|f[cd][0-9a-f]{2}:|fe[89ab][0-9a-f]:)/.test(h);
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(h)) return PRIVATE4.test(h);
+  return !h.includes(".") || /\.(?:local|lan|internal|home\.arpa|localhost)$/.test(h);
+}
+
+// webhook.json's text -> { url, kind, host, auth, clear, hide } or { error }. An error names the problem, never the URL.
+// clear: plain http to a host that is not local, so the secret crosses the network unencrypted.
 // hide: the spellings of the secret an error message might hold, replaced before anything is logged.
 export function webhookConfig(text) {
   let j;
@@ -72,7 +91,7 @@ export function webhookConfig(text) {
     u.username = ""; u.password = "";
   }
   const hide = [raw, u.href, `${u.pathname}${u.search}`, u.search, u.pathname].filter((s) => s.length > 1);
-  return { url: u.href, kind, host: u.host, auth, hide };
+  return { url: u.href, kind, host: u.host, auth, clear: u.protocol === "http:" && !localHost(u.hostname), hide };
 }
 
 const scrub = (cfg, s) => cfg.hide.reduce((t, h) => t.split(h).join("<webhook>"), String(s));
