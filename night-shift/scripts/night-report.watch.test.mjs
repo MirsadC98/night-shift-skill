@@ -502,7 +502,8 @@ test("/stop from the stored chat asks the runner to stop after the session in pr
     assert.ok(after(state));
     assert.ok(alive(helper.pid));
     assert.equal(pointer(repo, home).finished, false);
-    assert.match(fs.readFileSync(path.join(state, "watch.log"), "utf8"), /\/stop: after, sent, \d+ s after the message/);
+    // The watcher writes its line after the answer is sent.
+    await until(() => /\/stop: after, sent, \d+ s after the message/.test(logOf(state)), 10_000, "the /stop line in watch.log");
   });
   // No run of this repository is active: nothing is written, and the answer says so.
   await scene(asking("/stop now"), {}, async ({ api, state }) => {
