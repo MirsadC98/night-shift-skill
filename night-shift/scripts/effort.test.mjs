@@ -5,7 +5,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promptEffort, promptDirectives, sessionPlan, directiveLines, fableGate, nightModelSettings, familyOf, resolveMode, mainGate, fallbackNote,
-  MODELS, MAIN_EFFORT, cliModel, isPremium, modelName, runModelIds, premiumNote, deniedNote, FABLE_NOTE, runsOn } from "./effort.mjs";
+  MODELS, MAIN_EFFORT, cliModel, isPremium, modelName, runModelIds, premiumNote, deniedNote, FABLE_NOTE, runsOn,
+  MODEL_TABLE, MAIN_MODEL, SUB_MODEL, PREMIUM, SUB_EFFORT, LEVELS } from "./effort.mjs";
+import { MODES } from "./config.mjs";
 
 test("promptEffort reads a first-line EFFORT line and keeps the rest of the prompt", () => {
   assert.deepEqual(promptEffort("EFFORT: max\n\nFix the drift."), { effort: "max", body: "Fix the drift." });
@@ -254,4 +256,49 @@ test("the header notes name the model in play", () => {
   assert.equal(deniedNote("fable"), "The prompt asked for MODEL: fable, but Fable's weekly allowance does not cover it tonight; this piece runs on Opus at max.");
   assert.equal(deniedNote("mythos", "ceiling"), "The prompt asked for MODEL: mythos, but Mythos's weekly allowance does not cover it tonight; this piece runs on Opus at max.");
   assert.match(deniedNote("mythos", "unavailable"), /^The prompt asked for MODEL: mythos, but this account cannot run Mythos .*; this piece runs on Opus at max\.$/);
+});
+
+// ---------------------------------------------------------------- the model table (U19, session 29)
+// One row a family; every other model table derives from it, and no other script lists the families,
+// so the next model id (or a new name for Fable's seat, or a new subagent family) is a row.
+test("every model table derives from MODEL_TABLE, and today's values stay as they were", () => {
+  const seat = (s) => MODEL_TABLE.filter((r) => r.seat === s);
+  assert.equal(seat("main").length, 1);
+  assert.ok(MODEL_TABLE.every((r) => ["main", "premium", "sub"].includes(r.seat) && LEVELS.includes(r.effort) && r.cli && r.family === r.family.toLowerCase()));
+  assert.equal(MAIN_MODEL, seat("main")[0].family);
+  assert.equal(SUB_MODEL, seat("sub")[0].family);
+  const sessions = MODEL_TABLE.filter((r) => r.seat !== "sub");
+  assert.deepEqual(MODELS, sessions.map((r) => r.family));
+  assert.deepEqual(PREMIUM, seat("premium").map((r) => r.family));
+  assert.deepEqual(MAIN_EFFORT, Object.fromEntries(sessions.map((r) => [r.family, r.effort])));
+  assert.deepEqual(SUB_EFFORT, Object.fromEntries(seat("sub").map((r) => [r.family, r.effort])));
+  for (const r of MODEL_TABLE) {
+    assert.equal(cliModel(r.family), r.cli);
+    assert.equal(familyOf(r.cli), r.family);
+    assert.equal(familyOf(`claude-${r.family}-9-9`), r.family);
+    assert.equal(isPremium(r.family), r.seat === "premium");
+  }
+  // The bare settings key of each family the CLI knows by an alias; none for one it knows by its id.
+  assert.deepEqual(Object.keys(nightModelSettings({}, [])).sort(), MODEL_TABLE.filter((r) => r.cli === r.family).map((r) => r.family).sort());
+  assert.deepEqual([MAIN_MODEL, SUB_MODEL, MODELS, PREMIUM, MAIN_EFFORT, SUB_EFFORT],
+    ["opus", "sonnet", ["opus", "fable", "mythos"], ["fable", "mythos"], { opus: "xhigh", fable: "high", mythos: "high" }, { sonnet: "medium", haiku: "high" }]);
+  assert.equal(familyOf("something else"), "opus");
+  // Two family words in one id: a premium word wins over the stand-in's, the longer word within a seat.
+  assert.equal(familyOf("claude-opus-fable"), "fable");
+  assert.equal(familyOf("fable-mythos"), "mythos");
+  assert.equal(familyOf("opus-sonnet"), "opus");
+  assert.equal(familyOf("sonnet-haiku"), "sonnet");
+});
+test("config.mjs's modes are effort.mjs's models, the same list", () => {
+  assert.equal(MODES, MODELS);
+});
+test("no script but effort.mjs lists the model families or reads a level by a family's word: they read its table", () => {
+  const dir = path.dirname(fileURLToPath(import.meta.url));
+  const f = MODEL_TABLE.map((r) => r.family).join("|");
+  const list = new RegExp(`\\b(?:${f})\\b\\s*\\|\\s*(?:${f})\\b|["'](?:${f})["']\\s*,\\s*["'](?:${f})["']|\\b(?:${f})\\s*:[^,]*,\\s*(?:${f})\\s*:|MAIN_EFFORT\\.(?:${f})\\b`, "i");
+  const files = [...fs.readdirSync(dir), ...fs.readdirSync(path.join(dir, "lang")).map((n) => `lang/${n}`)]
+    .filter((n) => n.endsWith(".mjs") && !n.endsWith(".test.mjs") && n !== "effort.mjs");
+  const hits = files.flatMap((n) => fs.readFileSync(path.join(dir, n), "utf8").split("\n")
+    .filter((l) => !/^\s*\/\//.test(l) && list.test(l)).map((l) => `${n}: ${l.trim().slice(0, 80)}`));
+  assert.deepEqual(hits, []);
 });

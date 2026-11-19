@@ -4,6 +4,7 @@
 // none is given) and returns { text, silent } (silent: no sound).
 
 import { strings } from "./lang/index.mjs";
+import { modelName, PREMIUM } from "./effort.mjs";
 
 const LIMIT = 4096;
 const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -102,7 +103,7 @@ function card(head, blocks, silent = false) {
 
 // Fable's share shows only once a Fable or Mythos call of the night reported it. The two share one weekly
 // allowance; it is named after the model in play (f.fableName: Fable, Mythos or both), Fable when not given.
-const share = (f) => f.fable && `${esc(f.fableName || "Fable")} ${f.fable}`;
+const share = (f) => f.fable && `${esc(f.fableName || modelName(PREMIUM[0]))} ${f.fable}`;
 const numbers = (f, T) => [f.took, f.cost, f.five && `${T.five} ${f.five}`, f.seven && `${T.seven} ${f.seven}`, share(f)].filter(Boolean).join(" · ");
 
 // How far the chain is and when it should end. jobs: this run's jobs in order, each

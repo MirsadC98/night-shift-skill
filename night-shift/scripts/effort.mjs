@@ -6,34 +6,55 @@
 // - per-model levels in the --settings layer win over the user's and the project's files and reach
 //   the subagents on that model; `--effort` lifts every subagent, Sonnet and Haiku too, to its level;
 // - `max` exists only as `--effort max`, so a max session gives each subagent call its own level.
-import { MODES } from "./config.mjs";
 
-export const MAIN_MODEL = "opus";
-export const SUB_MODEL = "sonnet";
-// The models a prompt may ask for (MODEL: …) and each one's level when the prompt names none:
-// the chain runs on Opus at xhigh; Fable, which costs the limit about twice what Opus does for the
-// same work (A0, 2026-11-15), runs the one hard piece at high, which scores about Opus at max.
-// Mythos is Fable under another name: Anthropic gives the two as one underlying model at one price,
-// open only to organizations it has verified, and a Mythos call draws on Fable's weekly allowance
-// (claude 2.1.327, measured 2026-11-18). It takes Fable's seat with every rule Fable has.
-export const MODELS = ["opus", "fable", "mythos"];
-export const MAIN_EFFORT = { opus: "xhigh", fable: "high", mythos: "high" };
-// Fable's seat: the models that draw on its weekly allowance and share its gate, count and notes.
-export const PREMIUM = ["fable", "mythos"];
+// The models the night shift knows, one row a family. Every model table below derives from it and no
+// other script lists the families (effort.test.mjs checks both), so the next model id is a change here.
+// - family: the word its ids hold, by which a MODEL: line, a mode and a settings key name it;
+// - cli: what --model gets: the CLI's alias where it has one (it follows the CLI's latest model), else
+//   the id. The CLI has no "mythos" alias (claude 2.1.327 refuses `--model mythos` before any call),
+//   and this table is the one place the id is written;
+// - seat: "main" runs an opus-mode chain and stands in when the premium seat cannot (one row);
+//   "premium" is Fable's seat, the models that draw on its weekly allowance and share its gate, count
+//   and notes; "sub" runs subagents only;
+// - effort: its level when nothing names one. The chain runs on Opus at xhigh; Fable, which costs the
+//   limit about twice what Opus does for the same work (A0, 2026-11-15), runs the one hard piece at
+//   high, which scores about Opus at max. Mythos is Fable under another name: Anthropic gives the two
+//   as one underlying model at one price, open only to organizations it has verified, and a Mythos call
+//   draws on Fable's weekly allowance (claude 2.1.327, measured 2026-11-18). It takes Fable's seat with
+//   every rule Fable has. Subagents (the user's rule, 2026-11-10): Sonnet at medium for ordinary work,
+//   raised per call with effort "high" for an important one; Haiku at high for the lightest lookups.
+// A new name for the premium seat also needs references/mode-<family>.md, which start refuses to run
+// without. Nothing here checks the table as it loads: the guard loads this module (through config.mjs)
+// on every call and blocks the call when that fails, so the table's checks are tests.
+export const MODEL_TABLE = [
+  { family: "opus", cli: "opus", seat: "main", effort: "xhigh" },
+  { family: "fable", cli: "fable", seat: "premium", effort: "high" },
+  { family: "mythos", cli: "claude-mythos-5-2", seat: "premium", effort: "high" },
+  { family: "sonnet", cli: "sonnet", seat: "sub", effort: "medium" },
+  { family: "haiku", cli: "haiku", seat: "sub", effort: "high" },
+];
+const seat = (name) => MODEL_TABLE.filter((r) => r.seat === name);
+const sessionRows = MODEL_TABLE.filter((r) => r.seat !== "sub");
+export const MAIN_MODEL = seat("main")[0]?.family;
+export const SUB_MODEL = seat("sub")[0]?.family;
+// The models a session runs on: what a prompt may ask for (MODEL: …) and a run's mode names, and each
+// one's level when the prompt names none.
+export const MODELS = sessionRows.map((r) => r.family);
+export const MAIN_EFFORT = Object.fromEntries(sessionRows.map((r) => [r.family, r.effort]));
+export const PREMIUM = seat("premium").map((r) => r.family);
 export const isPremium = (family) => PREMIUM.includes(family);
-// What --model gets for a family: the CLI's alias where it has one, else the model's id. The CLI has
-// no "mythos" alias (claude 2.1.327 refuses `--model mythos` before any call), and this table is the
-// one place the id is written.
-const CLI_MODEL = { opus: "opus", fable: "fable", mythos: "claude-mythos-5-2" };
+const CLI_MODEL = Object.fromEntries(MODEL_TABLE.map((r) => [r.family, r.cli]));
 export const cliModel = (family) => CLI_MODEL[family] ?? family;
 // A family's name in a line a user or a session reads.
 export const modelName = (family) => { const f = String(family || MAIN_MODEL); return f[0].toUpperCase() + f.slice(1); };
-// Subagents by family (the user's rule, 2026-11-10): Sonnet at medium for ordinary work, raised per
-// call with effort "high" for an important one; Haiku at high for the lightest lookups.
-export const SUB_EFFORT = { sonnet: "medium", haiku: "high" };
+export const SUB_EFFORT = Object.fromEntries(seat("sub").map((r) => [r.family, r.effort]));
 export const subEffortText = () => Object.entries(SUB_EFFORT).map(([m, e]) => `${m} ${e}`).join(", ");
-const FAMILIES = ["mythos", "fable", "opus", "sonnet", "haiku"];
-export const familyOf = (m) => FAMILIES.find((f) => String(m ?? "").toLowerCase().includes(f)) || "opus";
+// The family an id or a settings key names: the premium rows first, then the main row, then the
+// subagents', the longer word first within a seat (mythos, fable, opus, sonnet, haiku), so a premium
+// word wins over the stand-in's.
+const RANK = { premium: 0, main: 1, sub: 2 };
+const FAMILIES = [...MODEL_TABLE].sort((a, b) => RANK[a.seat] - RANK[b.seat] || b.family.length - a.family.length).map((r) => r.family);
+export const familyOf = (m) => FAMILIES.find((f) => String(m ?? "").toLowerCase().includes(f)) || MAIN_MODEL;
 export const LEVELS = ["low", "medium", "high", "xhigh", "max"];
 
 // A continuation prompt may open with directive lines, each optional, in either order:
@@ -83,13 +104,13 @@ export function sessionPlan(text, run = {}) {
   const premiumMode = isPremium(run.mode);
   let model = run.model || MAIN_MODEL, note = null;
   if (premiumMode) {
-    model = d.model === "opus" ? run.opusModel || MAIN_MODEL : run.model || cliModel(run.mode);
+    model = d.model === MAIN_MODEL ? run.opusModel || MAIN_MODEL : run.model || cliModel(run.mode);
     if (d.model && !MODELS.includes(d.model)) note = notRun(d.model, model);
     else if (isPremium(d.model) && d.model !== run.mode) note = `MODEL: ${d.model} is the same model as ${modelName(run.mode)}, this run's main model; it runs on ${model}`;
   } else if (d.model && MODELS.includes(d.model)) model = cliModel(d.model);
   else if (d.model) { model = MAIN_MODEL; note = notRun(d.model, MAIN_MODEL); }
   const family = familyOf(model);
-  const own = isPremium(family) ? (premiumMode && run.effort) || MAIN_EFFORT[family] : premiumMode ? MAIN_EFFORT.opus : run.effort || MAIN_EFFORT.opus;
+  const own = isPremium(family) ? (premiumMode && run.effort) || MAIN_EFFORT[family] : premiumMode ? MAIN_EFFORT[MAIN_MODEL] : run.effort || MAIN_EFFORT[MAIN_MODEL];
   return { model, family, effort: d.effort || own, body: d.body, asked: d.model, askedEffort: d.effort, note };
 }
 // A note ends with the model its session runs on. The runner's gate may move the session to the stand-in after
@@ -104,14 +125,14 @@ export const runsOn = (note, model) => note && note.replace(/; it runs on \S+$/,
 export function resolveMode({ mode, model } = {}) {
   const fam = model == null ? null : familyOf(model);
   if (fam && String(model).trim().toLowerCase() === fam) model = cliModel(fam);
-  if (!mode) mode = isPremium(fam) ? fam : "opus";
-  if (!MODES.includes(mode)) return { error: `mode "${mode}" is not one of ${MODES.join(", ")}` };
-  if (mode === "opus") {
-    if (isPremium(fam)) return { error: `mode "opus" cannot run on the ${modelName(fam)} model "${model}"; use mode "${fam}" or another model` };
-    return { mode, model: model ?? MAIN_MODEL, opusModel: fam === "opus" ? model : MAIN_MODEL };
+  if (!mode) mode = isPremium(fam) ? fam : MAIN_MODEL;
+  if (!MODELS.includes(mode)) return { error: `mode "${mode}" is not one of ${MODELS.join(", ")}` };
+  if (mode === MAIN_MODEL) {
+    if (isPremium(fam)) return { error: `mode "${MAIN_MODEL}" cannot run on the ${modelName(fam)} model "${model}"; use mode "${fam}" or another model` };
+    return { mode, model: model ?? MAIN_MODEL, opusModel: fam === MAIN_MODEL ? model : MAIN_MODEL };
   }
   if (!model || fam === mode) return { mode, model: model || cliModel(mode), opusModel: MAIN_MODEL };
-  if (fam === "opus") return { mode, model: cliModel(mode), opusModel: model };
+  if (fam === MAIN_MODEL) return { mode, model: cliModel(mode), opusModel: model };
   if (isPremium(fam)) return { error: `mode "${mode}" cannot use the ${modelName(fam)} model "${model}"; use mode "${fam}"` };
   return { error: `mode "${mode}" cannot use the model "${model}"; it takes a ${modelName(mode)} model (the main) or an Opus model (the stand-in)` };
 }
@@ -162,11 +183,14 @@ export function fableGate(f = {}, { ceiling = 0.6, maxSessions = 2, now = Date.n
 // SUB_EFFORT. The keys the lower files hold ("claude-opus-5-5" from a picker) are written too, so none
 // of them keeps a level of its own, and so are `ids`, the models the run starts sessions with
 // (runModelIds). `main` is { opus, fable, mythos } (a bare level, as before, means Opus).
-const FAMILY = /opus|fable|mythos|sonnet|haiku/i;
+// The bare keys are the families the CLI knows by an alias (its cli is its own word); a family it
+// knows by its id (Mythos) gets that id's key through `ids`.
+const FAMILY = new RegExp(FAMILIES.join("|"), "i");
+const BARE_KEYS = MODEL_TABLE.filter((r) => r.cli === r.family).map((r) => r.family);
 export function nightModelSettings(prev = {}, lower = [], main = MAIN_EFFORT, ids = []) {
-  const levels = { ...MAIN_EFFORT, ...(typeof main === "string" ? { opus: main } : main), ...SUB_EFFORT };
+  const levels = { ...MAIN_EFFORT, ...(typeof main === "string" ? { [MAIN_MODEL]: main } : main), ...SUB_EFFORT };
   const named = [...ids, ...lower.flatMap((s) => Object.keys(s?.modelSettings || {}))];
-  const keys = new Set(["opus", "fable", "sonnet", "haiku", ...named.filter((k) => FAMILY.test(k))]);
+  const keys = new Set([...BARE_KEYS, ...named.filter((k) => FAMILY.test(k))]);
   const out = { ...prev };
   for (const k of keys) {
     const level = levels[familyOf(k)];
@@ -179,12 +203,12 @@ export function nightModelSettings(prev = {}, lower = [], main = MAIN_EFFORT, id
 // rule, 2026-11-11), and --effort max would run its subagents at max too.
 export const MAX_NOTE = [
   "This session runs at max effort, only for this piece: the hard piece the prompt names. When that piece is finished or blocked (no desktop, an input is missing), take no other work at max: save the state, write the next prompt (other work without an EFFORT line; a blocked piece that will go on keeps EFFORT: max) and finish.",
-  `So that subagents do not run at max too, pass effort on every Agent call (Sonnet "medium", work that matters "high"; Haiku "high"; Opus reviewer "xhigh") and start no workflow.`,
+  `So that subagents do not run at max too, pass effort on every Agent call (${seat("sub").map((r, i) => `${modelName(r.family)} "${r.effort}"${i ? "" : `, work that matters "high"`}`).join("; ")}; ${modelName(MAIN_MODEL)} reviewer "${MAIN_EFFORT[MAIN_MODEL]}") and start no workflow.`,
 ].join("\n");
 // The same for a Fable or Mythos session in opus mode: that model is for the hard piece its prompt
 // names, and its allowance is the user's for the day. The note names the model in play and the MODEL
 // line that brings the piece back to it.
-export const premiumNote = (family = "fable") => {
+export const premiumNote = (family = PREMIUM[0]) => {
   const name = modelName(family);
   return `This session runs on ${name}, only for this piece: the hard piece the prompt names. ${name}'s weekly allowance is the user's for daytime work; when that piece is finished or blocked, take no other work on ${name}: save the state, write the next prompt (other work without a MODEL line; a blocked piece that will go on keeps MODEL: ${family}) and finish.`;
 };
@@ -193,10 +217,10 @@ export const FABLE_NOTE = premiumNote("fable");
 // because that model is out or over the ceiling. It never names the max level: the runner does not run
 // it in these modes.
 // A prompt that asked for its own level (`asked`) keeps it: the note then names no level and leaves the next prompt's EFFORT line to that level's own note.
-export const fallbackNote = (why, { asked = null, family = "fable" } = {}) => `This run's main model is ${modelName(family)}, but it cannot run this session: ${why}. This session runs on Opus at ${asked ? "the level its prompt asked for" : "xhigh"}. Do your piece as usual, and write the next prompt without a MODEL ${asked ? "line" : "or EFFORT line"}, so the next session goes back to ${modelName(family)} when it can.`;
+export const fallbackNote = (why, { asked = null, family = PREMIUM[0] } = {}) => `This run's main model is ${modelName(family)}, but it cannot run this session: ${why}. This session runs on ${modelName(MAIN_MODEL)} at ${asked ? "the level its prompt asked for" : MAIN_EFFORT[MAIN_MODEL]}. Do your piece as usual, and write the next prompt without a MODEL ${asked ? "line" : "or EFFORT line"}, so the next session goes back to ${modelName(family)} when it can.`;
 // The header of a session in opus mode whose prompt asked for Fable or Mythos (`family`) and that runs
 // on Opus at max instead: the gate refused it (`why`, the gate's), "unavailable" when this chain found
 // the account cannot run that model.
-export const deniedNote = (family = "fable", why = null) => `The prompt asked for MODEL: ${family}, but ${why === "unavailable"
+export const deniedNote = (family = PREMIUM[0], why = null) => `The prompt asked for MODEL: ${family}, but ${why === "unavailable"
   ? `this account cannot run ${modelName(family)} (a session on it was refused earlier in this chain)`
-  : `${modelName(family)}'s weekly allowance does not cover it tonight`}; this piece runs on Opus at max.`;
+  : `${modelName(family)}'s weekly allowance does not cover it tonight`}; this piece runs on ${modelName(MAIN_MODEL)} at max.`;

@@ -90,7 +90,7 @@ import { ruleFiles, readRuleFile, rulesBlock } from "./rules.mjs";
 import { VERSION, NODE_FLOOR } from "./version.mjs";
 import { platform } from "./platform.mjs";
 import { webhookFile, webhookConfig } from "./webhook.mjs";
-import { MAIN_MODEL, SUB_MODEL, MAIN_EFFORT, subEffortText, MAX_NOTE, nightModelSettings, sessionPlan, promptDirectives,
+import { MAIN_MODEL, SUB_MODEL, MAIN_EFFORT, PREMIUM, subEffortText, MAX_NOTE, nightModelSettings, sessionPlan, promptDirectives,
   directiveLines, fableGate, mainGate, fallbackNote, resolveMode, familyOf, isPremium, modelName, runModelIds, premiumNote,
   deniedNote, runsOn } from "./effort.mjs";
 
@@ -195,8 +195,8 @@ export const modelLine = (run) => {
   const named = (m) => modelText({ family: familyOf(m), model: m });
   const ceiling = pct(run.fableCeiling ?? 0.6);
   return `  model:  ${named(run.model || MAIN_MODEL)} at ${run.effort} (mode ${run.mode}); ${isPremium(run.mode)
-    ? `${named(run.opusModel || MAIN_MODEL)} at ${MAIN_EFFORT.opus} while ${modelName(run.mode)}'s weekly allowance is at or over ${ceiling} or used up`
-    : `MODEL: fable or MODEL: mythos runs one piece at ${MAIN_EFFORT.fable} while their shared weekly allowance is under ${ceiling} (at most ${run.fableSessions ?? 2} such sessions while its share is unknown), else on Opus at max`}`;
+    ? `${named(run.opusModel || MAIN_MODEL)} at ${MAIN_EFFORT[MAIN_MODEL]} while ${modelName(run.mode)}'s weekly allowance is at or over ${ceiling} or used up`
+    : `${PREMIUM.map((f) => `MODEL: ${f}`).join(" or ")} runs one piece at ${MAIN_EFFORT[PREMIUM[0]]} while their shared weekly allowance is under ${ceiling} (at most ${run.fableSessions ?? 2} such sessions while its share is unknown), else on Opus at max`}`;
 };
 
 // The repository's top folder, or null; quiet keeps git's own error line off the console (doctor names the problem).
@@ -578,7 +578,7 @@ async function runChain(opt) {
       // Not NODE_OPTIONS or NIGHT_SHIFT_*: a session could plant a --require or point the guard's
       // state folder elsewhere through them (Windows names are case-blind, hence the i).
       env: { ...Object.fromEntries(Object.entries(prev.env && typeof prev.env === "object" ? prev.env : {}).filter(([k]) => !/^(NODE_OPTIONS$|NIGHT_SHIFT_)/i.test(k))), CLAUDE_CODE_SUBAGENT_MODEL: SUB_MODEL },
-      modelSettings: nightModelSettings(prev.modelSettings, lowerSettings(repo), { opus: premiumMode ? MAIN_EFFORT.opus : run.effort || MAIN_EFFORT.opus,
+      modelSettings: nightModelSettings(prev.modelSettings, lowerSettings(repo), { [MAIN_MODEL]: premiumMode ? MAIN_EFFORT[MAIN_MODEL] : run.effort || MAIN_EFFORT[MAIN_MODEL],
         ...(premiumMode ? { [main]: run.effort || MAIN_EFFORT[main] } : {}), ...levels }, runModelIds(run)),
     }, null, 2));
   };
@@ -687,8 +687,8 @@ async function runChain(opt) {
   };
 
   log(`chain starts in ${repo}${reloaded ? " (runner reloaded)" : ""}, until ${run.until || "the work is done"}, from session ${session}${lastAllowed ? ` to ${lastAllowed}` : ""}, ${run.model || MAIN_MODEL} at ${run.effort || "xhigh"}, subagents ${SUB_MODEL} (${subEffortText()}), ${premiumMode
-    ? `${modelName(main)} as the main model under ${pct(fableCeiling)} of its allowance, else ${opusModel} at ${MAIN_EFFORT.opus}`
-    : `Fable or Mythos on request under ${pct(fableCeiling)} of their shared allowance (${fableSessions} sessions while unknown)`}`);
+    ? `${modelName(main)} as the main model under ${pct(fableCeiling)} of its allowance, else ${opusModel} at ${MAIN_EFFORT[MAIN_MODEL]}`
+    : `${PREMIUM.map(modelName).join(" or ")} on request under ${pct(fableCeiling)} of their shared allowance (${fableSessions} sessions while unknown)`}`);
   // The user's language table, loaded once by this runner; one that is gone or does not load reads English (lang/index.mjs).
   const langLoad = await loadLang(langOf(run));
   if (langLoad.error) log(`language table: ${langLoad.error}; what the user reads is in English`);
@@ -738,7 +738,7 @@ async function runChain(opt) {
       const g = premiumMode ? mainGate(readFable(), { ceiling: fableCeiling })
         : fableGate(readFable(), { ceiling: fableCeiling, maxSessions: fableSessions, family: plan.family });
       if (!g.ok && (!resume || g.why === "out" || g.why === "unavailable")) {
-        plan = { ...plan, model: opusModel, family: "opus", effort: premiumMode ? asked.askedEffort || MAIN_EFFORT.opus : "max", downgrade: g, wanted: plan.family, why: whyText(g) };
+        plan = { ...plan, model: opusModel, family: MAIN_MODEL, effort: premiumMode ? asked.askedEffort || MAIN_EFFORT[MAIN_MODEL] : "max", downgrade: g, wanted: plan.family, why: whyText(g) };
       }
     }
     log(resume ? `session ${nn} resumes ${resume.sessionId} ${resume.why === "stopped" ? "where the last runner stopped" : resume.why === "error" ? "after the error" : "after the usage limit"}`
@@ -797,7 +797,7 @@ async function runChain(opt) {
       fs.rmSync(resumeFile, { force: true });
       if (!wrote) {
         // Fable or mythos mode: no EFFORT line unless the piece's own prompt had one; the main model takes the piece back by itself after the reset.
-        const level = premiumMode ? asked.askedEffort || MAIN_EFFORT.opus : "max";
+        const level = premiumMode ? asked.askedEffort || MAIN_EFFORT[MAIN_MODEL] : "max";
         fs.writeFileSync(next, `${premiumMode ? (asked.askedEffort ? `EFFORT: ${level}\n` : "") : "EFFORT: max\n"}The previous ${name} session (${nn}) was cut off because the ${name} allowance ran out; this piece goes on at Opus ${premiumMode ? level : "max"}. ` +
           `First look at git status and git diff: unfinished work may be there; do not redo finished work.\n\n${plan.body}`);
         log(`session ${nn}'s piece goes on in the next session on Opus at ${level}`);

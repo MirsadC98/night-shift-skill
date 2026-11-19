@@ -25,7 +25,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { sessionCard, eventLine, chainCard, statusCard, reportCard, reportSection, chainProgress, progressText, splitHtml } from "./telegram-cards.mjs";
-import { sessionPlan, resolveMode, isPremium, modelName as familyName } from "./effort.mjs";
+import { sessionPlan, resolveMode, isPremium, modelName as familyName, MAIN_MODEL, PREMIUM } from "./effort.mjs";
 import { strings, langOf, loadLang } from "./lang/index.mjs";
 import { isMain, claudeHome, readGlobalConfig, globalConfigFile } from "./config.mjs";
 import { stopRun } from "./runs.mjs";
@@ -357,7 +357,7 @@ function runnerNote(text, T, main = null) {
   if ((m = /^session \d+: its stream had no (\S+), which earlier sessions' streams had/.exec(text))) return T.note.fieldGone(m[1]);
   if (/^session \d+: its stream had no unifiedWindows\.seven_day, which --weekly-ceiling reads/.test(text)) return T.note.ceilingBlind;
   if ((m = /^session \d+: MODEL: (\S+) is not a model/.exec(text))) return main && !onStandIn(text) ? T.note.badModelFable(m[1], familyName(main)) : T.note.badModel(m[1]);
-  if ((m = /^session \d+: MODEL: (\S+) is the same model as (\w+), this run's main model/.exec(text))) return T.note.sameModel(m[1], m[2], onStandIn(text) ? familyName("opus") : m[2]);
+  if ((m = /^session \d+: MODEL: (\S+) is the same model as (\w+), this run's main model/.exec(text))) return T.note.sameModel(m[1], m[2], onStandIn(text) ? familyName(MAIN_MODEL) : m[2]);
   return null;
 }
 
@@ -553,7 +553,7 @@ const fableOf = (l) => l?.unifiedWindows?.seven_day_overage_included || null;
 // report it ran on (their "runs" line), else the run's main model, else Fable (a log from before Mythos).
 function shareName(c, sessions) {
   const ran = new Set(sessions.filter((s) => s.limits.some(fableOf)).map((s) => wantOf(c.state, c.run, s.nn).family).filter(isPremium));
-  return (ran.size ? [...ran].sort() : [mainOf(c.run) || "fable"]).map(familyName).join("/");
+  return (ran.size ? [...ran].sort() : [mainOf(c.run) || PREMIUM[0]]).map(familyName).join("/");
 }
 const lastFable = (ls, T) => pctOr(ls.map(fableOf).filter(Boolean).at(-1)?.utilization, T);
 const okOf = (s) => Boolean(s.result && !s.result.is_error && s.result.subtype === "success");

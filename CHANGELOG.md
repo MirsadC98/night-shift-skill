@@ -32,6 +32,7 @@ Not on `main` yet: the commits after `2c14b8b`.
 - A project's `.claude/night-shift.json` may lower `fableCeiling`, `fableSessions`, `weeklyCeiling` and `maxUsd` but not raise them; `start`'s flag for a cap is your word and wins.
 - `CLAUDE_CONFIG_DIR` is followed by the runner, the guard and the report.
 - The guard knows a linked `~/.claude`, refuses `git config` of a remote's URL and a push to a URL, reads the project's rules on written paths too, and protects the caps' count, the waiter's marks and your stop request in the state folder, the copy of the skill a chain runs from wherever it is (unless it is inside the chain's repository), and Claude Code's installed plugins, also from a delete or a move of a folder that holds them; `doctor`'s `skill` row says whether the guard protects the copy.
+- The models the runner knows are one table, `MODEL_TABLE` in `scripts/effort.mjs` (each family's word, what `--model` gets, its seat and its default level); the rest of the code reads it, so a new model id is a change to its row, and a new name for Fable's seat a row with its `references/mode-<name>.md`. No change in behaviour.
 
 ### Fixed
 

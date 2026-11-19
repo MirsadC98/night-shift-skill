@@ -1,6 +1,7 @@
 // The one reader of a project's .claude/night-shift.json, for the runner and the guard, so that a
 // typo is named at start instead of ending a run at 3 a.m. (or silently switching a rule off), and
-// so that a state folder too wide to be a state folder is refused by both. Imports only node.
+// so that a state folder too wide to be a state folder is refused by both. Imports only node, platform.mjs
+// and effort.mjs (the model table, which imports nothing).
 //   readProjectConfig(repo) -> { config, errors }   never throws; config holds only the valid keys
 //   readGlobalConfig(home)  -> { config, errors }   the same for ~/.claude/night-shift/config.json (run-wide keys only)
 //   mergedConfig(repo, home, flags) -> { config, from, errors }  the global file overlaid key by key with the project's (from: key -> file);
@@ -15,6 +16,7 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { platform as live } from "./platform.mjs";
+import { MODELS, LEVELS } from "./effort.mjs";
 
 // Whether node was started with the module whose import.meta this is, or imported it. import.meta.main
 // where Node has it (22.18, 24.2 on); else the real paths of process.argv[1] and the module compared,
@@ -40,9 +42,8 @@ const isStr = (v) => typeof v === "string";
 // A server's part of its tools' names (mcp__<it>__<tool>): the CLI puts _ for what is not a letter, a digit, _ or -,
 // so "plugin:context7:context7" names tools mcp__plugin_context7_context7__… (the guard and mcp.mjs compare in this form).
 export const mcpToolName = (name) => String(name).replace(/[^A-Za-z0-9_-]/g, "_");
-const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 // The run's main model: Opus, or Fable or Mythos, which are one model under two names (effort.mjs, resolveMode).
-export const MODES = ["opus", "fable", "mythos"];
+export const MODES = MODELS;
 // A language code names a table (lang/index.mjs): en, or the user's own ~/.claude/night-shift/lang/<code>.mjs.
 // Only its shape is checked here, which also keeps a path out of it: this module runs inside the guard too,
 // where a missing table must not turn every command into a refusal. `start` checks that the table loads.
@@ -56,7 +57,7 @@ export const CONFIG_KEYS = {
   model: (v) => (isStr(v) ? null : "must be a string"),
   mode: (v) => (MODES.includes(v) ? null : `must be one of ${MODES.join(", ")}`),
   lang: (v) => (isLangCode(v) ? null : "must be a language code in lowercase, such as en or pt-br (a table at ~/.claude/night-shift/lang/<code>.mjs)"),
-  effort: (v) => (EFFORTS.includes(v) ? null : `must be one of ${EFFORTS.join(", ")}`),
+  effort: (v) => (LEVELS.includes(v) ? null : `must be one of ${LEVELS.join(", ")}`),
   fableCeiling: (v) => (typeof v === "number" && v > 0 && v <= 100 ? null : "must be a number above 0 and at most 100"),
   fableSessions: (v) => (Number.isInteger(v) && v >= 0 ? null : "must be a whole number, 0 or more"),
   maxWaitHours: (v) => (typeof v === "number" && v > 0 ? null : "must be a number above 0"),
