@@ -255,10 +255,8 @@ export function cutOffSession(state) {
   return sessionId ? { nn, sessionId, ...(runs ? { model: runs[2] || runs[1].toLowerCase(), effort: runs[3] } : {}) } : null;
 }
 
-// Starts `run` for this state through the project's scheduled task and returns the task's name.
-// No trigger, so only start (or a runner handing over) runs it and a finished chain never comes
-// back on its own; no time limit (schtasks' default stops a task after 72 h) and no battery stop,
-// because the chain has no end time. Parallel, so a runner handing over can start the next one.
+// Starts `run` for this state detached, through the project's scheduled task (platform.mjs, schedule), and returns
+// the task's name, night-shift-<the repository's slug>. A visible console only with --window.
 // NIGHT_SHIFT_LAUNCH=direct spawns it instead, and =fail fails (night-chain.test.mjs).
 function scheduleRun(run, extra = []) {
   const args = ["run", "--state", run.state, ...(run.window ? [] : ["--headless"]), ...extra];
@@ -267,22 +265,8 @@ function scheduleRun(run, extra = []) {
     spawn(NODE, [SELF, ...args], { detached: true, stdio: "ignore", windowsHide: true }).unref();
     return "direct";
   }
-  const launcher = path.join(run.state, "launch.cmd");
-  // The folder's name goes into a cmd line: only what cmd reads as plain text.
-  fs.writeFileSync(launcher, `@echo off\r\ntitle night-shift ${path.basename(run.repo).replace(/[^\w .-]/g, "_")}\r\n"${NODE}" "${SELF}" %*\r\n`);
-  const argLine = args.map((a) => `"${a}"`).join(" ");
-  // A visible console runs launch.cmd; a hidden one is conhost --headless, which no default
-  // terminal (Windows Terminal) takes over, so every child shares that hidden console too.
-  const [exe, argv] = run.window ? [launcher, argLine]
-    : [path.join(process.env.SystemRoot || "C:\\Windows", "System32", "conhost.exe"), `--headless "${NODE}" "${SELF}" ${argLine}`];
-  const task = `night-shift-${slug(run.repo)}`;
-  const q = platform.psQuote;
-  execFileSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference = 'Stop'; " +
-    `$a = New-ScheduledTaskAction -Execute ${q(exe)} -Argument ${q(argv)}; ` +
-    "$s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances Parallel; " +
-    `Register-ScheduledTask -TaskName ${q(task)} -Action $a -Settings $s -Force | Out-Null; Start-ScheduledTask -TaskName ${q(task)}`],
-  { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
-  return task;
+  return platform.schedule({ task: `night-shift-${slug(run.repo)}`, node: NODE, script: SELF, args, window: run.window, state: run.state,
+    title: path.basename(run.repo) });
 }
 
 // ---------------------------------------------------------------- start

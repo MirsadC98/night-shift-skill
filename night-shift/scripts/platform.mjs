@@ -1,7 +1,7 @@
 // What differs by system, in one place (C5): how the guard compares paths and which temp folders it lets a night
-// session write, and how the runner finds the CLI, watches, waits for and stops processes and keeps the machine
-// awake. Imports only node, since the guard loads it on
-// every call. platformFor(name, deps) builds the object for a system, and `platform` is this system's.
+// session write, and how the runner starts itself detached, finds the CLI, watches, waits for and stops processes
+// and keeps the machine awake. Imports only node, since the guard loads it on every call. platformFor(name, deps)
+// builds the object for a system, and `platform` is this system's.
 // Every method is Windows' code under every name, apart from where that code itself asked for Windows (norm's Git Bash
 // /tmp, fsHome); macOS and Linux come behind it next. No environment variable picks the system: a project's settings
 // could hand one to the guard's hook and change its path rules. deps stand in for Node's calls in a unit test
@@ -21,6 +21,8 @@
 //   waitExit(pid, { signal, unless })  0 once pid is gone, 3 when its command line does not match unless, "woken" on abort
 //   cliCandidates(nodeDir), cliName    where Claude Code's CLI is looked for, after NIGHT_SHIFT_CLAUDE, and its file's name
 //   psQuote(s)                         a PowerShell single-quoted string
+//   schedule({ task, node, script, args, window, state, title })  starts node script args detached, outside the
+//                                      editor and the shell that ran it, and returns what started it (the task's name)
 
 import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
@@ -40,6 +42,8 @@ export function platformFor(name = process.platform, deps = {}) {
   const kill = deps.kill || ((pid, signal) => process.kill(pid, signal));
   const run = deps.execFileSync || execFileSync;
   const start = deps.spawn || spawn;
+  const writeFile = deps.writeFileSync || fs.writeFileSync;
+  const env = () => deps.env || process.env;
 
   // The temp folder in long form. %TEMP% is often written as an 8.3 short name (C:\Users\JOHNSM~1\…),
   // which the guard refuses in any path, so the tool's own temp paths all come from this one spelling.
@@ -130,7 +134,7 @@ export function platformFor(name = process.platform, deps = {}) {
     `[void]$k::SetThreadExecutionState([uint32]2147483649); while (Get-Process -Id ${pid} -ErrorAction SilentlyContinue) { Start-Sleep -Seconds 60 }`],
   { stdio: "ignore", windowsHide: true });
 
-  // No polling: a hidden PowerShell waits on the process handle. unless is a PowerShell regex: a live pid whose command
+  // No polling: a hidden PowerShell waits on the process handle. unless (required) is a PowerShell regex: a live pid whose command
   // line does not match it belongs to another program now (Windows reuses numbers), so what was waited for is gone.
   // Aborting signal kills the PowerShell and resolves "woken"; any other error rejects.
   const waitExit = (pid, { signal, unless } = {}) => new Promise((resolve, reject) => {
@@ -151,8 +155,30 @@ export function platformFor(name = process.platform, deps = {}) {
     path.join(homedir(), ".local", "bin", cliName),
   ];
 
+  // Through Task Scheduler's task `task`, written over each time. No trigger, so only start (or a runner handing over)
+  // runs it and a finished chain never comes back on its own; no time limit (schtasks' default stops a task after
+  // 72 h) and no battery stop, because the chain has no end time. Parallel, so a runner handing over can start the
+  // next one. A visible console (window) runs <state>/launch.cmd, titled night-shift <title>; a hidden one is conhost
+  // --headless, which no default terminal (Windows Terminal) takes over, so every child shares that hidden console
+  // too. A failure throws, with PowerShell's error in its stderr.
+  const schedule = ({ task, node, script, args, window = false, state, title = "" }) => {
+    const launcher = path.join(state, "launch.cmd");
+    // The title goes into a cmd line: only what cmd reads as plain text.
+    writeFile(launcher, `@echo off\r\ntitle night-shift ${String(title).replace(/[^\w .-]/g, "_")}\r\n"${node}" "${script}" %*\r\n`);
+    const argLine = args.map((a) => `"${a}"`).join(" ");
+    const [exe, argv] = window ? [launcher, argLine]
+      : [path.join(env().SystemRoot || "C:\\Windows", "System32", "conhost.exe"), `--headless "${node}" "${script}" ${argLine}`];
+    const q = psQuote;
+    run("powershell", ["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference = 'Stop'; " +
+      `$a = New-ScheduledTaskAction -Execute ${q(exe)} -Argument ${q(argv)}; ` +
+      "$s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances Parallel; " +
+      `Register-ScheduledTask -TaskName ${q(task)} -Action $a -Settings $s -Force | Out-Null; Start-ScheduledTask -TaskName ${q(task)}`],
+    { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+    return task;
+  };
+
   return { name, tempRoot, norm, foldsCase, samePath, fsHome, home, oddPath, tempRoots, sharedTemps, systemDirProblem, alive,
-    commandLine, killTree, keepAwake, waitExit, cliName, cliCandidates, psQuote };
+    commandLine, killTree, keepAwake, waitExit, cliName, cliCandidates, psQuote, schedule };
 }
 
 export const platform = platformFor();

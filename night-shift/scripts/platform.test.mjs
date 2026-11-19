@@ -152,6 +152,31 @@ test("waitExit resolves the PowerShell's exit code, \"woken\" on an abort, and r
   await assert.rejects(broken, /ENOENT/);
 });
 
+test("schedule writes launch.cmd and registers and starts the task, in a hidden console unless window", () => {
+  const files = [];
+  const ran = [];
+  const p = platformFor("win32", { env: { SystemRoot: "D:\\Win" }, writeFileSync: (f, t) => files.push([f, t]),
+    execFileSync: (file, args, opts) => ran.push([file, args, opts]) });
+  const at = { task: "night-shift-demo-app-0000abcd", node: "C:\\node\\node.exe", script: "C:\\skill\\scripts\\night-chain.mjs",
+    args: ["run", "--state", "C:\\st\\it's", "--headless"], state: "C:\\st\\it's", title: "demo&app" };
+  assert.equal(p.schedule(at), "night-shift-demo-app-0000abcd");
+  assert.deepEqual(files, [[path.join("C:\\st\\it's", "launch.cmd"),
+    '@echo off\r\ntitle night-shift demo_app\r\n"C:\\node\\node.exe" "C:\\skill\\scripts\\night-chain.mjs" %*\r\n']]);
+  const [file, args, opts] = ran[0];
+  assert.equal(file, "powershell");
+  assert.deepEqual(args.slice(0, 3), ["-NoProfile", "-NonInteractive", "-Command"]);
+  assert.deepEqual(opts, { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+  const conhost = path.join("D:\\Win", "System32", "conhost.exe");
+  assert.equal(args[3], "$ErrorActionPreference = 'Stop'; " +
+    `$a = New-ScheduledTaskAction -Execute '${conhost}' -Argument '--headless "C:\\node\\node.exe" "C:\\skill\\scripts\\night-chain.mjs" "run" "--state" "C:\\st\\it''s" "--headless"'; ` +
+    "$s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances Parallel; " +
+    "Register-ScheduledTask -TaskName 'night-shift-demo-app-0000abcd' -Action $a -Settings $s -Force | Out-Null; Start-ScheduledTask -TaskName 'night-shift-demo-app-0000abcd'");
+  p.schedule({ ...at, window: true, args: ["run", "--state", "C:\\st"] });
+  assert.ok(ran[1][1][3].includes(`-Execute ${p.psQuote(path.join("C:\\st\\it's", "launch.cmd"))} -Argument '"run" "--state" "C:\\st"'; `));
+  const failing = platformFor("win32", { writeFileSync: () => {}, execFileSync: () => { throw Object.assign(new Error("failed"), { stderr: "Access is denied." }); } });
+  assert.throws(() => failing.schedule(at), (e) => e.stderr === "Access is denied.");
+});
+
 test("cliCandidates are claude.exe beside node, in npm's global folder and the native installer's", () => {
   const p = platformFor("win32", { homedir: () => path.join(path.sep, "home", "u") });
   const home = path.join(path.sep, "home", "u"), bin = path.join("node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe");
