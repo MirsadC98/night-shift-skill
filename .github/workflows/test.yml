@@ -1,0 +1,51 @@
+# The suite and the guard's self-test. Windows is the gate: the runner, the watcher and their tests use Windows' own
+# tools (Task Scheduler, PowerShell, taskkill) today. macOS and Linux run the same commands but do not fail the
+# workflow until the code has a seam for what differs by system; their results show what is left to port.
+name: test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows, Node ${{ matrix.node }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest Node package.json's engines allows, and the newest LTS.
+        node: ["22", "lts/*"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm test
+
+  posix:
+    name: ${{ matrix.os }}, Node LTS (not required yet)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+      - name: Guard self-test
+        working-directory: night-shift
+        run: node scripts/guard.mjs --self-test
+      - name: Suite
+        if: ${{ !cancelled() }}
+        working-directory: night-shift
+        run: node --test "scripts/*.test.mjs"

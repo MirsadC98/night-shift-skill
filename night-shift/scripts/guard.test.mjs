@@ -3,7 +3,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -179,9 +178,10 @@ test("gh api writes are read in every spelling; reads pass", () => {
   assert.equal(bash("gh api graphql -f query='{ viewer { login } }'"), null);
 });
 
-// A repo in a throwaway folder whose .claude/night-shift.json holds `text`.
+// A repo in a throwaway folder whose .claude/night-shift.json holds `text`. Under the temp folder's long form: a CI
+// runner's TEMP may be an 8.3 name (C:\Users\RUNNER~1\...), which the guard refuses in any path it reads.
 const repoWithConfig = (text) => {
-  const repo = mkdtempSync(join(tmpdir(), "guard-config-test-"));
+  const repo = mkdtempSync(join(tempRoot(), "guard-config-test-"));
   mkdirSync(join(repo, ".claude"));
   writeFileSync(join(repo, ".claude", "night-shift.json"), typeof text === "string" ? text : JSON.stringify(text));
   return { ...env, NIGHT_SHIFT_REPO: repo };
@@ -587,8 +587,9 @@ test("an escaped backslash leaves the semicolon after it a separator; an escaped
 
 // ---------------------------------------------------------------- final-review fix wave B
 test("a short-form TEMP leaves the tool's own temp paths writable; a short name still is refused", () => {
-  // A directory junction named like an 8.3 name stands in for a volume that makes short names.
-  const base = mkdtempSync(join(tmpdir(), "night-short-temp-"));
+  // A directory junction named like an 8.3 name stands in for a volume that makes short names. The base is in long
+  // form, so that only the junction is short where the real TEMP is short too (a CI runner's C:\Users\RUNNER~1\...).
+  const base = mkdtempSync(join(tempRoot(), "night-short-temp-"));
   const long = join(base, "LongTempFolderName"), link = join(base, "LONGUS~1");
   mkdirSync(long);
   symlinkSync(long, link, "junction");

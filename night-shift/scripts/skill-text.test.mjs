@@ -177,3 +177,22 @@ test("package.json, CHANGELOG.md and the README agree with the code on the versi
   assert.ok(heading?.startsWith(`## ${base} `), `CHANGELOG.md's first version: ${heading}`);
   if (base !== VERSION) assert.match(heading, /unreleased/, "a pre-release version is the unreleased part");
 });
+
+// C4: CI runs the suite and the guard's self-test on Windows, the gate, on the oldest Node package.json's engines allows
+// and the newest LTS; macOS and Linux run them too but do not fail the workflow until the code has a seam for what
+// differs by system. README says which.
+test("the CI workflow tests Windows as the gate on the Node engines allows, and macOS and Linux without failing", { skip: !fs.existsSync(readmePath) && "no README beside this copy" }, () => {
+  const wf = fs.readFileSync(path.join(root, "..", ".github", "workflows", "test.yml"), "utf8").replace(/\r\n/g, "\n");
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, "..", "package.json"), "utf8"));
+  assert.match(wf, /^\s+- run: npm test$/m, "Windows runs package.json's test script");
+  assert.ok(wf.includes("run: node scripts/guard.mjs --self-test") && wf.includes('run: node --test "scripts/*.test.mjs"'), "macOS and Linux run the same two");
+  assert.ok(wf.includes(`node: ["${pkg.engines.node.replace(/^>=/, "")}", "lts/*"]`), "the oldest Node engines allows, and the newest LTS");
+  const [windows, posix] = wf.slice(wf.search(/^jobs:$/m)).split(/^  posix:$/m);
+  assert.ok(posix, "a posix job after the windows job");
+  assert.match(windows, /runs-on: windows-latest$/m);
+  assert.doesNotMatch(windows, /continue-on-error/, "Windows is the gate");
+  for (const os of ["ubuntu-latest", "macos-latest"]) assert.ok(posix.includes(os), os);
+  assert.match(posix, /^    continue-on-error: true$/m);
+  assert.match(posix, /if: \$\{\{ !cancelled\(\) \}\}/, "the suite runs after a failed self-test too");
+  assert.match(fs.readFileSync(readmePath, "utf8"), /`\.github\/workflows\/test\.yml`/);
+});
