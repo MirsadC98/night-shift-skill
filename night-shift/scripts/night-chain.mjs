@@ -80,7 +80,7 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { buildReport, userWaits, stateLang, questionLines, estimatedCost } from "./night-report.mjs";
-import { slug, pointerFile, readPointer, writePointer, isRunner, stopRun } from "./runs.mjs";
+import { slug, pointerFile, readPointer, writePointer, isRunner, stopRun, workTree } from "./runs.mjs";
 import { strings, langOf, loadLang, langFile } from "./lang/index.mjs";
 import { mergedConfig, isLangCode, MODES, CONFIG_KEYS, stateDirProblem, tempRoot, isMain, claudeHome, readGlobalConfig, globalConfigFile,
   projectConfigFile } from "./config.mjs";
@@ -129,9 +129,10 @@ const now = () => new Date().toLocaleString("sv-SE");
 const today = () => now().slice(0, 10).replace(/-/g, "");
 const read = (f) => (fs.existsSync(f) ? fs.readFileSync(f, "utf8") : "");
 const parseOr = (t, d) => { try { return JSON.parse(t) || d; } catch { return d; } };
-// The settings files below the runner's layer: the user's, the project's and its local one.
-const lowerSettings = (repo) => [path.join(claudeHome(), "settings.json"), path.join(repo, ".claude", "settings.json"),
-  path.join(repo, ".claude", "settings.local.json")].map((f) => parseOr(read(f), {}));
+// The settings files below the runner's layer: the user's, and each tree's project and local one. A worktree run's
+// sessions read the worktree's; the main tree's are read too, which can only add keys the layer writes a level under.
+const lowerSettings = (...trees) => [path.join(claudeHome(), "settings.json"), ...trees.flatMap((t) => [path.join(t, ".claude", "settings.json"),
+  path.join(t, ".claude", "settings.local.json")])].map((f) => parseOr(read(f), {}));
 // CLAUDE_CODE_EFFORT_LEVEL would set every level, the subagents' included.
 const withoutEffortEnv = (env) => { const { CLAUDE_CODE_EFFORT_LEVEL, ...rest } = env; return rest; };
 const { alive } = platform;
@@ -248,6 +249,24 @@ const firstSession = (state) => Number(parseOr(read(path.join(state, "resume.jso
 // The last session --max-sessions lets run: start stores it (lastSession); a run.json from before 2026-11-19 has only
 // maxSessions, which was that number.
 const lastSessionOf = (run) => run.lastSession ?? run.maxSessions ?? null;
+
+// K6: why a worktree run cannot go on in its tree, in chain.log's words, or null: the tree must still be a worktree at
+// that path, on its branch. Checked before every session, a resumed one too.
+function treeProblem(run) {
+  if (!run.tree) return null;
+  if (!fs.existsSync(run.tree)) return `the worktree ${run.tree} is gone`;
+  // A git that hangs must not hold the chain: after 30 s it counts as failed.
+  const git = (args) => { try { return execFileSync("git", args, { cwd: run.tree, encoding: "utf8", windowsHide: true, timeout: 30_000, stdio: ["ignore", "pipe", "ignore"] }).trim(); } catch { return null; } };
+  // git answers with the real path, and the tree may be named through a link: both compared as the file system resolves them.
+  const real = (p) => { try { return fs.realpathSync.native(p); } catch { return p; } };
+  const top = git(["rev-parse", "--show-toplevel"]);
+  if (!top || !platform.samePath(real(top), real(run.tree))) return `the worktree ${run.tree} is no longer a git worktree (${top ? `git reads it as part of ${top}` : "git cannot read it"})`;
+  if (!run.branch) return null;
+  // The full name: --short answers heads/<branch> when a tag has the branch's name.
+  const ref = git(["symbolic-ref", "--quiet", "HEAD"]);
+  if (ref === `refs/heads/${run.branch}`) return null;
+  return `the worktree ${run.tree} is on ${ref ? `the branch ${ref.replace(/^refs\/heads\//, "")}` : "no branch"}, not on ${run.branch}`;
+}
 
 // The session chain.log shows as started and never ended, with its conversation id.
 export function cutOffSession(state) {
@@ -578,7 +597,7 @@ async function runChain(opt) {
       // Not NODE_OPTIONS or NIGHT_SHIFT_*: a session could plant a --require or point the guard's
       // state folder elsewhere through them (Windows names are case-blind, hence the i).
       env: { ...Object.fromEntries(Object.entries(prev.env && typeof prev.env === "object" ? prev.env : {}).filter(([k]) => !/^(NODE_OPTIONS$|NIGHT_SHIFT_)/i.test(k))), CLAUDE_CODE_SUBAGENT_MODEL: SUB_MODEL },
-      modelSettings: nightModelSettings(prev.modelSettings, lowerSettings(repo), { [MAIN_MODEL]: premiumMode ? MAIN_EFFORT[MAIN_MODEL] : run.effort || MAIN_EFFORT[MAIN_MODEL],
+      modelSettings: nightModelSettings(prev.modelSettings, lowerSettings(...new Set([workTree(run), repo])), { [MAIN_MODEL]: premiumMode ? MAIN_EFFORT[MAIN_MODEL] : run.effort || MAIN_EFFORT[MAIN_MODEL],
         ...(premiumMode ? { [main]: run.effort || MAIN_EFFORT[main] } : {}), ...levels }, runModelIds(run)),
     }, null, 2));
   };
@@ -704,6 +723,9 @@ async function runChain(opt) {
     if (run.deadline && Date.now() >= run.deadline) finish(`reached ${run.until}`);
     if (!prompt) finish("next-prompt.md is empty");
     if (!asked.body.trim()) finish("next-prompt.md holds only MODEL/EFFORT lines");
+    // After STOP: a last session may have finished the work and then removed its tree.
+    const gone = treeProblem(run);
+    if (gone) finish(gone);
     // --weekly-ceiling and --max-usd: no new session while the seven-day window's last reading, or what this start's
     // sessions cost, is at or over it. A session a limit or an error cut off still goes on: its work may be uncommitted.
     // next-prompt.md stays for a later start.
@@ -956,11 +978,14 @@ function runSession(run, session, plan, nn, resume, rules = "", mcp = ["--strict
     let settled = false;
     const resolve = (r) => { if (!settled) { settled = true; resolve0(r); } };
     const child = spawn(cmd, [...pre, ...args], {
-      cwd: run.repo,
+      cwd: workTree(run),
       // -p stops background agents 10 min after the main turn ends (run 2's #18 lost its work so);
       // the session timer above still bounds the session.
       // Every Node process of the session hides the windows of what it starts (hide-windows.cjs).
-      env: { ...withoutEffortEnv(process.env), PATH: run.path, NIGHT_SHIFT: "1", NIGHT_SHIFT_STATE: run.state, NIGHT_SHIFT_SKILL: SKILL_DIR, NIGHT_SHIFT_REPO: run.repo,
+      env: { ...withoutEffortEnv(process.env), PATH: run.path, NIGHT_SHIFT: "1", NIGHT_SHIFT_STATE: run.state, NIGHT_SHIFT_SKILL: SKILL_DIR, NIGHT_SHIFT_REPO: workTree(run),
+        // K6: the guard reads the project's rules there and keeps the session off its rule files and .git (guard.mjs);
+        // empty for a run on the checked-out branch, so a value this runner inherited never reaches its guard.
+        NIGHT_SHIFT_MAIN_TREE: run.tree ? run.repo : "",
         NIGHT_SHIFT_SESSION: String(session), NIGHT_SHIFT_UNTIL: run.until || "", CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0",
         // A Fable or Mythos session whose allowance runs out would go on, on another model, on its own;
         // this ends it instead (model_substitution_disabled), so the runner hands the piece to Opus.
@@ -1070,7 +1095,7 @@ async function waitChain(opt) {
     console.log([...report(statusHead(pointerOr(repo) || first, false, T)),
       T.cli.userWaits(waits), "",
       ...(asked.length ? [T.cli.asked, ...asked, ""] : []),
-      T.cli.reportLine(path.resolve(repo, run.report || "NIGHT_RUNS.md"), `node "${SELF}" status --repo "${repo}"`)].join("\n"));
+      T.cli.reportLine(path.resolve(workTree(run) || repo, run.report || "NIGHT_RUNS.md"), `node "${SELF}" status --repo "${repo}"`)].join("\n"));
   };
   const crashed = (why) => {
     const tail = read(path.join(state, "chain.log")).trim().split("\n").slice(-3).map((l) => `  ${l}`);
@@ -1253,7 +1278,7 @@ async function doctor(opt) {
   const self = spawnSync(NODE, [GUARD, "--self-test"], { encoding: "utf8", windowsHide: true, timeout: 120_000 });
   row(self.status === 0 ? "ok" : "FAIL", "guard", `self-test: ${String(self.stdout || "").trim().split("\n").at(-1) || (self.error ? self.error.message : `exit ${self.status}`)}`);
   const hook = guardHook(), cmd = `${hook.command} ${hook.args.join(" ")}`;
-  const env = { ...withoutEffortEnv(process.env), NIGHT_SHIFT: "1", NIGHT_SHIFT_REPO: repo || "", NIGHT_SHIFT_STATE: state, NIGHT_SHIFT_SKILL: SKILL_DIR };
+  const env = { ...withoutEffortEnv(process.env), NIGHT_SHIFT: "1", NIGHT_SHIFT_REPO: repo || "", NIGHT_SHIFT_MAIN_TREE: "", NIGHT_SHIFT_STATE: state, NIGHT_SHIFT_SKILL: SKILL_DIR };
   const ask = (tool_name, tool_input) => {
     const r = spawnSync(hook.command, hook.args, { input: JSON.stringify({ hook_event_name: "PreToolUse", tool_name, tool_input, cwd: repo || process.cwd() }),
       encoding: "utf8", windowsHide: true, timeout: hook.timeout * 1000, env });

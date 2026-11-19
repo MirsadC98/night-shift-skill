@@ -17,6 +17,9 @@ const same = live.samePath;
 // Also the name of the repository's scheduled task (night-chain.mjs, scheduleRun).
 export const slug = (repo) => `${path.basename(repo)}-${crypto.createHash("sha1").update(repo.toLowerCase()).digest("hex").slice(0, 8)}`;
 export const pointerFile = (repo, home = os.homedir()) => path.join(claudeHome(home), "night-shift", "runs", `${slug(repo)}.json`);
+// K6: the tree a run's work is in: its worktree (run.json's tree) when it runs on one, else the repository. run.repo
+// stays the main tree: the pointer's key, the task's name, the rules and the MCP configs are read there.
+export const workTree = (run) => run.tree || run.repo;
 export const readPointer = (repo) => { const t = read(pointerFile(repo)); return t ? JSON.parse(t) : null; };
 export const writePointer = (repo, data) => {
   fs.mkdirSync(path.dirname(pointerFile(repo)), { recursive: true });

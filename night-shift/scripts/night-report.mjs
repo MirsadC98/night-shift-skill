@@ -28,7 +28,7 @@ import { sessionCard, eventLine, chainCard, statusCard, reportCard, reportSectio
 import { sessionPlan, resolveMode, isPremium, modelName as familyName, MAIN_MODEL, PREMIUM } from "./effort.mjs";
 import { strings, langOf, loadLang } from "./lang/index.mjs";
 import { isMain, claudeHome, readGlobalConfig, globalConfigFile } from "./config.mjs";
-import { stopRun } from "./runs.mjs";
+import { stopRun, workTree } from "./runs.mjs";
 import { platform } from "./platform.mjs";
 import { sendWebhook, webhookFile, plainText } from "./webhook.mjs";
 
@@ -376,8 +376,8 @@ const reportCommit = (T) => new RegExp(`^\\S+ docs: (?:${[...new Set([strings("e
 
 // A job's night-report section, read once per collect (the report runs to thousands of lines).
 function sectionOf(c, s) {
-  if (!c.run.repo) return null;
-  c.reportText ??= read(path.resolve(c.run.repo, c.run.report || "NIGHT_RUNS.md"));
+  if (!workTree(c.run)) return null;
+  c.reportText ??= read(path.resolve(workTree(c.run), c.run.report || "NIGHT_RUNS.md"));
   const key = `${s.nn} ${s.start}`;
   if (!c.sections.has(key)) c.sections.set(key, reportSection(c.reportText, s.nn, hm(when(s.start)), /^\d{4}-\d{2}-\d{2}/.exec(s.start)?.[0] ?? null));
   return c.sections.get(key);
@@ -533,9 +533,9 @@ export function buildReport(state, { headline = "", focus = null, pid = null } =
   }
   if (timeline.length) out.push(`<b>${T.timelineHead}</b> ${T.timelineNote}\n<pre>${esc(timeline.join("\n"))}</pre>`);
 
-  if (run.repo && run.startedAt) {
-    const commits = git(run.repo, ["log", `--since=${run.startedAt}`, "--format=%h %s"]).split("\n").filter(Boolean);
-    const ahead = git(run.repo, ["rev-list", "--count", "@{u}..HEAD"]);
+  if (workTree(run) && run.startedAt) {
+    const commits = git(workTree(run), ["log", `--since=${run.startedAt}`, "--format=%h %s"]).split("\n").filter(Boolean);
+    const ahead = git(workTree(run), ["rev-list", "--count", "@{u}..HEAD"]);
     const head = `<b>${T.commitsHead}</b> · ${commits.length}${ahead ? ` · ${T.unpushed(ahead)}` : ""}`;
     out.push(`${head}${commits.length ? `\n${commits.slice(0, 8).map((c) => esc(c.slice(0, 72))).join("\n")}${commits.length > 8 ? `\n${T.moreCommits(commits.length - 8)}` : ""}` : ""}\n${T.reportLabel}: ${esc(run.report || "NIGHT_RUNS.md")}`);
   }
@@ -571,7 +571,7 @@ function jobFacts(c, s) {
   const section = sectionOf(c, s);
   const range = [`--since=${s.start}`, ...(s.end ? [`--until=${s.end}`] : [])];
   const isReport = reportCommit(T);
-  const commits = c.run.repo ? git(c.run.repo, ["log", ...range, "--format=%h %s"]).split("\n")
+  const commits = workTree(c.run) ? git(workTree(c.run), ["log", ...range, "--format=%h %s"]).split("\n")
     .filter((l) => l && !isReport.test(l)) : [];
   const w = s.limits.at(-1)?.unifiedWindows || {};
   return {

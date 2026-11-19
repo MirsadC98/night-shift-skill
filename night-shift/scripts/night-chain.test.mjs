@@ -3248,3 +3248,100 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     assert.doesNotMatch(fs.readFileSync(path.join(state, "chain.log"), "utf8"), /chain ends: /);
   } finally { server.close(); }
 });
+
+// ---------------------------------------------------------------- K6: a chain on its own worktree
+// The test's repository with one commit and its worktree <root>/repo-night on night-shift, made here by the test (start
+// makes it in a later task) and named in run.json as start names it. git gets its identity per call.
+const gitT = (cwd, ...args) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", ...args], { cwd, encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }).trim();
+const REPORT_CLI = path.join(path.dirname(CHAIN), "night-report.mjs");
+function worktreeSetup(fake) {
+  const s = setup();
+  gitT(s.repo, "commit", "-q", "--allow-empty", "-m", "base");
+  gitT(s.repo, "worktree", "add", "-q", "-b", "night-shift", path.join(path.dirname(s.repo), `${path.basename(s.repo)}-night`));
+  const tree = fs.realpathSync.native(path.join(path.dirname(s.repo), `${path.basename(s.repo)}-night`));
+  fs.writeFileSync(path.join(s.root, "fake-claude.mjs"), fake);
+  const run = JSON.parse(fs.readFileSync(path.join(s.state, "run.json"), "utf8"));
+  fs.writeFileSync(path.join(s.state, "run.json"), JSON.stringify({ ...run, maxSessions: 1, startedAt: "2000-01-01 00:00:00", tree, branch: "night-shift" }));
+  return { ...s, tree };
+}
+
+test("a run.json with a worktree runs its sessions there, names the main tree for the guard, and reads its report and commits there", async () => {
+  const w = worktreeSetup(`import fs from "node:fs"; import path from "node:path"; import { execFileSync } from "node:child_process";
+const st = process.env.NIGHT_SHIFT_STATE;
+fs.writeFileSync(path.join(st, "where.json"), JSON.stringify({ cwd: process.cwd(), repo: process.env.NIGHT_SHIFT_REPO, main: process.env.NIGHT_SHIFT_MAIN_TREE ?? null }));
+execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "work in the tree"], { windowsHide: true });
+const t = new Date().toLocaleString("sv-SE");
+fs.writeFileSync("NIGHT_RUNS.md", "## " + t.slice(0, 10) + " · run 1 · session 01 (" + t.slice(11, 16) + "–" + t.slice(11, 16) + ") · tree work\\n\\n**Waits for you**\\n- New: none.\\n\\n**Remaining:** 0 sessions\\n");
+fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done");
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-1", result: "ok" }));
+`);
+  // A tag named like the branch (git's short name for the branch is then heads/night-shift) is no other branch.
+  gitT(w.repo, "tag", "night-shift");
+  // The settings layer writes a level under each model key a lower layer names: the worktree's, and the main tree's.
+  for (const [dir, key] of [[w.tree, "claude-sonnet-9-9"], [w.repo, "claude-haiku-9-9"]]) {
+    fs.mkdirSync(path.join(dir, ".claude"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".claude", "settings.json"), JSON.stringify({ modelSettings: { [key]: {} } }));
+  }
+  const { code } = await runOnce(["--state", w.state, "--headless"], w.env, w.root);
+  assert.equal(code, 0);
+  await waitForLog(w.state, /chain ends: STOP: done/);
+  const layer = JSON.parse(fs.readFileSync(path.join(w.state, "night-settings.json"), "utf8")).modelSettings;
+  assert.ok(layer["claude-sonnet-9-9"] && layer["claude-haiku-9-9"], JSON.stringify(layer));
+  const where = JSON.parse(fs.readFileSync(path.join(w.state, "where.json"), "utf8"));
+  assert.equal(fs.realpathSync.native(where.cwd), w.tree);
+  assert.equal(where.repo, w.tree);
+  assert.equal(where.main, w.repo);
+  // The work is on night-shift in the worktree; the main tree's branch has only its own commit.
+  assert.doesNotMatch(gitT(w.repo, "log", "--format=%s"), /work in the tree/);
+  const shown = execFileSync(process.execPath, [REPORT_CLI, "show", "--state", w.state], { env: w.env, cwd: w.root, encoding: "utf8" });
+  assert.match(shown, /work in the tree/);
+  assert.match(shown, /tree work/);
+  // wait names the worktree's report; the pointer stays the main tree's.
+  const waited = execFileSync(process.execPath, [CHAIN, "wait", "--repo", w.repo], { env: w.env, cwd: w.root, encoding: "utf8" });
+  assert.match(waited, new RegExp(lit(path.join(w.tree, "NIGHT_RUNS.md"))));
+  assert.equal(path.resolve(pointerOf(w.home).state), path.resolve(w.state));
+});
+
+test("a worktree that is gone, or on another branch, ends the chain before its session, and the report still reads", async () => {
+  const RAN = `import fs from "node:fs"; import path from "node:path";
+fs.writeFileSync(path.join(process.env.NIGHT_SHIFT_STATE, "ran"), "1");
+fs.writeFileSync(path.join(process.env.NIGHT_SHIFT_STATE, "next-prompt.md"), "STOP: done");
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-1", result: "ok" }));
+`;
+  const cases = [
+    [(w) => gitT(w.repo, "worktree", "remove", "--force", w.tree), (w) => `the worktree ${w.tree} is gone`],
+    [(w) => fs.rmSync(path.join(w.tree, ".git")), (w) => `the worktree ${w.tree} is no longer a git worktree (git `],
+    // A last session that wrote STOP and removed its tree ends the chain as STOP.
+    [(w) => { fs.writeFileSync(path.join(w.state, "next-prompt.md"), "STOP: finished"); gitT(w.repo, "worktree", "remove", "--force", w.tree); }, () => "STOP: finished"],
+    [(w) => gitT(w.tree, "switch", "-q", "-c", "other"), (w) => `the worktree ${w.tree} is on the branch other, not on night-shift`],
+    [(w) => gitT(w.tree, "switch", "-q", "--detach"), (w) => `the worktree ${w.tree} is on no branch, not on night-shift`],
+  ];
+  for (const [prep, why] of cases) {
+    const w = worktreeSetup(RAN);
+    prep(w);
+    const prompt = fs.readFileSync(path.join(w.state, "next-prompt.md"), "utf8");
+    const { code } = await runOnce(["--state", w.state, "--headless"], w.env, w.root);
+    assert.equal(code, 0);
+    const log = await waitForLog(w.state, /chain ends: /);
+    assert.match(log, new RegExp(`chain ends: ${lit(why(w))}`));
+    assert.equal(fs.existsSync(path.join(w.state, "ran")), false, "no session may start");
+    // What a later start --state goes on from stays.
+    assert.equal(fs.readFileSync(path.join(w.state, "next-prompt.md"), "utf8"), prompt);
+    assert.match(execFileSync(process.execPath, [REPORT_CLI, "show", "--state", w.state], { env: w.env, cwd: w.root, encoding: "utf8" }), /\S/);
+  }
+});
+
+test("a run on the checked-out branch gives its sessions an empty main tree, whatever the runner inherited", async () => {
+  const s = setup();
+  fs.writeFileSync(path.join(s.root, "fake-claude.mjs"), `import fs from "node:fs"; import path from "node:path";
+const st = process.env.NIGHT_SHIFT_STATE;
+fs.writeFileSync(path.join(st, "where.json"), JSON.stringify({ cwd: process.cwd(), repo: process.env.NIGHT_SHIFT_REPO, main: process.env.NIGHT_SHIFT_MAIN_TREE ?? null }));
+fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done");
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-1", result: "ok" }));
+`);
+  const { code } = await runOnce(["--state", s.state, "--headless"], { ...s.env, NIGHT_SHIFT_MAIN_TREE: path.join(s.root, "elsewhere") }, s.root);
+  assert.equal(code, 0);
+  await waitForLog(s.state, /chain ends: STOP: done/);
+  const where = JSON.parse(fs.readFileSync(path.join(s.state, "where.json"), "utf8"));
+  assert.deepEqual([fs.realpathSync.native(where.cwd), where.repo, where.main], [fs.realpathSync.native(s.repo), s.repo, ""]);
+});
