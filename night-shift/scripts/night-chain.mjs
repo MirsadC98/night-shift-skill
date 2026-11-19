@@ -28,7 +28,8 @@
 //    --mode fable or --mode mythos ("mode") makes that model every session's model at high, and Opus
 //    at xhigh (never max) stands in while its allowance is at or over the ceiling or used up.
 //    --weekly-ceiling ("weeklyCeiling", default none) starts no new session once the seven-day window
-//    is at or over that share, and ends the chain with next-prompt.md kept for a start with --state)
+//    is at or over that share, and ends the chain with next-prompt.md kept for a start with --state;
+//    at or over 90% of the five-hour window a session waits for its reset)
 //   node night-chain.mjs status --repo <dir>
 //   node night-chain.mjs wait   --repo <dir> [--state <dir>]  (returns once the chain is over: exit 0
 //                               with status's first lines and what waits for the user, 2 if it died;
@@ -108,7 +109,8 @@ const ratioArg = (v, d) => { const n = Number(v); return v == null || v === true
 const countArg = (v, d) => { const n = Number(v); return v == null || v === true || !Number.isFinite(n) || n < 0 ? d : Math.floor(n); };
 const pct = (u) => `${Math.round(u * 100)}%`;
 // <state>/limits.json: { week: { ratio, resetsAt (s), at (ms) }, the seven-day window's last reading (--weekly-ceiling),
-// and fieldsGone's memo { seen, told } (U14). A share as the stream gives it (0–1), or a percentage.
+// five: the same of the five-hour window (FIVE_HOUR_WAIT), and fieldsGone's memo { seen, told } (U14). A share as the
+// stream gives it (0–1), or a percentage.
 const shareOf = (u) => (u > 1 ? u / 100 : u);
 // What each known stream field feeds, for the line that says it stopped arriving (fieldsGone).
 const FIELD_USE = {
@@ -126,11 +128,17 @@ export const weekOver = (week, ceiling, at = Date.now()) => {
   if (!ceiling || typeof week?.ratio !== "number" || (week.resetsAt && week.resetsAt * 1000 <= at)) return null;
   return shareOf(week.ratio) >= ceiling ? { ...week, share: shareOf(week.ratio) } : null;
 };
-// At start: the reading while its window has not reset, the fields seen, and nothing told yet (each chain tells once).
+// T10 (2026-11-19): a session started at 96 % of the five-hour window was cut four minutes in, after it had started
+// three reviewers whose caches then expired. No session starts at or over this share of it; the chain waits for the
+// reset its last reading names (a reading that names none is not waited for).
+export const FIVE_HOUR_WAIT = 0.9;
+export const fiveOver = (five, at = Date.now()) => (five?.resetsAt ? weekOver(five, FIVE_HOUR_WAIT, at) : null);
+// At start: the readings while their windows have not reset, the fields seen, and nothing told yet (each chain tells once).
 const keepLimits = (state) => {
   const l = readLimits(state);
-  const week = l.week?.resetsAt * 1000 > Date.now() && typeof l.week.ratio === "number" ? l.week : null;
-  fs.writeFileSync(limitsFile(state), JSON.stringify({ ...(week ? { week } : {}), seen: Array.isArray(l.seen) ? l.seen : [], told: [] }, null, 2));
+  const live = (r) => (r?.resetsAt * 1000 > Date.now() && typeof r.ratio === "number" ? r : null);
+  const week = live(l.week), five = live(l.five);
+  fs.writeFileSync(limitsFile(state), JSON.stringify({ ...(week ? { week } : {}), ...(five ? { five } : {}), seen: Array.isArray(l.seen) ? l.seen : [], told: [] }, null, 2));
   return week;
 };
 // Hours as people read them: two decimals at most, no trailing zeros, and "<0.01" instead of a 0 or an exponent.
@@ -631,6 +639,22 @@ async function runChain(opt) {
     // --weekly-ceiling: no new session while the seven-day window's last reading is at or over it. A session a limit
     // or an error cut off still goes on: its work may be uncommitted. next-prompt.md stays for a later start.
     if (!pendingResume()) ceilingStop();
+    // T10: at or over FIVE_HOUR_WAIT of the five-hour window, the next session waits for its reset, a resumed one too: cut
+    // off again, its work would stay half done. A reset no session may start after (--until), or farther than
+    // --max-wait-hours, ends the chain now, as the usage-limit wait below does, with next-prompt.md kept.
+    const full = fiveOver(readLimits(state).five);
+    if (full) {
+      const until = full.resetsAt * 1000;
+      const why = `the five-hour window is at ${pct(full.share)}, at or over ${pct(FIVE_HOUR_WAIT)}, and resets ${stamp(until)}`;
+      if (run.deadline && until > run.deadline) finish(`${why}, after ${run.until}; next-prompt.md stays for a start with --state`);
+      const maxWait = run.maxWaitHours ?? 6;
+      if (until - Date.now() > maxWait * 3_600_000) finish(`${why}, more than ${hoursText(maxWait)} h away (--max-wait-hours); next-prompt.md stays for a start with --state`);
+      log(`five-hour window at ${pct(full.share)} (no session starts at or over ${pct(FIVE_HOUR_WAIT)}): the next session starts when it resets ${stamp(until)}`);
+      // The line the watcher, status and the report read as a usage-limit wait.
+      log(`usage limit: waiting until ${new Date(until).toLocaleString("sv-SE")}`);
+      await waitUntil(until);
+      continue;
+    }
 
     const nn = String(session).padStart(2, "0");
     fs.writeFileSync(path.join(state, "prompts", `${nn}.md`), prompt);
@@ -677,8 +701,9 @@ async function runChain(opt) {
     log(`session ${nn} limits: ${windowSpan(result.windows)}; it ran on ${ran}`);
     const fw = result.windows.latest?.seven_day_overage_included;
     if (fw?.utilization != null) writeFable({ ratio: fw.utilization, ratioResetsAt: fw.resetsAt ?? null, ratioAt: Date.now() });
-    const sw = result.windows.latest?.seven_day;
+    const sw = result.windows.latest?.seven_day, fh = result.windows.latest?.five_hour;
     if (typeof sw?.utilization === "number") writeLimits(state, { week: { ratio: sw.utilization, resetsAt: sw.resetsAt ?? null, at: Date.now() } });
+    if (typeof fh?.utilization === "number") writeLimits(state, { five: { ratio: fh.utilization, resetsAt: fh.resetsAt ?? null, at: Date.now() } });
     if (isPremium(plan.family) && (result.switchedTo || result.mainModels.some((m) => familyOf(m) !== plan.family)))
       log(`session ${nn} was to run on ${modelName(plan.family)}, but ${result.switchedTo ? `the CLI switched it to ${result.switchedTo}` : `its turns ran on ${ran}`}`);
 

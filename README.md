@@ -148,7 +148,7 @@ So the rule from the top of this page stands: run it only on a repository you ha
 
 ## When a session fails
 
-- **A usage limit** pauses the chain, and the session it cut off resumes in the same conversation once the limit resets. A reset more than `maxWaitHours` away, or after `--until`, ends the chain (`the usage limit resets …`) with `resume.json` (or the handover) kept for the next `start`.
+- **A usage limit** pauses the chain, and the session it cut off resumes in the same conversation once the limit resets. A reset more than `maxWaitHours` away, or after `--until`, ends the chain (`the usage limit resets …`) with `resume.json` (or the handover) kept for the next `start`. No session starts at or over 90 % of the five-hour window: one started there is cut off minutes in, and its subagents' caches are lost. The chain waits for that window's reset instead (`five-hour window at …` in `chain.log`, then the usage-limit wait), under the same two rules, and a resumed session waits the same way.
 - **An API or network error** is retried: the same conversation goes on when the session had already worked, else its prompt runs again. The waits are 1, 2, 5, 10, 20 and then 30 minutes, and they do not count toward "two handovers fail in a row". After `maxWaitHours` of failures the chain ends (`session NN kept failing for N h (…)`).
 - **A refused login** or a bad request ends the chain at once (`session NN cannot run: …`), since the next session would fail the same way.
 - **A runner that crashes** ends the chain with `the runner crashed: …`.

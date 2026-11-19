@@ -510,7 +510,8 @@ async function fableRun(first, script, runPatch = {}, before = null) {
   fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake, maxSessions: null, ...runPatch }));
   fs.writeFileSync(path.join(state, "next-prompt.md"), first);
   if (before) before(state, { home: env.USERPROFILE, repo: run.repo });
-  const { code } = await runOnce(["--state", state, "--headless"], { ...env, TEST_SCRIPT: JSON.stringify(script) }, root);
+  // A short look at the clock, so a wait of a few seconds (the five-hour window's) ends on time.
+  const { code } = await runOnce(["--state", state, "--headless"], { ...env, TEST_SCRIPT: JSON.stringify(script), NIGHT_SHIFT_LIMIT_TICK_MS: "50" }, root);
   const log = fs.readFileSync(path.join(state, "chain.log"), "utf8");
   assert.equal(code, 0, log);
   const seen = (n) => JSON.parse(fs.readFileSync(path.join(state, `seen-${n}.json`), "utf8"));
@@ -2267,6 +2268,11 @@ test("start keeps the seven-day window's reading until it resets, and the stream
   assert.deepEqual(limitsAfter({ week, seen, told: ["unifiedWindows.seven_day"] }), { week, seen, told: [] });
   assert.deepEqual(limitsAfter({ week: { ...week, resetsAt: past }, seen, told: ["ceiling"] }), { seen, told: [] });
   assert.deepEqual(limitsAfter({ week: { ratio: 0.86, resetsAt: null, at: 1 } }), { seen: [], told: [] }, "a reading that names no reset is not kept");
+  // T10: the five-hour window's reading the same way.
+  const five = { ratio: 0.93, resetsAt: ahead, at: 1 };
+  assert.deepEqual(limitsAfter({ week, five, seen }), { week, five, seen, told: [] });
+  assert.deepEqual(limitsAfter({ five: { ...five, resetsAt: past } }), { seen: [], told: [] });
+  assert.deepEqual(limitsAfter({ five: { ...five, resetsAt: null } }), { seen: [], told: [] });
   assert.deepEqual(limitsAfter("{ broken"), { seen: [], told: [] });
 });
 
@@ -2302,6 +2308,48 @@ test("--weekly-ceiling: no new session once the seven-day window is at or over i
   const none = await fableRun("first", { 1: { week: 0.95, weekResets: resets, model: opus, next: "second" }, 2: { next: "STOP: done" } });
   assert.match(none.log, /session 02 starts: second/);
   assert.match(none.log, /chain ends: STOP: done/);
+});
+
+// T10: a session started at 96 % of the five-hour window was cut four minutes in, after it had started three reviewers
+// whose caches then expired. No session starts at or over 90 % of it; the chain waits for the reset the reading names.
+const fiveEvent = (u, resetsAt) => JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "allowed",
+  unifiedWindows: { five_hour: { utilization: u, resetsAt }, seven_day: { utilization: 0.3 } } } });
+test("no session starts at or over 90% of the five-hour window: the chain waits for its reset and says so", async () => {
+  const soon = Math.floor(Date.now() / 1000) + 3;
+  const r = await fableRun("first", { 1: { lines: [fiveEvent(0.92, soon)], next: "second" }, 2: { next: "STOP: done" } });
+  assert.match(r.log, /five-hour window at 92% \(no session starts at or over 90%\): the next session starts when it resets \d{4}-\d\d-\d\d \d\d:\d\d\n\[[^\]]+\] usage limit: waiting until \d{4}-\d\d-\d\d \d\d:\d\d:\d\d\n\[[^\]]+\] session 02 starts: second/);
+  assert.match(r.log, /chain ends: STOP: done/);
+  const limits = JSON.parse(fs.readFileSync(path.join(r.state, "limits.json"), "utf8"));
+  assert.deepEqual([limits.five.ratio, limits.five.resetsAt, typeof limits.five.at], [0.92, soon, "number"]);
+  // Under 90 %, or a reading that names no reset, the next session starts at once.
+  for (const line of [fiveEvent(0.89, soon), fiveEvent(0.97, null)]) {
+    const go = await fableRun("first", { 1: { lines: [line], next: "second" }, 2: { next: "STOP: done" } });
+    assert.doesNotMatch(go.log, /five-hour window at|usage limit: waiting/);
+    assert.match(go.log, /session 02 starts: second/);
+  }
+});
+
+test("the five-hour wait: a reading an earlier start kept holds the first session and a resumed one, and a reset after --until ends the chain", async () => {
+  // In seconds from the run's start: each run waits for its own reset.
+  const soon = 3, later = 3_600;
+  const keep = (inS, resume) => (state) => {
+    fs.writeFileSync(path.join(state, "limits.json"), JSON.stringify({ five: { ratio: 95, resetsAt: Math.floor(Date.now() / 1000) + inS, at: Date.now() } }));
+    if (resume) fs.writeFileSync(path.join(state, "resume.json"), JSON.stringify({ nn: "01", sessionId: "00000000-0000-4000-8000-000000000001", why: "error" }));
+  };
+  const kept = await fableRun("first", { 1: { next: "STOP: done" } }, {}, keep(soon));
+  assert.match(kept.log, /five-hour window at 95% \(no session starts at or over 90%\)[^\n]*\n[^\n]*usage limit: waiting until [^\n]*\n[^\n]*session 01 starts: first/);
+  // A session an error cut off waits too: a session started into a full window is cut again, its work half done.
+  const resumed = await fableRun("first", { 1: { next: "STOP: done" } }, {}, keep(soon, true));
+  assert.match(resumed.log, /usage limit: waiting until [^\n]*\n[^\n]*session 01 resumes 00000000-0000-4000-8000-000000000001 after the error/);
+  // No session may start after --until, so a reset after it ends the chain now, next-prompt.md kept.
+  const late = await fableRun("first", { 1: { next: "STOP: done" } }, { until: "23:59", deadline: Date.now() + 600_000 }, keep(later));
+  assert.match(late.log, /chain ends: the five-hour window is at 95%, at or over 90%, and resets \d{4}-\d\d-\d\d \d\d:\d\d, after 23:59; next-prompt\.md stays for a start with --state$/m);
+  assert.doesNotMatch(late.log, /session 01 starts/);
+  assert.equal(fs.readFileSync(path.join(late.state, "next-prompt.md"), "utf8"), "first");
+  // Nor one farther than --max-wait-hours, as the usage-limit wait.
+  const far = await fableRun("first", { 1: { next: "STOP: done" } }, { maxWaitHours: 0.5 }, keep(later));
+  assert.match(far.log, /chain ends: the five-hour window is at 95%, at or over 90%, and resets \d{4}-\d\d-\d\d \d\d:\d\d, more than 0\.5 h away \(--max-wait-hours\); next-prompt\.md stays for a start with --state$/m);
+  assert.doesNotMatch(far.log, /session 01 starts/);
 });
 
 test("--weekly-ceiling: a reading an earlier start kept stops the first session, a reset one does not, and a cut-off session still resumes", async () => {
