@@ -3345,3 +3345,238 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
   const where = JSON.parse(fs.readFileSync(path.join(s.state, "where.json"), "utf8"));
   assert.deepEqual([fs.realpathSync.native(where.cwd), where.repo, where.main], [fs.realpathSync.native(s.repo), s.repo, ""]);
 });
+
+// ---------------------------------------------------------------- K6 task 3: start --worktree
+// start makes or finds the chain's worktree, <parent>/<repo>-night on night-shift, and names it in run.json; the stand-in
+// session records where it ran and commits there. Every worktree here is the test's own repository's, under its temp root.
+const nightDir = (repo) => path.join(path.dirname(repo), `${path.basename(repo)}-night`);
+const TREE_FAKE = `import fs from "node:fs"; import path from "node:path"; import { execFileSync } from "node:child_process";
+const st = process.env.NIGHT_SHIFT_STATE;
+fs.writeFileSync(path.join(st, "where.json"), JSON.stringify({ cwd: process.cwd(), repo: process.env.NIGHT_SHIFT_REPO, main: process.env.NIGHT_SHIFT_MAIN_TREE ?? null }));
+execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "night work"], { windowsHide: true });
+fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done");
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-1", result: "ok" }));
+`;
+// The real start with a new prompt in setup()'s state folder; prep(s) runs after the repository's first commit.
+async function treeStart(extra, prep = () => {}) {
+  const s = setup();
+  gitT(s.repo, "commit", "-q", "--allow-empty", "-m", "base");
+  fs.writeFileSync(path.join(s.root, "fake-claude.mjs"), TREE_FAKE);
+  prep(s);
+  const e = { ...s.env, NIGHT_SHIFT_CLAUDE: path.join(s.root, "fake-claude.mjs") };
+  const out = execFileSync(process.execPath, [CHAIN, "start", "--repo", s.repo, "--state", s.state, "--prompt", "first", ...extra], { env: e, cwd: s.root, encoding: "utf8" });
+  const done = await waitFor(s.repo, e, s.root).done;
+  assert.equal(done.code, 0, done.out);
+  const where = path.join(s.state, "where.json");
+  return { ...s, out, run: JSON.parse(fs.readFileSync(path.join(s.state, "run.json"), "utf8")),
+    where: fs.existsSync(where) ? JSON.parse(fs.readFileSync(where, "utf8")) : null, log: (dir) => gitT(dir, "log", "--format=%s").split("\n") };
+}
+const mainBranch = (repo) => gitT(repo, "symbolic-ref", "--short", "HEAD");
+const globalConfig = (home, cfg) => {
+  fs.mkdirSync(path.join(home, ".claude", "night-shift"), { recursive: true });
+  fs.writeFileSync(path.join(home, ".claude", "night-shift", "config.json"), JSON.stringify(cfg));
+};
+const worktreeCount = (repo) => gitT(repo, "worktree", "list", "--porcelain").split("\n").filter((l) => l.startsWith("worktree ")).length;
+
+test("start --worktree makes <repo>-night on night-shift from HEAD, runs the chain there and keeps it in run.json", async () => {
+  // The main tree's own uncommitted work does not block it: the check reads the worktree.
+  const s = await treeStart(["--worktree"], ({ repo }) => fs.writeFileSync(path.join(repo, "mine.txt"), "my own work"));
+  const tree = fs.realpathSync.native(nightDir(s.repo));
+  assert.deepEqual([s.run.tree, s.run.branch], [tree, "night-shift"]);
+  assert.equal(fs.realpathSync.native(s.where.cwd), tree);
+  assert.deepEqual([s.where.repo, s.where.main], [tree, s.repo]);
+  assert.deepEqual(s.log(tree), ["night work", "base"]);
+  assert.deepEqual(s.log(s.repo), ["base"], "the main tree's branch has none of the chain's work");
+  assert.equal(gitT(tree, "symbolic-ref", "HEAD"), "refs/heads/night-shift");
+  assert.equal(fs.existsSync(path.join(tree, "mine.txt")), false);
+  const main = mainBranch(s.repo);
+  assert.match(s.out, new RegExp(`^ {2}worktree: ${lit(tree)} on night-shift, made now from ${main}; the chain works there, and ${lit(s.repo)} stays yours$`, "m"));
+  assert.match(s.out, new RegExp(`^ {2}worktree: your uncommitted changes in ${lit(s.repo)} are not in it$`, "m"));
+  assert.ok(fs.existsSync(tree), "the worktree stays after the chain");
+});
+
+test("the worktree key in the global or the project's file turns it on, and --worktree false turns it off for a start", async () => {
+  const global = await treeStart([], ({ home }) => globalConfig(home, { worktree: true }));
+  assert.equal(global.run.tree, fs.realpathSync.native(nightDir(global.repo)));
+  const project = await treeStart([], ({ repo }) => {
+    fs.appendFileSync(path.join(repo, ".git", "info", "exclude"), "/.claude/\n");
+    fs.mkdirSync(path.join(repo, ".claude"), { recursive: true });
+    fs.writeFileSync(path.join(repo, ".claude", "night-shift.json"), JSON.stringify({ worktree: true }));
+  });
+  assert.deepEqual([project.run.tree, project.run.branch], [fs.realpathSync.native(nightDir(project.repo)), "night-shift"]);
+  const off = await treeStart(["--worktree", "false"], ({ home }) => globalConfig(home, { worktree: true }));
+  assert.equal(off.run.tree, undefined);
+  assert.deepEqual(off.log(off.repo), ["night work", "base"]);
+  assert.equal(fs.existsSync(nightDir(off.repo)), false);
+  assert.doesNotMatch(off.out, /worktree:/);
+});
+
+test("start --worktree refuses, before it makes anything, what git would refuse or the chain could not use", () => {
+  const c = pointerCase();
+  const refused = (r, re) => { assert.match(r.stderr, re); assert.doesNotMatch(r.stderr, /launch refused/); };
+  const start = (extra) => c.run("start", ["--prompt", "x", ...extra]);
+  const dir = nightDir(c.repo);
+  refused(start(["--worktree", "maybe"]), /--worktree takes true or false \(got maybe\)/);
+  refused(start(["--worktree"]), new RegExp(`--worktree needs a commit: ${lit(c.repo)} has none yet`));
+  globalConfig(c.home, { worktree: "yes" });
+  refused(start([]), /"worktree" must be true or false/);
+  globalConfig(c.home, { worktree: true });
+  refused(start([]), /"worktree" from .*config\.json needs a commit/);
+  fs.rmSync(path.join(c.home, ".claude", "night-shift", "config.json"));
+  gitT(c.repo, "commit", "-q", "--allow-empty", "-m", "base");
+  const main = mainBranch(c.repo);
+  // night-shift checked out in the main tree itself.
+  gitT(c.repo, "switch", "-q", "-c", "night-shift");
+  refused(start(["--worktree"]), new RegExp(`--worktree: the branch night-shift is checked out in ${lit(c.repo)} itself; switch it to another branch first`));
+  gitT(c.repo, "switch", "-q", main);
+  // A folder in the worktree's place that is not the worktree.
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, "x.txt"), "x");
+  refused(start(["--worktree"]), new RegExp(`--worktree: ${lit(dir)} exists and is not the night-shift worktree; move it away and start again`));
+  fs.rmSync(dir, { recursive: true });
+  // A worktree on night-shift whose folder is gone: pruning it is the user's.
+  gitT(c.repo, "worktree", "add", "-q", dir, "night-shift");
+  fs.rmSync(dir, { recursive: true, force: true });
+  refused(start(["--worktree"]), /--worktree: the branch night-shift belongs to the worktree .*-night, which is gone; run git worktree prune in .* \(or put the folder back\) and start again/);
+  gitT(c.repo, "worktree", "prune");
+  // A state folder inside the worktree.
+  gitT(c.repo, "worktree", "add", "-q", dir, "night-shift");
+  const inner = path.join(dir, "st");
+  fs.mkdirSync(inner);
+  fs.writeFileSync(path.join(inner, "run.json"), "{}");
+  refused(start(["--worktree", "--state", inner]), new RegExp(`--state ${lit(fs.realpathSync.native(inner))} is inside the worktree ${lit(fs.realpathSync.native(dir))}`));
+  fs.rmSync(inner, { recursive: true });
+  // A repository that is itself a linked worktree of another.
+  refused(start(["--worktree", "--repo", dir]), /--worktree: .*-night is itself a worktree of .*; start the chain there, or pass --worktree false to run it here/);
+  // A state folder that holds the worktree (one made by hand inside it).
+  gitT(c.repo, "worktree", "remove", "--force", dir);
+  const holder = path.join(path.dirname(c.repo), "holder"), held = path.join(holder, "w");
+  fs.mkdirSync(holder);
+  fs.writeFileSync(path.join(holder, "run.json"), "{}");
+  gitT(c.repo, "worktree", "add", "-q", held, "night-shift");
+  refused(start(["--worktree", "--state", holder]), new RegExp(`--state ${lit(fs.realpathSync.native(holder))} holds the worktree ${lit(fs.realpathSync.native(held))}`));
+  gitT(c.repo, "worktree", "remove", "--force", held);
+  // A worktree of the user's at <repo>-night on another branch, and one whose folder is gone: refused, and left as they are.
+  gitT(c.repo, "worktree", "add", "-q", "-b", "mine", dir);
+  refused(start(["--worktree"]), new RegExp(`--worktree: ${lit(dir)} is a worktree on the branch mine, not on night-shift; switch it to night-shift, or remove it \\(git worktree remove ${lit(dir)}\\), and start again`));
+  fs.rmSync(dir, { recursive: true, force: true });
+  refused(start(["--worktree"]), new RegExp(`--worktree: ${lit(dir)} is registered as a worktree whose folder is gone; run git worktree prune in `));
+  assert.match(gitT(c.repo, "worktree", "list", "--porcelain"), /^branch refs\/heads\/mine$/m, "the user's worktree is still registered");
+  assert.equal(worktreeCount(c.repo), 2, "the main tree and the user's worktree, nothing more");
+});
+
+test("a start that fails after making the worktree removes it and the branch it made, and puts run.json back", () => {
+  for (const branchFirst of [false, true]) {
+    const c = pointerCase();
+    gitT(c.repo, "commit", "-q", "--allow-empty", "-m", "base");
+    // A branch it finds behind HEAD is moved up first, and put back.
+    if (branchFirst) {
+      gitT(c.repo, "branch", "night-shift");
+      gitT(c.repo, "commit", "-q", "--allow-empty", "-m", "newer");
+    }
+    const tip = branchFirst ? gitT(c.repo, "rev-parse", "night-shift") : null;
+    const before = fs.readFileSync(path.join(c.state, "run.json"), "utf8");
+    assert.match(c.run("start", ["--prompt", "x", "--worktree"]).stderr, /launch refused \(test\)/);
+    assert.equal(fs.existsSync(nightDir(c.repo)), false, "the worktree it made");
+    assert.equal(worktreeCount(c.repo), 1);
+    assert.equal(gitT(c.repo, "branch", "--list", "night-shift") !== "", branchFirst, "a branch it found stays, one it made goes");
+    if (branchFirst) assert.equal(gitT(c.repo, "rev-parse", "night-shift"), tip, "where it was");
+    assert.equal(fs.readFileSync(path.join(c.state, "run.json"), "utf8"), before);
+  }
+  // A first start in a new state folder: the next start finds the folder as the failed one found it, not as someone else's.
+  const c = pointerCase();
+  gitT(c.repo, "commit", "-q", "--allow-empty", "-m", "base");
+  for (let i = 0; i < 2; i++) {
+    const r = c.run("start", ["--prompt", "x", "--worktree"]);
+    assert.match(r.stderr, /launch refused \(test\)/, `start ${i + 1}`);
+    const fresh = fs.readdirSync(path.dirname(c.state)).find((f) => /^night-shift-repo-\d{8}$/.test(f));
+    assert.ok(fresh, "the default state folder");
+    assert.deepEqual(fs.readdirSync(path.join(path.dirname(c.state), fresh)).filter((f) => ["run.json", "fable.json", "limits.json"].includes(f)), [], `start ${i + 1}`);
+  }
+  assert.equal(fs.existsSync(nightDir(c.repo)), false);
+});
+
+test("start uses the worktree git lists on night-shift, moves a branch HEAD contains up to HEAD, and keeps one with its own commits", async () => {
+  // A worktree on night-shift somewhere else, behind the main tree: kept, and moved up.
+  const moved = await treeStart(["--worktree"], ({ repo, root }) => {
+    gitT(repo, "worktree", "add", "-q", "-b", "night-shift", path.join(root, "elsewhere"));
+    gitT(repo, "commit", "-q", "--allow-empty", "-m", "newer");
+  });
+  const elsewhere = fs.realpathSync.native(path.join(moved.root, "elsewhere"));
+  assert.equal(moved.run.tree, elsewhere);
+  assert.deepEqual(moved.log(elsewhere), ["night work", "newer", "base"]);
+  assert.match(moved.out, new RegExp(`^ {2}worktree: ${lit(elsewhere)} on night-shift, kept, moved up to ${mainBranch(moved.repo)}; `, "m"));
+  assert.equal(fs.existsSync(nightDir(moved.repo)), false);
+  // The same, with uncommitted changes in it (--allow-dirty): not moved.
+  const dirty = await treeStart(["--worktree", "--allow-dirty"], ({ repo, root }) => {
+    gitT(repo, "worktree", "add", "-q", "-b", "night-shift", path.join(root, "elsewhere"));
+    fs.writeFileSync(path.join(root, "elsewhere", "half.txt"), "x");
+    gitT(repo, "commit", "-q", "--allow-empty", "-m", "newer");
+  });
+  assert.deepEqual(dirty.log(path.join(dirty.root, "elsewhere")), ["night work", "base"]);
+  assert.match(dirty.out, new RegExp(`^ {2}worktree: night-shift is not moved up to ${mainBranch(dirty.repo)}, since the worktree has uncommitted changes$`, "m"));
+  // A branch with its own commits stays as it is, in a worktree made now; the main tree's newer commit is not in it.
+  const own = await treeStart(["--worktree"], ({ repo }) => {
+    const main = mainBranch(repo);
+    gitT(repo, "switch", "-q", "-c", "night-shift");
+    gitT(repo, "commit", "-q", "--allow-empty", "-m", "own");
+    gitT(repo, "switch", "-q", main);
+    gitT(repo, "commit", "-q", "--allow-empty", "-m", "newer");
+  });
+  const tree = fs.realpathSync.native(nightDir(own.repo));
+  const main = mainBranch(own.repo);
+  assert.deepEqual(own.log(tree), ["night work", "own", "base"]);
+  assert.match(own.out, new RegExp(`^ {2}worktree: ${lit(tree)} on night-shift, made now on the branch as it was; `, "m"));
+  assert.match(own.out, new RegExp(`^ {2}worktree: night-shift holds 1 commit ${main} lacks, kept as it is; ${main}'s 1 newer commit is not in it$`, "m"));
+  // A branch HEAD contains, with no worktree: moved up before the worktree is made.
+  const up = await treeStart(["--worktree"], ({ repo }) => {
+    gitT(repo, "branch", "night-shift");
+    gitT(repo, "commit", "-q", "--allow-empty", "-m", "newer");
+  });
+  assert.deepEqual(up.log(fs.realpathSync.native(nightDir(up.repo))), ["night work", "newer", "base"]);
+  assert.match(up.out, new RegExp(`^ {2}worktree: .* on night-shift, made now, moved up to ${mainBranch(up.repo)}; `, "m"));
+  // A detached HEAD in the main tree: the branch is made from its commit.
+  const detached = await treeStart(["--worktree"], ({ repo }) => gitT(repo, "switch", "-q", "--detach"));
+  assert.match(detached.out, /^ {2}worktree: .* on night-shift, made now from HEAD; /m);
+  assert.deepEqual(detached.log(fs.realpathSync.native(nightDir(detached.repo))), ["night work", "base"]);
+});
+
+test("a start that goes on keeps its run's tree whatever the flag and the config say, and refuses a flag against it", () => {
+  const c = pointerCase();
+  const refused = (r, re) => { assert.match(r.stderr, re); assert.doesNotMatch(r.stderr, /launch refused/); };
+  gitT(c.repo, "commit", "-q", "--allow-empty", "-m", "base");
+  const dir = nightDir(c.repo);
+  gitT(c.repo, "worktree", "add", "-q", "-b", "night-shift", dir);
+  const tree = fs.realpathSync.native(dir);
+  const runFile = path.join(c.state, "run.json");
+  const base = JSON.parse(fs.readFileSync(runFile, "utf8"));
+  const put = (p) => fs.writeFileSync(runFile, JSON.stringify({ ...base, ...p }));
+  const ran = () => JSON.parse(fs.readFileSync(runFile, "utf8"));
+  const goOn = (extra = []) => c.run("start", ["--state", c.state, ...extra]);
+  // A run with a tree goes on there without the flag, and keeps it; the main tree's uncommitted work does not stop it.
+  put({ tree, branch: "night-shift" });
+  fs.writeFileSync(path.join(c.repo, "mine.txt"), "my own work");
+  assert.match(goOn().stderr, /launch refused \(test\)/);
+  assert.deepEqual([ran().tree, ran().branch], [tree, "night-shift"]);
+  // The config cannot move it either.
+  globalConfig(c.home, { worktree: false });
+  assert.match(goOn().stderr, /launch refused \(test\)/);
+  assert.equal(ran().tree, tree);
+  fs.rmSync(path.join(c.home, ".claude", "night-shift", "config.json"));
+  // --worktree false would move its conversation to another tree.
+  refused(goOn(["--worktree", "false"]), new RegExp(`this run works in the worktree ${lit(tree)} on night-shift and goes on there; --worktree false needs a new prompt`));
+  // Its tree's uncommitted changes stop it, and so does a tree that is gone.
+  fs.writeFileSync(path.join(tree, "half.txt"), "x");
+  refused(goOn(), new RegExp(`the worktree ${lit(tree)} has uncommitted changes; commit them there first \\(or pass --allow-dirty\\)`));
+  fs.rmSync(path.join(tree, "half.txt"));
+  // A new prompt reads the flag anew: without one, the checked-out branch, and the worktree stays where it is.
+  fs.rmSync(path.join(c.repo, "mine.txt"));
+  assert.match(goOn(["--prompt", "y"]).stderr, /launch refused \(test\)/);
+  assert.equal(ran().tree, undefined);
+  assert.ok(fs.existsSync(tree));
+  // A run without a tree goes on without one, and refuses --worktree.
+  refused(goOn(["--worktree"]), new RegExp(`this run works on the checked-out branch of ${lit(c.repo)} and goes on there; --worktree needs a new prompt`));
+  put({ tree, branch: "night-shift" });
+  gitT(c.repo, "worktree", "remove", "--force", dir);
+  refused(goOn(), new RegExp(`the worktree ${lit(tree)} is gone; put it back \\(git worktree add ${lit(tree)} night-shift\\), or start with a new prompt`));
+});

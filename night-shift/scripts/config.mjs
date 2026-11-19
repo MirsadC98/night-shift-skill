@@ -64,6 +64,7 @@ export const CONFIG_KEYS = {
   weeklyCeiling: (v) => (typeof v === "number" && v > 0 && v <= 100 ? null : "must be a number above 0 and at most 100"),
   maxUsd: (v) => (typeof v === "number" && v > 0 && Number.isFinite(v) ? null : "must be a number of dollars above 0"),
   attended: (v) => (typeof v === "boolean" ? null : "must be true or false"),
+  worktree: (v) => (typeof v === "boolean" ? null : "must be true or false"),
   telegramInbox: (v) => (typeof v === "boolean" ? null : "must be true or false"),
   mcp: (v) => (v === "none" || v === "inherit" || (Array.isArray(v) && v.every((s) => isStr(s) && s)) ? null : 'must be "none", "inherit" or a list of server names'),
   deny: (v) => denyErrors(v),
@@ -115,7 +116,7 @@ export const projectConfigFile = (repo) => path.join(String(repo), ".claude", "n
 export const readProjectConfig = (repo) => readConfigFile(projectConfigFile(repo), null, GLOBAL_ONLY);
 
 // Only what is about the run as a whole; anything that names a path or a rule of one repository stays per project.
-export const GLOBAL_KEYS = ["mode", "lang", "effort", "fableCeiling", "fableSessions", "maxWaitHours", "weeklyCeiling", "maxUsd", "attended", "telegramInbox"];
+export const GLOBAL_KEYS = ["mode", "lang", "effort", "fableCeiling", "fableSessions", "maxWaitHours", "weeklyCeiling", "maxUsd", "attended", "worktree", "telegramInbox"];
 // Who may steer the user's chains is the user's own choice, and a repository's file may come from someone else:
 // these keys count only in the global file, and a project's file that holds one is refused.
 export const GLOBAL_ONLY = ["telegramInbox"];

@@ -8,7 +8,7 @@
 //                               [--until HH:MM] [--max-sessions <n>] [--session-hours 4] [--model <m>] [--allow-dirty]
 //                               [--effort xhigh] [--fable-ceiling 0.6] [--fable-sessions 2]
 //                               [--max-wait-hours 6] [--weekly-ceiling <share>] [--max-usd <dollars>]
-//                               [--mode opus|fable|mythos] [--attended [true|false]]
+//                               [--mode opus|fable|mythos] [--attended [true|false]] [--worktree [true|false]]
 //                               [--lang <code>] [--state <dir>] [--window]
 //   (--window, Windows only: the chain in a visible console instead of a hidden one; on macOS and Linux start runs
 //    it as a detached process, its error output in <state>/runner.err)
@@ -17,6 +17,12 @@
 //   (--attended, "attended": true: the user is at hand but not watching. No session waits for them; each
 //    writes a question that needs them to <state>/questions.md at once and goes on, as references/attended.md
 //    says; --attended false turns a config's true off for one start)
+//   (--worktree, "worktree": true: the chain works in its own worktree, <parent>/<repo>-night on the branch
+//    night-shift, made by the first such start from the main tree's HEAD and kept for the next one, so the main
+//    tree stays the user's; its uncommitted work there does not stop start. A branch HEAD contains is moved up to
+//    HEAD first; one with commits HEAD lacks is kept as it is. The runner never merges it and never removes the
+//    worktree, except one a failed start made. A start that goes on (no new prompt) keeps the tree its run had;
+//    --worktree false turns a config's true off for a start with a new prompt)
 //   (without --until and --max-sessions the chain goes on until a session writes STOP,
 //    two handovers fail in a row, or stop is called; a usage limit pauses it, and the
 //    session it cut off is resumed with --resume once the limit resets. start without
@@ -268,6 +274,120 @@ function treeProblem(run) {
   return `the worktree ${run.tree} is on ${ref ? `the branch ${ref.replace(/^refs\/heads\//, "")}` : "no branch"}, not on ${run.branch}`;
 }
 
+// K6: the chain's worktree. One for a repository, <parent>/<repo>-night on the branch night-shift, made by the first start
+// that asks for it (--worktree, "worktree": true) and kept for the next one; the main tree stays the user's.
+export const NIGHT_BRANCH = "night-shift";
+const nightDir = (repo) => path.join(path.dirname(repo), `${path.basename(repo)}-night`);
+// git in dir: its output, trimmed, or null when it fails; a git that hangs fails after 30 s, as in treeProblem.
+const gitIn = (dir, args) => { try { return execFileSync("git", args, { cwd: dir, encoding: "utf8", windowsHide: true, timeout: 30_000, stdio: ["ignore", "pipe", "ignore"] }).trim(); } catch { return null; } };
+// The same for a step start cannot go on without: a failure ends start with git's own first line.
+const gitMust = (dir, args) => {
+  try { execFileSync("git", args, { cwd: dir, encoding: "utf8", windowsHide: true, timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] }); }
+  catch (e) { fail(`git ${args.slice(0, 2).join(" ")} failed: ${String(e.stderr || e.message).trim().split("\n")[0]}`); }
+};
+const realOr = (p) => { try { return fs.realpathSync.native(p); } catch { return path.resolve(p); } };
+const sameDir = (a, b) => platform.samePath(realOr(a), realOr(b));
+const within = (p, root) => { const a = platform.norm(p), b = platform.norm(root); return a === b || a.startsWith(`${b}/`); };
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+// The worktrees git lists for the repository, the main one first: { dir, ref }, ref the full name of its branch or null.
+const worktreeList = (repo) => (gitIn(repo, ["worktree", "list", "--porcelain"]) || "").split(/\n\s*\n/).map((block) => {
+  const lines = block.split("\n").map((l) => l.replace(/\r$/, ""));
+  const field = (k) => lines.find((l) => l.startsWith(`${k} `))?.slice(k.length + 1) ?? null;
+  return { dir: field("worktree"), ref: field("branch") };
+}).filter((w) => w.dir).map((w) => ({ ...w, dir: path.resolve(w.dir) }));
+
+// start: the worktree this start's chain works in, checked and not yet made, or null for the checked-out branch:
+// { tree, branch, kept (it exists already), madeBranch (the branch does not exist yet) }. A start that goes on (no new
+// prompt or goal) keeps the tree its folder's last run had, so that its conversation and resume.json never change
+// trees, and refuses a flag against it; a start with a new prompt reads the flag and the config anew.
+function treeChoice({ repo, state, opt, cfg, from, prev, fresh }) {
+  const flag = opt.worktree === undefined ? undefined : opt.worktree !== "false";
+  const outside = (tree) => {
+    const dir = realOr(state), where = within(dir, tree) ? "is inside" : within(tree, dir) ? "holds" : null;
+    if (where) fail(`${typeof opt.state === "string" ? "--state" : "stateDir"} ${dir} ${where} the worktree ${tree}; pick a state folder outside it`);
+  };
+  const newPrompt = "a new prompt (--prompt, --prompt-file, --goal or --goal-file)";
+  if (prev && !fresh) {
+    if (!prev.tree) {
+      if (flag === true) fail(`this run works on the checked-out branch of ${repo} and goes on there; --worktree needs ${newPrompt}`);
+      return null;
+    }
+    if (flag === false) fail(`this run works in the worktree ${prev.tree} on ${prev.branch} and goes on there; --worktree false needs ${newPrompt}`);
+    const problem = treeProblem(prev);
+    if (problem) fail(`${problem}; ${fs.existsSync(prev.tree) ? `make it the ${prev.branch} worktree again` : `put it back (git worktree add ${prev.tree} ${prev.branch})`}, or start with a new prompt`);
+    outside(prev.tree);
+    return { tree: prev.tree, branch: prev.branch, kept: true };
+  }
+  if (!(flag ?? cfg.worktree === true)) return null;
+  const src = flag !== undefined ? "--worktree" : `"worktree" from ${from.worktree}`;
+  if (gitIn(repo, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]) === null) fail(`${src} needs a commit: ${repo} has none yet`);
+  const list = worktreeList(repo);
+  // The branch is the whole repository's: a chain from a worktree made by hand would take the main tree's chain worktree.
+  if (list[0] && !sameDir(list[0].dir, repo)) fail(`${src}: ${repo} is itself a worktree of ${list[0].dir}; start the chain there, or pass --worktree false to run it here`);
+  const found = list.find((w) => w.ref === `refs/heads/${NIGHT_BRANCH}`);
+  if (found && sameDir(found.dir, repo)) fail(`${src}: the branch ${NIGHT_BRANCH} is checked out in ${repo} itself; switch it to another branch first`);
+  // Pruning a worktree is the user's: the runner never prunes.
+  if (found && !fs.existsSync(found.dir)) fail(`${src}: the branch ${NIGHT_BRANCH} belongs to the worktree ${found.dir}, which is gone; run git worktree prune in ${repo} (or put the folder back) and start again`);
+  const tree = found ? realOr(found.dir) : nightDir(repo);
+  outside(tree);
+  if (found) return { tree, branch: NIGHT_BRANCH, kept: true };
+  const other = list.find((w) => sameDir(w.dir, tree));
+  if (other && !fs.existsSync(other.dir)) fail(`${src}: ${tree} is registered as a worktree whose folder is gone; run git worktree prune in ${repo} (or put the folder back) and start again`);
+  if (other) fail(`${src}: ${tree} is a worktree on ${other.ref ? `the branch ${other.ref.replace(/^refs\/heads\//, "")}` : "no branch"}, not on ${NIGHT_BRANCH}; switch it to ${NIGHT_BRANCH}, or remove it (git worktree remove ${tree}), and start again`);
+  if (fs.existsSync(tree) && (!fs.statSync(tree).isDirectory() || fs.readdirSync(tree).length)) fail(`${src}: ${tree} exists and is not the ${NIGHT_BRANCH} worktree; move it away and start again`);
+  return { tree, branch: NIGHT_BRANCH, kept: false, madeBranch: gitIn(repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${NIGHT_BRANCH}`]) === null };
+}
+
+// start, after every other check: makes the worktree treeChoice gave (or moves a kept one's branch) and returns start's
+// lines about it. A branch HEAD contains is moved up to HEAD, losing nothing: before a worktree is made, or by a
+// fast-forward in a kept one that is clean (a dirty one holds a resumed session's work). One with commits HEAD lacks
+// stays as it is. A start that fails after this removes the worktree it made and the branch it made (or puts a branch it
+// moved back), and puts back the state folder's files it writes before the launch (run.json, fable.json, limits.json), so
+// that the next start finds the folder as it was; from the exit handler it returns, which start drops once the chain is
+// launched. It never touches a worktree it did not make: the handler removes one only after git has made it.
+const UNDONE_FILES = ["run.json", "fable.json", "limits.json"];
+function makeTree(repo, wt, { dirty, state }) {
+  const head = gitIn(repo, ["rev-parse", "HEAD"]);
+  const mine = (gitIn(repo, ["symbolic-ref", "--quiet", "HEAD"]) || "").replace(/^refs\/heads\//, "") || "HEAD";
+  const ref = `refs/heads/${wt.branch}`;
+  const tip = wt.madeBranch ? null : gitIn(repo, ["rev-parse", ref]);
+  const contained = !wt.madeBranch && gitIn(repo, ["merge-base", "--is-ancestor", ref, "HEAD"]) !== null;
+  const behind = contained && tip !== head;
+  const lines = [];
+  let how, undo = null;
+  if (wt.kept) {
+    how = behind && !dirty ? `kept, moved up to ${mine}` : "kept";
+    if (behind && !dirty) gitMust(wt.tree, ["merge", "--ff-only", "-q", head]);
+    if (behind && dirty) lines.push(`  worktree: ${wt.branch} is not moved up to ${mine}, since the worktree has uncommitted changes`);
+  } else {
+    const before = UNDONE_FILES.map((f) => [path.join(state, f), fs.existsSync(path.join(state, f)) ? fs.readFileSync(path.join(state, f)) : null]);
+    const { tree, madeBranch } = wt;
+    let added = false;
+    undo = () => {
+      if (added) gitIn(repo, ["worktree", "remove", "--force", tree]);
+      if (madeBranch && gitIn(repo, ["rev-parse", "--verify", "--quiet", ref]) !== null) gitIn(repo, ["branch", "-D", wt.branch]);
+      else if (behind) gitIn(repo, ["branch", "-f", wt.branch, tip]);
+      for (const [f, text] of before) { try { if (text === null) fs.rmSync(f, { force: true }); else fs.writeFileSync(f, text); } catch {} }
+    };
+    process.on("exit", undo);
+    if (wt.madeBranch) gitMust(repo, ["worktree", "add", "-q", "-b", wt.branch, tree, head]);
+    else {
+      if (behind) gitMust(repo, ["branch", "-f", wt.branch, head]);
+      gitMust(repo, ["worktree", "add", "-q", tree, wt.branch]);
+    }
+    added = true;
+    how = wt.madeBranch ? `made now from ${mine}` : behind ? `made now, moved up to ${mine}` : contained ? "made now" : "made now on the branch as it was";
+    wt.tree = realOr(tree);
+  }
+  lines.unshift(`  worktree: ${wt.tree} on ${wt.branch}, ${how}; the chain works there, and ${repo} stays yours`);
+  const own = !wt.madeBranch && !contained ? Number(gitIn(repo, ["rev-list", "--count", `HEAD..${ref}`])) : 0;
+  if (own > 0) {
+    const newer = Number(gitIn(repo, ["rev-list", "--count", `${ref}..HEAD`]));
+    lines.push(`  worktree: ${wt.branch} holds ${plural(own, "commit")} ${mine} lacks, kept as it is${newer ? `; ${mine}'s ${plural(newer, "newer commit")} ${newer === 1 ? "is" : "are"} not in it` : ""}`);
+  }
+  return { lines, undo };
+}
+
 // The session chain.log shows as started and never ended, with its conversation id.
 export function cutOffSession(state) {
   const events = read(path.join(state, "chain.log")).split("\n")
@@ -390,6 +510,8 @@ async function start(opt) {
   const attArg = opt.attended;
   if (attArg !== undefined && ![true, "true", "false"].includes(attArg)) fail(`--attended takes true or false (got ${attArg})`);
   const attended = attArg !== undefined ? attArg !== "false" : cfg.attended === true;
+  // K6: the same for --worktree.
+  if (opt.worktree !== undefined && ![true, "true", "false"].includes(opt.worktree)) fail(`--worktree takes true or false (got ${opt.worktree})`);
   if (attended && !read(ATTENDED).trim()) fail(`${ATTENDED} is missing; copy the skill folder again`);
   // A language is never guessed from "PT" or "pt-BR": a night in English that was asked for in another language is worse than a refusal.
   if (opt.lang !== undefined && !isLangCode(opt.lang)) fail(`--lang must be a language code in lowercase, such as en or pt-br (got ${opt.lang === true ? "no value" : opt.lang})`);
@@ -411,9 +533,13 @@ async function start(opt) {
   if (wide) fail(`${typeof opt.state === "string" ? "--state" : "stateDir"} ${state} ${wide}`);
   if (typeof opt.state === "string" && !fs.existsSync(path.join(state, "run.json"))) fail(`--state ${state} holds no earlier run`);
   if (foreignState(state)) fail(`${state} is not empty and holds no earlier run; pick another state folder`);
+  // K6: the tree, chosen before the state folder is made, so that a refused one leaves nothing inside it.
+  const fresh = Boolean(planning) || Boolean(opt["prompt-file"]) || typeof opt.prompt === "string";
+  const wt = treeChoice({ repo, state, opt, cfg, from, fresh, prev: fs.existsSync(path.join(state, "run.json")) ? parseOr(read(path.join(state, "run.json")), {}) : null });
   fs.mkdirSync(path.join(state, "prompts"), { recursive: true });
   // In long form, so the guard, which refuses 8.3 short names, accepts the handover's path whatever way --state or %TEMP% spelled it.
   state = fs.realpathSync.native(state);
+  const runFile = path.join(state, "run.json");
   const next = path.join(state, "next-prompt.md");
   // A new prompt, a goal's included, starts fresh; without one, a session a usage limit cut off (resume.json) goes on.
   if (planning) fs.writeFileSync(next, planning);
@@ -421,16 +547,27 @@ async function start(opt) {
   else if (typeof opt.prompt === "string") fs.writeFileSync(next, opt.prompt);
   else if (!read(next).trim()) fail("no prompt: pass --prompt-file, --prompt, --goal or --goal-file");
   const resumeFile = path.join(state, "resume.json");
-  const fresh = Boolean(planning) || Boolean(opt["prompt-file"]) || typeof opt.prompt === "string";
   if (fresh) fs.rmSync(resumeFile, { force: true });
   // A runner that died mid-session (a power cut, a crash, a restart) leaves the session
   // unfinished in chain.log; start without a prompt goes on in that conversation.
   const cut = !fresh && !fs.existsSync(resumeFile) && cutOffSession(state);
   if (cut) fs.writeFileSync(resumeFile, JSON.stringify({ ...cut, why: "stopped" }));
-  // The tree may hold the uncommitted work of the session that goes on; anything else must be committed.
-  const dirty = execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8", windowsHide: true }).trim();
-  if (dirty && !opt["allow-dirty"] && !fs.existsSync(resumeFile)) fail("the working tree has uncommitted changes; commit them first (or pass --allow-dirty)");
+  // The tree may hold the uncommitted work of the session that goes on; anything else must be committed. With a worktree
+  // that is the worktree (one made now is clean): the user's own uncommitted work in the main tree does not block it.
+  const changes = (dir) => {
+    try { return execFileSync("git", ["status", "--porcelain"], { cwd: dir, encoding: "utf8", windowsHide: true, timeout: 30_000 }).trim(); }
+    catch (e) { return fail(`git status in ${dir} failed: ${String(e.stderr || e.message).trim().split("\n")[0]}`); }
+  };
+  const dirty = wt && !wt.kept ? "" : changes(wt ? wt.tree : repo);
+  if (dirty && !opt["allow-dirty"] && !fs.existsSync(resumeFile)) {
+    fail(wt ? `the worktree ${wt.tree} has uncommitted changes; commit them there first (or pass --allow-dirty)` : "the working tree has uncommitted changes; commit them first (or pass --allow-dirty)");
+  }
+  const mainDirty = Boolean(wt) && Boolean(changes(repo));
+  const claude = findClaude();
   fs.rmSync(path.join(state, "STOP-REQUEST"), { force: true });
+  // The last step that can be refused is behind: the worktree is made (or its branch moved) only now.
+  const made = wt ? makeTree(repo, wt, { dirty, state }) : { lines: [], undo: null };
+  if (mainDirty) made.lines.push(`  worktree: your uncommitted changes in ${repo} are not in it`);
 
   // The task runs with the user's stored environment, not this shell's: keep
   // this PATH, minus fnm's per-shell links, with the real node directory first.
@@ -440,6 +577,8 @@ async function start(opt) {
   const run = {
     repo,
     state,
+    // K6: the worktree the chain works in and its branch (workTree in runs.mjs); none on the checked-out branch.
+    ...(wt ? { tree: wt.tree, branch: wt.branch } : {}),
     until: opt.until || null,
     deadline: opt.until ? deadline(opt.until) : null,
     maxSessions,
@@ -465,7 +604,7 @@ async function start(opt) {
     // C3: the user is at hand but not watching (references/attended.md); a run.json without it is unattended.
     attended,
     lang,
-    claude: findClaude(),
+    claude,
     report: cfg.report || "NIGHT_RUNS.md",
     path: sessionPath,
     window: Boolean(opt.window),
@@ -476,7 +615,7 @@ async function start(opt) {
     version: VERSION,
     startedAt: now(),
   };
-  fs.writeFileSync(path.join(state, "run.json"), JSON.stringify(run, null, 2));
+  fs.writeFileSync(runFile, JSON.stringify(run, null, 2));
   // Each chain counts its own Fable sessions and measures the allowance anew; one used up stays so.
   const fableFile = path.join(state, "fable.json");
   const fable = parseOr(read(fableFile), {});
@@ -486,10 +625,12 @@ async function start(opt) {
   const week = keepLimits(state);
   let task;
   try { task = scheduleRun(run); } catch (e) { fail(`${platform.name === "win32" ? "Task Scheduler" : "the detached start"}: ${String(e.stderr || e.message).trim().split("\n")[0]}`); }
+  if (made.undo) process.off("exit", made.undo);
   writePointer(repo, { pid: 0, state, task, scheduledAt: now(), finished: false });
   console.log(`night-shift started for ${repo}`);
   if (cut) console.log(`  resumes session ${cut.nn} (${cut.sessionId}), which the last runner left unfinished`);
   console.log(`  state:  ${state}`);
+  for (const l of made.lines) console.log(l);
   if (planning) console.log("  goal:   the first session plans it into a roadmap (references/goal.md); the work starts in the session after it");
   if (run.attended) console.log(`  attended: no session waits for you; each writes a question that needs you to ${path.join(state, "questions.md")} at once and goes on (references/attended.md)`);
   console.log(modelLine(run));

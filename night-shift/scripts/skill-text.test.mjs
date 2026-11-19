@@ -140,6 +140,16 @@ test("the help, interactive.md and the README name --attended", { skip: !fs.exis
   }
   assert.match(fs.readFileSync(readmePath, "utf8"), /^- `attended`: /m);
 });
+// K6: the chain's own worktree, by its flag, its key and what stays the user's.
+test("the help, interactive.md and the README name --worktree, and the README its key and the user's merge and remove", { skip: !fs.existsSync(readmePath) && "no README beside this copy" }, () => {
+  const help = fs.readFileSync(path.join(root, "scripts", "night-chain.mjs"), "utf8");
+  const readme = fs.readFileSync(readmePath, "utf8");
+  for (const [name, t] of [["night-chain.mjs", help], ["interactive.md", interactive], ["README.md", readme]]) {
+    assert.ok(t.includes("--worktree") && t.includes("<repo>-night") && t.includes("night-shift"), `${name}: --worktree`);
+  }
+  assert.match(readme, /^- `worktree`: /m);
+  assert.ok(readme.includes("`git merge night-shift`") && readme.includes("`git worktree remove <dir>`"), "README: the user's merge and remove");
+});
 // B4 item 2, K7: the starting chat's waiter wakes on a question, the chat writes the answer into the inbox, and Remote
 // Control is the phone path for a user without Telegram.
 test("interactive.md says what wait's exit 3 asks of the chat, and names Remote Control as the phone path", () => {
