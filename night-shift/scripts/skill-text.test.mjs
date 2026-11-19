@@ -148,3 +148,12 @@ test("interactive.md says what wait's exit 3 asks of the chat, and names Remote 
   assert.match(interactive, /`\/remote-control`/);
   assert.match(attended, /the starting chat's waiter wakes on it/);
 });
+
+// F9 (session 20's closure): the chain's end lines at a cap or a window, as the runner writes them, are in the text the chat reads.
+test("interactive.md names the runner's end lines at the weekly ceiling, the dollar cap and the five-hour window", () => {
+  const chain = fs.readFileSync(path.join(root, "scripts", "night-chain.mjs"), "utf8");
+  for (const line of ["the seven-day window is at", "this start's sessions cost", "the five-hour window is at"]) {
+    assert.ok(chain.includes("`" + line), `night-chain.mjs: ${line}`);
+    assert.ok(interactive.includes("`" + line), `interactive.md: ${line}`);
+  }
+});
