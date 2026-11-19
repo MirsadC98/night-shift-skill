@@ -387,7 +387,7 @@ test("a builder without a table reads English", () => {
 
 test("every event has an English line, and only the ones that need nothing from the user are silent", () => {
   const d = { project: "p", until: "11:20", nn: "07", minutes: 30, step: "s", got: "high", want: "xhigh", progress: "3/5 jobs done", text: "r" };
-  const silent = { start: true, limit: true, resume: true, error: true, retry: false, quiet: false, died: false, effort: false, rules: false };
+  const silent = { start: true, limit: true, resume: true, error: true, retry: false, quiet: false, died: false, effort: false, rules: false, question: false };
   for (const kind of Object.keys(silent)) {
     const e = eventLine(kind, d, en);
     assert.equal(e.silent, silent[kind], kind);
@@ -395,4 +395,12 @@ test("every event has an English line, and only the ones that need nothing from 
     assert.doesNotMatch(e.text, /[^\P{L}a-zA-Z]|undefined/u, kind);
   }
   assert.equal(eventLine("limit", d, en).text, "⏳ Usage limit reached · resumes at 11:20 · 3/5 jobs done");
+});
+
+test("a question's card is the project and the line, escaped and then cut below Telegram's limit", () => {
+  assert.deepEqual(eventLine("question", { project: "demo-app", text: "Q1 · 10:12 · Rename <Export>? · yes · otherwise it stays" }, en),
+    { text: "❓ demo-app asks · Q1 · 10:12 · Rename &lt;Export&gt;? · yes · otherwise it stays", silent: false });
+  const long = eventLine("question", { project: "p", text: `Q2 · 10:13 · ${"&".repeat(5000)}` }, en).text;
+  assert.ok(long.length <= 4000, String(long.length));
+  assert.match(long, /&amp;…$/, "no entity is cut in half");
 });

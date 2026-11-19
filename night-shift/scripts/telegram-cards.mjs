@@ -153,10 +153,16 @@ export function sessionCard(f, T = strings()) {
   ]);
 }
 
-// Which events make no sound; the text of each is the table's.
-const SILENT = { start: true, limit: true, resume: true, error: true, retry: false, quiet: false, died: false, effort: false, rules: false };
+// Which events make no sound; the text of each is the table's. A question (C3, an attended run) needs the user.
+const SILENT = { start: true, limit: true, resume: true, error: true, retry: false, quiet: false, died: false, effort: false, rules: false, question: false };
+// Escaped first and then cut, so that the cut never halves an entity; the cards' own words stay below Telegram's 4,096.
+const escCut = (s, max = 3500) => {
+  let out = "";
+  for (const ch of String(s ?? "")) { const e = esc(ch); if (out.length + e.length > max) return `${out}…`; out += e; }
+  return out;
+};
 export function eventLine(kind, d = {}, T = strings()) {
-  const e = { ...d, project: esc(d.project), until: esc(d.until), progress: d.progress ? esc(d.progress) : "", step: esc(d.step || "?"), got: esc(d.got), want: esc(d.want), text: esc(d.text) };
+  const e = { ...d, project: esc(d.project), until: esc(d.until), progress: d.progress ? esc(d.progress) : "", step: esc(d.step || "?"), got: esc(d.got), want: esc(d.want), text: escCut(d.text) };
   return { text: T.ev[kind](e), silent: SILENT[kind] };
 }
 

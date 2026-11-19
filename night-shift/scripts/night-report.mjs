@@ -764,6 +764,15 @@ export async function notify(state, headline, opt = {}) {
   return outcome;
 }
 
+// C3 (2026-11-19): an attended run's questions, <state>/questions.md: the lines that open with "Q<n> · ", each once, in the
+// order written. A line counts once it ends in a newline, so one still being written, or cut off by stop --now, is not
+// read half. The watcher keeps what it sent by the line's text, not by a count: a line a session rewrote or removed then
+// neither hides a later question nor sends the rest again.
+export function questionLines(state) {
+  const lines = read(path.join(state, "questions.md")).replace(/\r\n/g, "\n").split("\n").slice(0, -1).map((l) => l.trimEnd());
+  return [...new Set(lines.filter((l) => /^Q\d+ · /.test(l)))];
+}
+
 // ---------------------------------------------------------------- watch
 async function watch(opt) {
   const state = path.resolve(opt.state);
@@ -807,12 +816,34 @@ async function watch(opt) {
   }
   const project = path.basename(readJson(path.join(state, "run.json")).repo || state);
   if (opt.announce) await say(eventLine("start", { project }, T));
+  // Each new question of an attended run, as it appears; run.json is read each time, since a new start may change it.
+  // A question no card can be made of must not hold the chain's other cards back: like a log line, it is skipped on its
+  // third try, and a failed try leaves the pass going on.
+  const askTries = new Map();
+  const ask = async () => {
+    if (!readJson(path.join(state, "run.json")).attended) return;
+    mark.questions ||= [];
+    for (const q of questionLines(state)) {
+      if (mark.questions.includes(q)) continue;
+      try { await say(eventLine("question", { project, text: q }, T)); }
+      catch (e) {
+        askTries.set(q, (askTries.get(q) || 0) + 1);
+        if (askTries.get(q) < 3) continue;
+        watchLog(state, `watch loop: skipped a question it could not make a card of: ${e.message}`);
+      }
+      mark.questions.push(q);
+      save();
+    }
+  };
   const started = Date.now();
 
   let poison = 0; // tries in a row that failed on one log line
   for (;;) {
     try {
       const lines = read(path.join(state, "chain.log")).split("\n").filter(Boolean);
+      // After the snapshot of chain.log and before acting on it: a session writes its question before it exits, and the
+      // runner writes "chain ends" only after, so the last session's question goes out before the chain's end card.
+      await ask();
       for (const line of lines.slice(mark.lines)) {
         const t = line.replace(/^\[[^\]]+\] /, "");
         let m;
@@ -870,6 +901,7 @@ async function watch(opt) {
       if (pid && !alive(pid)) {
         await sleep(5_000);
         if (read(path.join(state, "chain.log")).split("\n").filter(Boolean).length > mark.lines) continue;
+        await ask();
         await say(eventLine("died", {}, T));
         return fs.rmSync(lock, { force: true });
       }

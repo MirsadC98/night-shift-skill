@@ -60,7 +60,9 @@ async function scene(answer, { chatId = 42, notified, env = {}, token = "T", lan
   fs.writeFileSync(path.join(claude, "night-shift", "telegram.json"), JSON.stringify({ token, chatId }));
   if (lang === "xx" && table) {
     fs.mkdirSync(path.join(claude, "night-shift", "lang"));
-    fs.copyFileSync(XX, path.join(claude, "night-shift", "lang", "xx.mjs"));
+    const file = path.join(claude, "night-shift", "lang", "xx.mjs");
+    // table: true copies the made-up table; a string is a table's own text.
+    if (typeof table === "string") fs.writeFileSync(file, table); else fs.copyFileSync(XX, file);
   }
   fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ repo: root, ...(lang && { lang }) }));
   fs.writeFileSync(path.join(state, "chain.log"), "");
@@ -352,5 +354,89 @@ test("the watcher reads telegram.json and the language table from CLAUDE_CONFIG_
     await until(() => api.sends().length >= 1, 10_000, "the card");
     assert.ok(api.sends()[0].url.includes("/botCFG/"), "the token from that folder");
     assert.match(api.sends()[0].body.text, /#02 xx·retry/);
+  });
+});
+
+// C3: an attended run's questions (<state>/questions.md) go out as they appear: each newline-ended Q line once, by its
+// text, and the last session's before the chain's end card or the died line; an unattended run sends none.
+const ask = (state, text) => fs.appendFileSync(path.join(state, "questions.md"), text);
+const attendedRun = (state) => {
+  const f = path.join(state, "run.json");
+  fs.writeFileSync(f, JSON.stringify({ ...JSON.parse(fs.readFileSync(f, "utf8")), attended: true }));
+};
+const sentQuestions = (state) => { try { return JSON.parse(fs.readFileSync(path.join(state, "notified.json"), "utf8")).questions || []; } catch { return []; } };
+
+test("an attended run's watcher sends each new question once, with a sound, and a half-written line only once it ends", async () => {
+  await scene(() => undefined, {}, async ({ api, state }) => {
+    attendedRun(state);
+    ask(state, "Q1 · 10:12 · Push the branch? · yes: the suite passes · otherwise it stays local\n");
+    await until(() => api.sends().length >= 1, 10_000, "the first question");
+    assert.equal(api.sends()[0].body.text, "❓ repo asks · Q1 · 10:12 · Push the branch? · yes: the suite passes · otherwise it stays local");
+    assert.equal(api.sends()[0].body.disable_notification, false);
+    ask(state, "Q2 · 10:20 · Name the page <Export>?");
+    await sleep(1500);
+    assert.equal(api.sends().length, 1, "a line without its newline is still being written");
+    ask(state, " · Export · otherwise Download\n");
+    await until(() => api.sends().length >= 2, 10_000, "the second question");
+    assert.equal(api.sends()[1].body.text, "❓ repo asks · Q2 · 10:20 · Name the page &lt;Export&gt;? · Export · otherwise Download");
+    // A file rewritten without its first line neither hides a later question nor sends the rest again.
+    fs.writeFileSync(path.join(state, "questions.md"), "Q2 · 10:20 · Name the page <Export>? · Export · otherwise Download\nQ3 · 10:30 · Merge? · no · otherwise merged\n");
+    await until(() => api.sends().length >= 3, 10_000, "the third question");
+    assert.match(api.sends()[2].body.text, /^❓ repo asks · Q3 · 10:30 · Merge\?/);
+    await until(() => sentQuestions(state).length === 3, 5_000, "notified.json's questions");
+    await sleep(1000);
+    assert.equal(api.sends().length, 3);
+  });
+});
+
+test("the last session's question goes out before the chain's end card", async () => {
+  await scene(() => undefined, {}, async ({ api, state, chain, exited }) => {
+    attendedRun(state);
+    ask(state, "Q1 · 10:12 · Push? · yes · otherwise local\n");
+    chain("chain ends: STOP: done");
+    await exited;
+    const texts = api.sends().map((s) => s.body.text);
+    assert.equal(texts.length, 2, texts.join("\n---\n"));
+    assert.match(texts[0], /^❓ repo asks · Q1 /);
+  });
+});
+
+test("a question written as the runner dies still goes out, before the died line", async () => {
+  await scene(() => undefined, {}, async ({ api, state, helper, exited }) => {
+    attendedRun(state);
+    // Written after the watcher saw the runner gone (it then waits 5 s): only the questions pass before died sends it.
+    helper.kill();
+    await sleep(1000);
+    ask(state, "Q1 · 10:12 · Push? · yes · otherwise local\n");
+    await exited;
+    const texts = api.sends().map((s) => s.body.text);
+    assert.equal(texts.length, 2, texts.join("\n---\n"));
+    assert.match(texts[0], /^❓ repo asks · Q1 /);
+    assert.match(texts[1], /stopped unexpectedly/);
+  });
+});
+
+test("a question no card can be made of is skipped on its third try and holds no other card back", async () => {
+  const table = "export default { ev: { question: () => { throw new Error(\"no card\"); } } };\n";
+  await scene(() => undefined, { lang: "xx", table }, async ({ api, state, chain, exited }) => {
+    attendedRun(state);
+    ask(state, "Q1 · 10:12 · Push? · yes · otherwise local\n");
+    const log = () => (fs.existsSync(path.join(state, "watch.log")) ? fs.readFileSync(path.join(state, "watch.log"), "utf8") : "");
+    await until(() => /skipped a question it could not make a card of: no card/.test(log()), 10_000, "the skip in watch.log");
+    chain("chain ends: STOP: done");
+    await exited;
+    assert.equal(api.sends().length, 1);
+    assert.doesNotMatch(api.sends()[0].body.text, /❓/);
+    assert.deepEqual(sentQuestions(state), ["Q1 · 10:12 · Push? · yes · otherwise local"]);
+  });
+});
+
+test("an unattended run's watcher sends no question", async () => {
+  await scene(() => undefined, {}, async ({ api, state, chain, exited }) => {
+    ask(state, "Q1 · 10:12 · Push? · yes · otherwise local\n");
+    chain("chain ends: STOP: done");
+    await exited;
+    assert.equal(api.sends().length, 1);
+    assert.doesNotMatch(api.sends()[0].body.text, /❓/);
   });
 });

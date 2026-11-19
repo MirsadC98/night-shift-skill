@@ -54,6 +54,8 @@ export default {
     died: () => "🛑 The chain stopped unexpectedly (the runner is gone)",
     effort: (e) => `⚠️ #${e.nn} is running at ${e.got} (should be ${e.want})`,
     rules: (e) => `⚠️ Rules file: ${e.text}`,
+    // an attended run's question, the session's own line from questions.md (Q<n> · time · question · pick · otherwise)
+    question: (e) => `❓ ${e.project} asks · ${e.text}`,
   },
 
   // problems, in the report and on the cards
