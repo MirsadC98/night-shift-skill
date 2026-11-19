@@ -252,6 +252,16 @@ test("between two jobs: the jobs left at this run's mean working time, from now"
   assert.equal(progressText(p, at(15), en), "3/5 jobs done · estimated end ~16:30");
 });
 
+// U20: the clock the user reads is the language table's (English's is 24-hour HH:MM).
+test("the progress line's clock is the language table's own, a 12-hour one here", () => {
+  const twelve = { ...en, clock: (d) => `${d.getHours() % 12 || 12}:${String(d.getMinutes()).padStart(2, "0")} ${d.getHours() < 12 ? "am" : "pm"}` };
+  const p = chainProgress([job(30), job(60), job(45, 2)], { now: at(15) });
+  assert.equal(progressText(p, at(15), twelve), "3/5 jobs done · estimated end ~4:30 pm");
+  assert.equal(progressText({ done: 1, total: 3, left: 2, eta: at(23, 58) }, at(22), twelve), "1/3 jobs done · estimated end tomorrow ~12:00 am");
+  assert.equal(en.clock(at(9, 5)), "09:05");
+  assert.equal(en.clock(at(21, 40)), "21:40");
+});
+
 test("a running job counts as one of the jobs left, with only its rest still to come", () => {
   const running = { ok: false, ended: false, workMs: min(20), remaining: null };
   assert.deepEqual(chainProgress([job(30), job(60), job(45, 2), running], { now: at(15) }).eta, at(16, 10));

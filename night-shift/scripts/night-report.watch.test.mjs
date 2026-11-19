@@ -301,6 +301,20 @@ test("the watcher ends after the chain's last card even when notified.json canno
   });
 });
 
+// U20: a card's time goes through the language table's clock, here a 12-hour one; chain.log keeps HH:MM.
+test("the usage-limit and error cards give their time through the language table's clock", async () => {
+  const table = "export default { name: 'Xxish', clock: (d) => `${d.getHours() % 12 || 12}.${String(d.getMinutes()).padStart(2, '0')}${d.getHours() < 12 ? 'am' : 'pm'}` };\n";
+  await scene(() => undefined, { lang: "xx", table }, async ({ api, chain }) => {
+    chain("session 01 starts: x");
+    chain("usage limit: waiting until 2026-11-16 15:05:00");
+    chain("session 01: transient error (API Error: 500); try 1, waiting until 2026-11-16 03:01");
+    await until(() => api.sends().some((c) => /3\.01am/.test(c.body.text)), 10_000, "the error card");
+    const texts = api.sends().map((c) => c.body.text);
+    assert.ok(texts.some((t) => /3\.05pm/.test(t)), texts.join("\n"));
+    assert.ok(!texts.some((t) => /\b(?:15:05|03:01)\b/.test(t)), texts.join("\n"));
+  });
+});
+
 // During an outage each retry logs "ends" and then "transient error"; only the error is a card.
 const OUTAGE = [
   "session 01 starts: x",

@@ -8,6 +8,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { buildReport, sessionMessage, chainMessage, questionLines } from "./night-report.mjs";
 import { reportSection } from "./telegram-cards.mjs";
+import { loadLang } from "./lang/index.mjs";
 // A CLAUDE_CONFIG_DIR of the user's own would move every file these tests read or write (claudeHome in config.mjs).
 delete process.env.CLAUDE_CONFIG_DIR;
 
@@ -123,6 +124,24 @@ test("two keys of one model in the totals (the plain id and its [1m] form) add u
   assert.equal(plain.split("Night total")[0].match(/main haiku 5\.5/g)?.length, 1, plain);
   assert.match(plain, /main haiku 5\.5\s+—\s+\$0\.50\n\s+in 4k read 0 write 0 out 300/);
   assert.match(plain.split("Night total")[1] ?? "", /total \$2\.00/);
+});
+
+// U20: a time the user reads comes from the language table's clock; a section is still found by its heading's HH:MM.
+test("the report's clock times are the language table's, and a section is still found by its heading's HH:MM", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "night-report-clock-"));
+  fs.mkdirSync(path.join(home, ".claude", "night-shift", "lang"), { recursive: true });
+  fs.writeFileSync(path.join(home, ".claude", "night-shift", "lang", "zc.mjs"),
+    "export default { name: 'Zc', clock: (d) => `${d.getHours() % 12 || 12}.${String(d.getMinutes()).padStart(2, '0')}${d.getHours() < 12 ? 'am' : 'pm'}` };\n");
+  assert.equal((await loadLang("zc", home)).error, undefined);
+  const state = finished([success({ "claude-opus-5-5": used(10, 7, 1.2) }, 1.2)],
+    { report: "## 2026-11-19 · run 1 · session 01 (03:27–04:10) · the clock piece\n\n**Waits for you**\n- New: none.\n\n**Remaining:** 0 sessions\n" });
+  const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+  fs.writeFileSync(path.join(state, "run.json"), line({ ...run, lang: "zc" }));
+  fs.appendFileSync(path.join(state, "chain.log"), "[2026-11-19 03:40:00] usage limit: waiting until 2026-11-19 15:05:12\n");
+  const plain = buildReport(state, { focus: "all", pid: 0 }).plain;
+  assert.match(plain, /3\.27am–4\.10am/);
+  assert.match(plain, /the clock piece/);
+  assert.match(plain, /⏳ 3\.40am usage limit reached, waited until 3\.05pm/);
 });
 
 // A report with session nn of two runs: last night's at the same clock time, and tonight's when given.

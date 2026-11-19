@@ -18,6 +18,7 @@ Not on `main` yet: the commits after `2c14b8b`.
 - The night report's Tokens part shows each job's starting context; a handover prompt over 12 KB is flagged, on its card too.
 - `night-chain.mjs --version`, a `version` in `run.json`, this changelog, and `package.json` with `npm test` (the suite and the guard's self-test).
 - `examples/`: a small roadmap, a first prompt and a project rules file.
+- `clock` in a language table: the times on the cards and in the report, 24-hour `HH:MM` in English; a table may give a 12-hour clock. `chain.log`, `watch.log`, the night report's section headings and a `chain.log` line quoted as it is (a chain's ending reason) keep `HH:MM`.
 - `CONTRIBUTING.md`, and issue forms for a bug report (it asks for `--version` and `doctor`'s output) and a feature request.
 - A plugin manifest and marketplace (`.claude-plugin/`): `claude plugin install night-shift@night-shift` installs the skill as a plugin, beside copying the folder; the guard protects either copy (README, "Install").
 

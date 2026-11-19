@@ -47,6 +47,8 @@ const { alive } = platform;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jsonl = (f) => read(f).split("\n").flatMap((l) => { try { return l ? [JSON.parse(l)] : []; } catch { return []; } });
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+// HH:MM, as a night report's section heading writes a session's start (reportSection finds it by that);
+// a time the user reads goes through the language table's clock (T.clock) instead.
 const hm = (d) => d.toLocaleTimeString("sv-SE").slice(0, 5);
 const when = (at) => new Date(at.replace(" ", "T"));
 const tokens = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
@@ -315,12 +317,15 @@ function collect(state, pid = null) {
   }
   const since = when(String(run.startedAt || ""));
   for (const e of events.filter((x) => Number.isNaN(since.getTime()) || when(x.at) >= since)) {
-    if (e.text.startsWith("usage limit: ")) issues.push(`⏳ ${hm(when(e.at))} ${T.limitWaited(esc(e.text.replace(/^usage limit: waiting until \S+ /, "")))}`);
+    if (e.text.startsWith("usage limit: ")) {
+      const until = /^usage limit: waiting until (\d{4}-\d\d-\d\d \d\d:\d\d)/.exec(e.text);
+      issues.push(`⏳ ${T.clock(when(e.at))} ${T.limitWaited(until ? T.clock(when(until[1])) : esc(e.text.replace(/^usage limit: waiting until \S+ /, "")))}`);
+    }
     // A line that does not open with "session N" (none today) is shown as it is.
     const nn = /^session (\d+)/.exec(e.text)?.[1];
     const said = (make) => esc(nn ? make(nn) : e.text);
-    if (/^session \d+: transient error .*; try 1,/.test(e.text)) issues.push(`🔌 ${hm(when(e.at))} ${said(T.retriedTransient)}`);
-    if (/left no continuation prompt/.test(e.text)) issues.push(`🔁 ${hm(when(e.at))} ${said(T.retriedNoPrompt)}`);
+    if (/^session \d+: transient error .*; try 1,/.test(e.text)) issues.push(`🔌 ${T.clock(when(e.at))} ${said(T.retriedTransient)}`);
+    if (/left no continuation prompt/.test(e.text)) issues.push(`🔁 ${T.clock(when(e.at))} ${said(T.retriedNoPrompt)}`);
   }
   if (!ended && !running) issues.push(`🛑 ${T.runnerGone}`);
   const nextPrompt = read(path.join(state, "next-prompt.md")).trim();
@@ -443,11 +448,11 @@ export function buildReport(state, { headline = "", focus = null, pid = null } =
   const out = [];
   const progress = running ? progressOf(c) : null;
   const status = ended ? T.ended(esc(ended.text.slice(12))) : running ? T.runningLine({ nn: parsed.at(-1)?.nn || "—", max: run.lastSession ?? run.maxSessions, until: run.until, progress: progress ? esc(progress) : "" }) : T.stopped;
-  out.push(`🌙 <b>${T.reportTitle} · ${esc(path.basename(run.repo || state))}</b>\n${headline ? `${esc(headline)}\n` : ""}${status} · ${hm(new Date())}`);
+  out.push(`🌙 <b>${T.reportTitle} · ${esc(path.basename(run.repo || state))}</b>\n${headline ? `${esc(headline)}\n` : ""}${status} · ${T.clock(new Date())}`);
   out.push(`<b>${T.problemsHead}</b>\n${issues.length ? issues.join("\n") : `✅ ${T.noProblems}`}`);
 
   const jobs = parsed.map((s) => {
-    const at = spanMs(s) > 12 * 3_600_000 ? (d) => `${d.toLocaleDateString("sv-SE").slice(5)} ${hm(d)}` : hm;
+    const at = spanMs(s) > 12 * 3_600_000 ? (d) => `${d.toLocaleDateString("sv-SE").slice(5)} ${T.clock(d)}` : (d) => T.clock(d);
     const span = `${at(when(s.start))}–${s.end ? at(when(s.end)) : ""}`;
     const idle = idleMs(s);
     const took = minutes(spanMs(s) - idle, T) + (idle >= 60_000 ? ` (${T.gap(minutes(idle, T))})` : "");
@@ -516,13 +521,13 @@ export function buildReport(state, { headline = "", focus = null, pid = null } =
     const fs0 = s.limits.map(fableOf).filter(Boolean);
     const initial = fs0.length ? shareName(c, [s])[0] : ""; // F or M: one session ran one model
     const f = (x) => (fs0.length ? ` ${initial} ${pct(x?.utilization, T)}` : "");
-    timeline.push(`${hm(when(s.start))} #${s.nn} ${T.atStart} ${T.five} ${pct(w(s.limits[0]).five_hour?.utilization, T).padEnd(4)} ${T.seven} ${pct(w(s.limits[0]).seven_day?.utilization, T).padEnd(4)}${f(fs0[0])}`.trimEnd());
-    timeline.push(`${s.end ? hm(when(s.end)) : hm(new Date())} #${s.nn} ${s.end ? T.atEnd : T.atNow} ${T.five} ${pct(w(s.limits.at(-1)).five_hour?.utilization, T).padEnd(4)} ${T.seven} ${pct(w(s.limits.at(-1)).seven_day?.utilization, T).padEnd(4)}${f(fs0.at(-1))}`.trimEnd());
+    timeline.push(`${T.clock(when(s.start))} #${s.nn} ${T.atStart} ${T.five} ${pct(w(s.limits[0]).five_hour?.utilization, T).padEnd(4)} ${T.seven} ${pct(w(s.limits[0]).seven_day?.utilization, T).padEnd(4)}${f(fs0[0])}`.trimEnd());
+    timeline.push(`${s.end ? T.clock(when(s.end)) : T.clock(new Date())} #${s.nn} ${s.end ? T.atEnd : T.atNow} ${T.five} ${pct(w(s.limits.at(-1)).five_hour?.utilization, T).padEnd(4)} ${T.seven} ${pct(w(s.limits.at(-1)).seven_day?.utilization, T).padEnd(4)}${f(fs0.at(-1))}`.trimEnd());
   }
   const all = parsed.flatMap((s) => s.limits);
   const latest = all.at(-1)?.unifiedWindows;
   if (latest) {
-    const reset = (t, long) => { const d = new Date(t * 1000); return long ? `${T.dayMonth(d)} ${hm(d)}` : hm(d); };
+    const reset = (t, long) => { const d = new Date(t * 1000); return long ? `${T.dayMonth(d)} ${T.clock(d)}` : T.clock(d); };
     const fable = all.map(fableOf).filter(Boolean).at(-1);
     timeline.push(`${T.resets}: ${T.five} ${reset(latest.five_hour?.resetsAt)} · ${T.seven} ${reset(latest.seven_day?.resetsAt, true)}${fable?.resetsAt ? ` · ${shareName(c, parsed)} ${reset(fable.resetsAt, true)}` : ""}`);
   }
@@ -635,7 +640,7 @@ export function reportMessage(state, pid) {
   return reportCard({
     project: path.basename(c.run.repo || c.state),
     state: c.ended ? T.stateEnded(c.ended.text.slice(12).replace(/^STOP:\s*/i, "")) : c.running ? T.stateRunning : T.stateStopped,
-    at: hm(new Date()),
+    at: T.clock(new Date()),
     progress: c.running ? progressOf(c) : null,
     five: pctOr(w.five_hour?.utilization, T), seven: pctOr(w.seven_day?.utilization, T), fable: lastFable(jobs.flatMap((s) => s.limits), T), fableName: shareName(c, jobs),
     cost: jobs.length ?`${jobs.some((s) => !s.result) ? "≈" : ""}${usd(jobs.reduce((a, s) => a + costOf(s), 0))}` : null,
@@ -693,7 +698,7 @@ export function statusMessage(state, pid) {
     nn: cur && !cur.end ? cur.nn : null, took: cur && !cur.end ? minutes(workMs(cur), T) : null,
     step: cur && !cur.end && cur.lastStep ? String(cur.lastStep).slice(0, 80) : null,
     effort: cur && !cur.end ? cur.efforts.join("/") || null : null,
-    five: pctOr(w.five_hour?.utilization, T), fiveReset: w.five_hour?.resetsAt ? hm(new Date(w.five_hour.resetsAt * 1000)) : null,
+    five: pctOr(w.five_hour?.utilization, T), fiveReset: w.five_hour?.resetsAt ? T.clock(new Date(w.five_hour.resetsAt * 1000)) : null,
     seven: pctOr(w.seven_day?.utilization, T), fable: lastFable(c.parsed.flatMap((s) => s.limits), T), fableName: shareName(c, c.parsed),
     last: f &&{ nn: f.nn, ok: f.ok, title: f.title || firstCommit(f) }, next: f?.next,
     progress: c.running ? progressOf(c) : null,
@@ -902,9 +907,9 @@ async function watch(opt) {
         try {
           // In an outage each retry logs "ends" and then "transient error"; the error is the card, so the "ends" before it is not.
           if ((m = /^session (\d+) ends: /.exec(t))) { if (!retriedAfter(lines.slice(mark.lines + 1), m[1])) await say(sessionMessage(state, m[1], pid)); }
-          else if ((m = /^usage limit: waiting until \S+ (\d\d:\d\d)/.exec(t))) await say(eventLine("limit", { until: m[1], progress: progressOf(collect(state, pid)) }, T));
+          else if ((m = /^usage limit: waiting until (\S+ \d\d:\d\d)/.exec(t))) await say(eventLine("limit", { until: T.clock(when(m[1])), progress: progressOf(collect(state, pid)) }, T));
           else if ((m = /^session (\d+) resumes /.exec(t))) await say(eventLine("resume", { nn: m[1] }, T));
-          else if ((m = /^session (\d+): transient error .*; try 1, waiting until \S+ (\d\d:\d\d)/.exec(t))) await say(eventLine("error", { nn: m[1], until: m[2] }, T)); // later tries stay quiet
+          else if ((m = /^session (\d+): transient error .*; try 1, waiting until (\S+ \d\d:\d\d)/.exec(t))) await say(eventLine("error", { nn: m[1], until: T.clock(when(m[2])) }, T)); // later tries stay quiet
           else if ((m = /^session (\d+) left no continuation prompt/.exec(t))) await say(eventLine("retry", { nn: m[1] }, T));
           else if ((m = /^rules: (.+)$/.exec(t))) await say(eventLine("rules", { text: m[1] }, T)); // the runner tells a rules file's change once
           else if ((m = /^chain ends: (.*)$/.exec(t))) {

@@ -136,7 +136,7 @@ export function progressText(p, now = new Date(), T = strings()) {
   const eta = new Date(Math.round(p.eta.getTime() / FIVE_MIN) * FIVE_MIN);
   const day = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
   const days = Math.round((day(eta) - day(now)) / 86_400_000);
-  const clock = T.approxClock(eta.toLocaleTimeString("sv-SE").slice(0, 5));
+  const clock = T.approxClock(T.clock(eta));
   const label = days === 0 ? clock : days === 1 ? T.tomorrow(clock) : `${T.dayMonth(eta)} ${clock}`;
   return T.endsAt(head, label);
 }

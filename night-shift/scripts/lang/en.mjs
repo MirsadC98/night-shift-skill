@@ -16,6 +16,10 @@ export default {
   minutes: (m) => (m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`),
   ago: (t) => `${t} ago`,
   dayMonth: (d) => d.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+  // A clock time as you read it on the cards and in the report: 24-hour HH:MM here; a table may give a
+  // 12-hour one. chain.log's and watch.log's times, the time a report section's heading carries and a chain.log line
+  // quoted as it is (a chain's ending reason) stay HH:MM.
+  clock: (d) => d.toLocaleTimeString("sv-SE").slice(0, 5),
   approxClock: (hhmm) => `~${hhmm}`,
   tomorrow: (clock) => `tomorrow ${clock}`,
 
