@@ -64,6 +64,12 @@ export default {
     stopGone: (e) => `${e.project}: its runner was not running; marked finished`,
     stopNone: (e) => `${e.project}: no active run`,
     stopError: (e) => `⚠️ ${e.project}: the stop did not go through (${e.text}); run stop on the PC`,
+    // the bot's answers to /inbox (cmd: the command's name as the user typed it, file: the user's global config)
+    inboxAdded: (e) => `📥 ${e.project}: added to the inbox; the next session reads it first`,
+    inboxStopping: (e) => `📥 ${e.project}: added to the inbox; the chain is stopping, so the first session after a start --state reads it`,
+    inboxOff: (e) => `${e.project}: /${e.cmd} is off, so nothing was added; "telegramInbox": true in ${e.file} turns it on`,
+    inboxEmpty: (e) => `${e.project}: /${e.cmd} needs a text after it, as in /${e.cmd} A1: yes; the next session reads it first`,
+    inboxError: (e) => `⚠️ ${e.project}: the inbox could not be written (${e.text}); nothing was added`,
   },
 
   // problems, in the report and on the cards
@@ -142,6 +148,7 @@ export default {
   cmdStatus: "status", cmdStatusDesc: "What is running now",
   cmdReport: "report", cmdReportDesc: "The full report",
   cmdStop: "stop", cmdStopDesc: "Stop after the session in progress (/stop now: at once)",
+  cmdInbox: "inbox", cmdInboxDesc: "Add a note the next session reads first",
   // the word after /stop that stops at once (the English word always does)
   cmdNow: "now",
   preview: "preview",

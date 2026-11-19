@@ -86,6 +86,7 @@ export const CONFIG_KEYS = {
   weeklyCeiling: (v) => (typeof v === "number" && v > 0 && v <= 100 ? null : "must be a number above 0 and at most 100"),
   maxUsd: (v) => (typeof v === "number" && v > 0 && Number.isFinite(v) ? null : "must be a number of dollars above 0"),
   attended: (v) => (typeof v === "boolean" ? null : "must be true or false"),
+  telegramInbox: (v) => (typeof v === "boolean" ? null : "must be true or false"),
   mcp: (v) => (v === "none" || v === "inherit" || (Array.isArray(v) && v.every((s) => isStr(s) && s)) ? null : 'must be "none", "inherit" or a list of server names'),
   deny: (v) => denyErrors(v),
 };
@@ -105,7 +106,8 @@ function denyErrors(list) {
 
 // Both files go through one reader. `allowed` limits the keys a file may hold: a known key outside it is
 // named as belonging elsewhere, so a project-only setting in the global file is not silently applied to every repo.
-function readConfigFile(file, allowed) {
+// `refused` names keys only the user's own global file may hold (GLOBAL_ONLY).
+function readConfigFile(file, allowed, refused = []) {
   let text;
   try { text = fs.readFileSync(file, "utf8"); }
   catch (e) { return e.code === "ENOENT" ? { config: {}, errors: [] } : { config: {}, errors: [`cannot be read: ${e.message}`] }; }
@@ -118,6 +120,7 @@ function readConfigFile(file, allowed) {
     if (k.startsWith("_") || k.startsWith("$")) continue; // a comment
     if (!Object.hasOwn(CONFIG_KEYS, k)) { errors.push(`unknown key "${k}"`); continue; }
     if (allowed && !allowed.includes(k)) { errors.push(`"${k}" belongs in a project's .claude/night-shift.json`); continue; }
+    if (refused.includes(k)) { errors.push(`"${k}" belongs in the user's own ${globalConfigFile()}, not in a project's file`); continue; }
     // A scalar check returns text for after the key's name; deny returns whole messages.
     const bad = k === "deny" ? denyErrors(v) : [CONFIG_KEYS[k](v)].filter(Boolean).map((m) => `"${k}" ${m}`);
     if (bad.length) errors.push(...bad); else config[k] = v;
@@ -131,10 +134,13 @@ export const claudeHome = (home = os.homedir(), env = process.env) =>
   (env.CLAUDE_CONFIG_DIR ? path.resolve(env.CLAUDE_CONFIG_DIR) : path.join(String(home), ".claude"));
 
 export const projectConfigFile = (repo) => path.join(String(repo), ".claude", "night-shift.json");
-export const readProjectConfig = (repo) => readConfigFile(projectConfigFile(repo));
+export const readProjectConfig = (repo) => readConfigFile(projectConfigFile(repo), null, GLOBAL_ONLY);
 
 // Only what is about the run as a whole; anything that names a path or a rule of one repository stays per project.
-export const GLOBAL_KEYS = ["mode", "lang", "effort", "fableCeiling", "fableSessions", "maxWaitHours", "weeklyCeiling", "maxUsd", "attended"];
+export const GLOBAL_KEYS = ["mode", "lang", "effort", "fableCeiling", "fableSessions", "maxWaitHours", "weeklyCeiling", "maxUsd", "attended", "telegramInbox"];
+// Who may steer the user's chains is the user's own choice, and a repository's file may come from someone else:
+// these keys count only in the global file, and a project's file that holds one is refused.
+export const GLOBAL_ONLY = ["telegramInbox"];
 export const globalConfigFile = (home = os.homedir()) => path.join(claudeHome(home), "night-shift", "config.json");
 export const readGlobalConfig = (home = os.homedir()) => readConfigFile(globalConfigFile(home), GLOBAL_KEYS);
 

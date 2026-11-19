@@ -37,6 +37,7 @@ test("the English table names its language and its night-report commit phrase", 
   assert.equal(en.cmdReport, "report");
   assert.equal(en.cmdStop, "stop");
   assert.equal(en.cmdNow, "now");
+  assert.equal(en.cmdInbox, "inbox");
   assert.ok(shape(en).length > 50, "the walk reached the table's contents");
 });
 
@@ -65,6 +66,7 @@ test("the user's table is found and used, and a key it lacks or gives the wrong 
   assert.equal(T.cmdReport, "xxreport");
   assert.equal(T.cmdStop, "xxstop");
   assert.equal(T.cmdNow, "xxnow");
+  assert.equal(T.cmdInbox, "xxinbox");
   assert.equal(T.reportCommit, "xx·report");
   // what the table leaves out, top-level and nested, is the English text
   assert.equal(T.noProblems, en.noProblems);
@@ -116,6 +118,12 @@ test("a table without a name reads its code as its name, and command names Teleg
   }
   const good = await loadLang("zh", homeWithTable("zh", "export default { name: 'Z', cmdStatus: 'zh_status2', cmdReport: 'zhreport' };\n"));
   assert.deepEqual([good.table.cmdStatus, good.table.cmdReport, good.table.cmdStop], ["zh_status2", "zhreport", "stop"]);
+  // /inbox's name is checked the same way, after the other three.
+  for (const [code, names, want] of [["ya", "cmdStatus: 'yas', cmdInbox: 'yas'", ["yas", "inbox"]], ["yb", "cmdInbox: 'stop'", ["status", "inbox"]],
+    ["yc", "cmdInbox: 'not'", ["status", "not"]]]) {
+    const r = await loadLang(code, homeWithTable(code, `export default { name: 'Z', ${names} };\n`));
+    assert.deepEqual([r.table.cmdStatus, r.table.cmdInbox], want, code);
+  }
   // The word after /stop that stops at once: one word of up to 32 characters, any letters, else English.
   for (const [code, word, want] of [["zk", "'şimdi'", "şimdi"], ["zl", "'two words'", "now"], ["zm", "''", "now"], ["zn", `'${"n".repeat(33)}'`, "now"]]) {
     const r = await loadLang(code, homeWithTable(code, `export default { name: 'Z', cmdNow: ${word} };\n`));
@@ -134,6 +142,8 @@ test("a command description Telegram would refuse (not 1 to 256 characters) read
     assert.equal(r.error, undefined, code);
     assert.deepEqual([r.table.cmdStatusDesc, r.table.cmdReportDesc, r.table.cmdStopDesc], want[code], code);
   }
+  const inbox = await loadLang("yd", homeWithTable("yd", `export default { name: 'Z', cmdInboxDesc: ${JSON.stringify(long)} };\n`));
+  assert.equal(inbox.table.cmdInboxDesc, en.cmdInboxDesc);
 });
 
 test("loadLang refuses a code of the wrong shape before it looks for a file, and en needs no file", async () => {

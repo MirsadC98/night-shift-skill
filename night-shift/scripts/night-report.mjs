@@ -15,7 +15,8 @@
 // when the chain ends or its runner dies. In the bot's chat, /status answers with what
 // runs now, /report with the full report that `show` prints, and /stop stops the chain
 // after the session in progress (/stop now at once, as `night-chain.mjs stop --now`);
-// the cards and the report are in the run's language (run.json "lang", lang/index.mjs),
+// /inbox <text> adds the text to the run's inbox.md once the user's global config holds
+// "telegramInbox": true; the cards and the report are in the run's language (run.json "lang", lang/index.mjs),
 // whose table may name the commands in that language too.
 
 import fs from "node:fs";
@@ -25,7 +26,7 @@ import { fileURLToPath } from "node:url";
 import { sessionCard, eventLine, chainCard, statusCard, reportCard, reportSection, chainProgress, progressText, splitHtml } from "./telegram-cards.mjs";
 import { sessionPlan, resolveMode, isPremium, modelName as familyName } from "./effort.mjs";
 import { strings, langOf, loadLang } from "./lang/index.mjs";
-import { isMain, claudeHome } from "./config.mjs";
+import { isMain, claudeHome, readGlobalConfig, globalConfigFile } from "./config.mjs";
 import { stopRun } from "./runs.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
@@ -815,7 +816,8 @@ async function watch(opt) {
   if (cfg.token && !opt.dry) {
     await telegram("setMyCommands", cfg, { commands: [
       { command: T.cmdStatus, description: T.cmdStatusDesc }, { command: T.cmdReport, description: T.cmdReportDesc },
-      { command: T.cmdStop, description: T.cmdStopDesc }] }).catch(() => {});
+      { command: T.cmdStop, description: T.cmdStopDesc },
+      ...(inboxOn() ? [{ command: T.cmdInbox, description: T.cmdInboxDesc }] : [])] }).catch(() => {});
   }
   const project = path.basename(readJson(path.join(state, "run.json")).repo || state);
   if (opt.announce) await say(eventLine("start", { project }, T));
@@ -945,7 +947,30 @@ async function stopCommand(state, cmd, rest, delay, T) {
   return r.outcome === "now" ? "stopped" : null;
 }
 
-// /status, /report and /stop from the user's own chat, read by long polling in place of the
+// /inbox <text>: the text goes into the run's inbox.md after the time, on lines of its own; the next session reads it
+// first (SKILL.md). Off until the user's own global config holds "telegramInbox": true, read at each command, so that
+// turning it on or off needs no restart: it lets a phone steer a chain, and a project's file cannot turn it on
+// (config.mjs, GLOBAL_ONLY).
+const inboxOn = () => readGlobalConfig().config.telegramInbox === true;
+const INBOX_LINE = { added: "inboxAdded", stopping: "inboxStopping", off: "inboxOff", empty: "inboxEmpty", failed: "inboxError" };
+async function inboxCommand(state, cmd, rest, delay, T) {
+  const project = path.basename(readJson(path.join(state, "run.json")).repo || state);
+  let outcome, why = "";
+  if (!inboxOn()) outcome = "off";
+  else if (!rest) outcome = "empty";
+  else {
+    try {
+      const file = path.join(state, "inbox.md"), old = read(file);
+      fs.appendFileSync(file, `${old && !old.endsWith("\n") ? "\n" : ""}[${new Date().toLocaleString("sv-SE").slice(0, 16)} · Telegram] ${rest}\n`);
+      // Once a stop is asked no session follows in this chain: the text waits for a start --state.
+      outcome = fs.existsSync(path.join(state, "STOP-REQUEST")) ? "stopping" : "added";
+    } catch (err) { outcome = "failed"; why = err.message; }
+  }
+  const sent = await send([eventLine(INBOX_LINE[outcome], { project, cmd, file: globalConfigFile(), text: why }, T)]);
+  watchLog(state, `/${cmd}: ${outcome}${why ? ` (${why})` : ""}, ${sent}, ${delay()} s after the message`);
+}
+
+// /status, /report, /stop and /inbox from the user's own chat, read by long polling in place of the
 // loop's wait. Two runs watching the same bot take turns (Telegram answers 409).
 async function commands(state, pid, mark, save, started, seconds, T = strings()) {
   const cfg = readJson(telegramFile(), null);
@@ -965,12 +990,15 @@ async function commands(state, pid, mark, save, started, seconds, T = strings())
     const rest = (msg.text || "").replace(/^\/\w+(?:@\w+)?/, "").trim();
     const delay = () => Math.round((Date.now() - msg.date * 1000) / 1000);
     // The English name always answers; the run's table may add a name in its own language.
-    if (cmd === "stop" || cmd === T.cmdStop) {
-      // Telegram confirms an update only with the next poll: one this watcher acts on is confirmed first, so a /stop now
-      // whose kill takes this watcher with it is not read again by the next chain's watcher, which starts with no offset.
+    const steer = cmd === "stop" || cmd === T.cmdStop ? "stop" : cmd === "inbox" || cmd === T.cmdInbox ? "inbox" : null;
+    if (steer) {
+      // Telegram confirms an update only with the next poll: one that steers the chain is confirmed first, so a /stop now
+      // whose kill takes this watcher with it is not read again by the next chain's watcher, which starts with no offset,
+      // and an /inbox is not added twice.
       const ok = await telegram("getUpdates", cfg, { offset: u.update_id + 1, timeout: 0, allowed_updates: ["message"] }).catch((e) => ({ description: e.message }));
       if (!ok?.ok) watchLog(state, `getUpdates (confirming /${cmd}): ${ok?.description}`);
-      if (await stopCommand(state, cmd, rest, delay, T) === "stopped") return "stopped";
+      if (steer === "inbox") await inboxCommand(state, cmd, rest, delay, T);
+      else if (await stopCommand(state, cmd, rest, delay, T) === "stopped") return "stopped";
       continue;
     }
     const reply = cmd === "status" || cmd === T.cmdStatus ? statusMessage(state, pid) : cmd === "report" || cmd === T.cmdReport ? reportMessage(state, pid) : null;

@@ -14,6 +14,7 @@ export default {
     retry: (e) => `🔁 #${e.nn} xx·retry`,
     stopAfter: (e) => `🛑 xx·stops · ${e.project} · /${e.cmd} ${e.now}`,
     stopNow: (e) => `🛑 xx·stops now · ${e.project}`,
+    inboxAdded: (e) => `📥 xx·inbox · ${e.project}`,
   },
   note: {
     // a table older than the model's name in the notes: a string where English now has a function
@@ -25,6 +26,7 @@ export default {
   cmdStatus: "xxstatus", cmdStatusDesc: "xx·status",
   cmdReport: "xxreport", cmdReportDesc: "xx·report",
   cmdStop: "xxstop", cmdStopDesc: "xx·stop", cmdNow: "xxnow",
+  cmdInbox: "xxinbox", cmdInboxDesc: "xx·inbox",
   cli: {
     userWaits: (lines) => (lines.length ? `xx·waits:\n${lines.join("\n")}` : "xx·waits: none"),
     reportLine: (report, cmd) => `xx·report: ${report} · ${cmd}`,

@@ -131,6 +131,13 @@ test("attended is a run-wide key, true or false: the user is at hand or not, wha
   assert.deepEqual(readGlobalConfig(tmpHome({ attended: true })), { config: { attended: true }, errors: [] });
   assert.deepEqual(readGlobalConfig(tmpHome({ attended: "yes" })).errors, ['"attended" must be true or false']);
 });
+test("telegramInbox lives in the global file only: true or false there, refused in a project's file, which names the global one", () => {
+  assert.deepEqual(readGlobalConfig(tmpHome({ telegramInbox: true })), { config: { telegramInbox: true }, errors: [] });
+  assert.deepEqual(readGlobalConfig(tmpHome({ telegramInbox: "yes" })).errors, ['"telegramInbox" must be true or false']);
+  const { config, errors } = readProjectConfig(repoWith({ telegramInbox: true, effort: "high" }));
+  assert.deepEqual(config, { effort: "high" });
+  assert.deepEqual(errors, [`"telegramInbox" belongs in the user's own ${globalConfigFile()}, not in a project's file`]);
+});
 test("a missing global file is no error", () => assert.deepEqual(readGlobalConfig(emptyHome()), { config: {}, errors: [] }));
 test("the project file wins over the global one, key by key", () => {
   const home = tmpHome({ lang: "xx", effort: "high" }), repo = repoWith({ effort: "max" });

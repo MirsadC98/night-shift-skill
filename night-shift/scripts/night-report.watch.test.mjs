@@ -51,8 +51,8 @@ async function bot(answer) {
 // lang: null writes a run.json from before the language was a setting; lang "xx" puts the made-up table in the home
 // unless table is false. configDir: the user set CLAUDE_CONFIG_DIR, so the night-shift folder sits there instead of in ~/.claude.
 // runner: the helper looks like a runner (its command line names a night-chain.mjs) and the repository's pointer names it
-// (a string is the pointer's own text).
-async function scene(answer, { chatId = 42, notified, env = {}, token = "T", lang = "en", table = true, configDir = false, runner = false } = {}, body) {
+// (a string is the pointer's own text). config: the user's global config.json. files: name -> text, in the state folder (null: a folder).
+async function scene(answer, { chatId = 42, notified, env = {}, token = "T", lang = "en", table = true, configDir = false, runner = false, config, files = {} } = {}, body) {
   const api = await bot(answer);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ns-watch-"));
   const home = path.join(dir, "home"), state = path.join(dir, "state"), root = path.join(dir, "repo");
@@ -71,6 +71,8 @@ async function scene(answer, { chatId = 42, notified, env = {}, token = "T", lan
   fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ repo: root, ...(lang && { lang }) }));
   fs.writeFileSync(path.join(state, "chain.log"), "");
   if (notified !== undefined) fs.writeFileSync(path.join(state, "notified.json"), notified);
+  if (config) fs.writeFileSync(path.join(claude, "night-shift", "config.json"), JSON.stringify(config));
+  for (const [name, text] of Object.entries(files)) if (text === null) fs.mkdirSync(path.join(state, name)); else fs.writeFileSync(path.join(state, name), text);
   let helper;
   if (runner) {
     const file = path.join(dir, "bin", "night-chain.mjs");
@@ -529,5 +531,78 @@ test("the table's own names answer /stop and /stop now, in the run's language", 
     await Promise.race([exited, sleep(15_000)]);
     assert.deepEqual(api.sends().map((s) => s.body.text), ["🛑 xx·stops now · repo"]);
     assert.equal(alive(helper.pid), false);
+  });
+});
+
+// /inbox: off until the user's global config holds "telegramInbox": true; read at each command.
+const inboxOf = (state) => (fs.existsSync(path.join(state, "inbox.md")) ? fs.readFileSync(path.join(state, "inbox.md"), "utf8") : null);
+const menu = (api) => api.calls.find((c) => c.method === "setMyCommands").body.commands.map((c) => c.command);
+const ON = { config: { telegramInbox: true } };
+
+test("/inbox is off by default: it answers how to turn it on, writes nothing, and the menu leaves it out", async () => {
+  await scene(asking("/inbox A1: yes"), {}, async ({ api, state, home }) => {
+    await until(() => api.sends().length >= 1, 10_000, "the /inbox answer");
+    const file = path.join(home, ".claude", "night-shift", "config.json");
+    assert.equal(api.sends()[0].body.text, `repo: /inbox is off, so nothing was added; "telegramInbox": true in ${file} turns it on`);
+    assert.equal(inboxOf(state), null);
+    assert.deepEqual(menu(api), ["status", "report", "stop"]);
+    await until(() => /\/inbox: off, sent, \d+ s after the message/.test(logOf(state)), 5_000, "the watch.log line");
+  });
+});
+
+test("/inbox on: the text goes into inbox.md after the time, on lines of its own; the update is confirmed first and the menu lists it", async () => {
+  await scene(asking("/inbox A1: yes\nand the docs too"), { ...ON, files: { "inbox.md": "an old line with no newline" } }, async ({ api, state }) => {
+    await until(() => api.sends().length >= 1, 10_000, "the /inbox answer");
+    assert.equal(api.sends()[0].body.text, "📥 repo: added to the inbox; the next session reads it first");
+    assert.match(inboxOf(state), /^an old line with no newline\n\[\d{4}-\d\d-\d\d \d\d:\d\d · Telegram\] A1: yes\nand the docs too\n$/);
+    assert.deepEqual(menu(api), ["status", "report", "stop", "inbox"]);
+    const order = api.calls.map((c) => (c.method === "getUpdates" ? `poll ${c.body.offset} ${c.body.timeout}` : c.method)).filter((c) => c !== "setMyCommands");
+    assert.deepEqual(order.slice(0, 3), ["poll 1 20", "poll 2 0", "sendMessage"]);
+    await until(() => /\/inbox: added, sent, \d+ s after the message/.test(logOf(state)), 5_000, "the watch.log line");
+  });
+});
+
+test("/inbox: an empty one says how to use it, one after a stop says who reads it, and turning it on needs no restart", async () => {
+  await scene(asking("/inbox"), ON, async ({ api, state }) => {
+    await until(() => api.sends().length >= 1, 10_000, "the empty /inbox answer");
+    assert.equal(api.sends()[0].body.text, "repo: /inbox needs a text after it, as in /inbox A1: yes; the next session reads it first");
+    assert.equal(inboxOf(state), null);
+  });
+  await scene(asking("/inbox go on"), { ...ON, files: { "STOP-REQUEST": "x" } }, async ({ api, state }) => {
+    await until(() => api.sends().length >= 1, 10_000, "the /inbox answer");
+    assert.equal(api.sends()[0].body.text, "📥 repo: added to the inbox; the chain is stopping, so the first session after a start --state reads it");
+    assert.match(inboxOf(state), /^\[[^\]]+ · Telegram\] go on\n$/);
+  });
+  // Off at the start, on before the second message: the watcher reads the global file at each command.
+  let on = false;
+  const two = { ok: true, result: [{ update_id: 2, message: { chat: { id: 42 }, date: Math.floor(Date.now() / 1000), text: "/inbox two" } }] };
+  const answer = (m, b, n) => (m === "getUpdates" && n === 0 ? [200, asked("/inbox one")]
+    : m === "getUpdates" && on && b.offset === 2 && b.timeout > 0 ? [200, two] : m === "sendMessage" ? [200, { ok: true }] : undefined);
+  await scene(answer, {}, async ({ api, state, home }) => {
+    await until(() => api.sends().length >= 1, 10_000, "the first answer");
+    assert.match(api.sends()[0].body.text, /is off/);
+    fs.writeFileSync(path.join(home, ".claude", "night-shift", "config.json"), JSON.stringify({ telegramInbox: true }));
+    on = true;
+    await until(() => api.sends().length >= 2, 10_000, "the second answer");
+    assert.match(api.sends()[1].body.text, /added to the inbox/);
+    assert.match(inboxOf(state), /· Telegram\] two\n$/);
+  });
+});
+
+test("/inbox on: an inbox that cannot be written gets an answer saying nothing was added", async () => {
+  await scene(asking("/inbox hello"), { ...ON, files: { "inbox.md": null } }, async ({ api, state, ended }) => {
+    await until(() => api.sends().length >= 1, 10_000, "the /inbox answer");
+    assert.match(api.sends()[0].body.text, /^⚠️ repo: the inbox could not be written \(EISDIR[^)]*\); nothing was added$/);
+    await until(() => /\/inbox: failed \(EISDIR[^)]*\), sent, \d+ s after the message/.test(logOf(state)), 5_000, "the watch.log line");
+    assert.equal(ended(), false);
+  });
+});
+
+test("the table's own name answers /inbox, in the run's language", async () => {
+  await scene(asking("/xxinbox hello"), { ...ON, lang: "xx" }, async ({ api, state }) => {
+    await until(() => api.sends().length >= 1, 10_000, "the /xxinbox answer");
+    assert.equal(api.sends()[0].body.text, "📥 xx·inbox · repo");
+    assert.match(inboxOf(state), /· Telegram\] hello\n$/);
+    assert.deepEqual(menu(api), ["xxstatus", "xxreport", "xxstop", "xxinbox"]);
   });
 });
