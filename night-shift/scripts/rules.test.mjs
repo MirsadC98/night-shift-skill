@@ -46,6 +46,10 @@ test("a <!-- inside a line or a code block is text: a rule may be about HTML", (
     // a fence with an info string, or a shorter one, is the block's text (session 32's final review).
     "```\n```js\n<!-- kept -->\n```", "````\n```\n<!-- kept -->\n````", "~~~\n~~~ x\n<!-- kept -->\n~~~"]) assert.equal(readRuleFile(fileOf(t)).text, t);
   assert.equal(readRuleFile(fileOf("````md\n```\n<!-- kept -->\n```` \n<!-- a note -->\nA rule.")).text, "````md\n```\n<!-- kept -->\n```` \nA rule.");
+  // A backtick fence's info string holds no backtick (CommonMark): a line that starts with a code span opens no block,
+  // so the comment after it still goes (session 33's re-review).
+  assert.equal(readRuleFile(fileOf("```npm test``` must pass before a push.\n<!-- my note -->\nNever push.")).text, "```npm test``` must pass before a push.\nNever push.");
+  assert.equal(readRuleFile(fileOf("~~~ a `b` ~~~\n<!-- kept -->\n~~~")).text, "~~~ a `b` ~~~\n<!-- kept -->\n~~~", "a tilde fence's info string may hold a backtick");
 });
 
 test("the limit counts bytes, and exactly 8192 passes", () => {

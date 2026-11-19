@@ -212,7 +212,7 @@ test("resulted and cost: a result line's dollars, none without one, and an empty
   assert.deepEqual(out(result({ total_cost_usd: "x" })), [true, 0]);
 });
 
-test("a rate_limit_event without unifiedWindows or without rate_limit_info is the event, with no window, and clears nothing", () => {
+test("a rate_limit_event without unifiedWindows or without rate_limit_info is the event, with no window, and one without rate_limit_info clears no rejection", () => {
   const bare = JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "allowed" } }), noInfo = JSON.stringify({ type: "rate_limit_event" });
   for (const ev of [bare, noInfo]) {
     const o = sessionOutcome([ev, turn("claude-opus-5-5"), result({})].join("\n"));

@@ -3551,8 +3551,20 @@ test("start refuses a state folder whose run belongs to another repository that 
   const made = listing(fresh);
   refused(c.run("start", ["--repo", other, "--prompt", "y"]));
   assert.deepEqual(listing(fresh), made);
-  // A run whose repository is gone (moved by the user) goes on.
+  // doctor, given the other repository, names the default folder start would refuse (session 33's re-review), and the
+  // folder's own repository finds it fine.
+  const doc = c.run("doctor", ["--repo", other]);
+  assert.equal(doc.status, 1, doc.stdout + doc.stderr);
+  assert.match(doctorLine(doc.stdout, "FAIL", "state")[0] ?? doc.stdout, new RegExp(`night-shift-repo-\\d{8} holds a run of ${lit(c.repo)}, not of ${lit(other)}; start would refuse it$`));
+  assert.match(doctorLine(c.run("doctor").stdout, "ok", "state")[0] ?? "", /night-shift-repo-\d{8} \(holds a run; start --state goes on in it\); writable$/);
+  assert.deepEqual(listing(fresh), made);
+  // The same repository in another spelling, here through a junction (a link off Windows), is this one.
   const run = JSON.parse(fs.readFileSync(path.join(c.state, "run.json"), "utf8"));
+  const link = path.join(root, "repo-link");
+  fs.symlinkSync(c.repo, link, "junction");
+  fs.writeFileSync(path.join(c.state, "run.json"), JSON.stringify({ ...run, repo: link }));
+  assert.match(c.run("start", ["--state", c.state]).stderr, /launch refused \(test\)/);
+  // A run whose repository is gone (moved by the user) goes on.
   fs.writeFileSync(path.join(c.state, "run.json"), JSON.stringify({ ...run, repo: path.join(root, "moved-away") }));
   assert.match(c.run("start", ["--state", c.state]).stderr, /launch refused \(test\)/);
 });

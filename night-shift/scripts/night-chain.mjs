@@ -516,6 +516,13 @@ function mcpCheck(cfg, from, repo) {
 const defaultState = (repo, cfg) => path.resolve((cfg.stateDir || path.join(tempRoot(), `night-shift-${path.basename(repo)}-{date}`)).replace("{date}", today()));
 // A start that failed before run.json (no prompt, a dirty tree) leaves only what start itself made; that is no one else's folder.
 const foreignState = (state) => !fs.existsSync(path.join(state, "run.json")) && fs.existsSync(state) && fs.readdirSync(state).some((f) => !["prompts", "next-prompt.md"].includes(f));
+// The repository whose run the state folder holds, when it is another one that is still there, else null: two
+// repositories with one folder name share the default state folder on one day, and --state may name another
+// repository's; its prompt, resume.json and worktree are not this one's. One whose repository is gone (moved) goes on.
+const otherRepoRun = (state, repo) => {
+  const owner = fs.existsSync(path.join(state, "run.json")) ? parseOr(read(path.join(state, "run.json")), {}).repo : null;
+  return typeof owner === "string" && owner && fs.existsSync(owner) && !sameDir(owner, repo) ? owner : null;
+};
 
 async function start(opt) {
   // No terminal opens the same way on every macOS and Linux desktop; tail -f <state>/chain.log shows what a console would.
@@ -598,12 +605,8 @@ async function start(opt) {
   if (wide) fail(`${typeof opt.state === "string" ? "--state" : "stateDir"} ${state} ${wide}`);
   if (typeof opt.state === "string" && !fs.existsSync(path.join(state, "run.json"))) fail(`--state ${state} holds no earlier run`);
   if (foreignState(state)) fail(`${state} is not empty and holds no earlier run; pick another state folder`);
-  // Two repositories with one folder name share the default state folder on one day, and --state may name another
-  // repository's: its prompt, resume.json and worktree are not this one's. One whose repository is gone (moved) goes on.
-  const owner = fs.existsSync(path.join(state, "run.json")) ? parseOr(read(path.join(state, "run.json")), {}).repo : null;
-  if (typeof owner === "string" && owner && fs.existsSync(owner) && !sameDir(owner, repo)) {
-    fail(`${state} holds a run of ${owner}, not of ${repo}; pass --state with a run folder of this repository's, or set "stateDir" in its .claude/night-shift.json for a new one`);
-  }
+  const owner = otherRepoRun(state, repo);
+  if (owner) fail(`${state} holds a run of ${owner}, not of ${repo}; pass --state with a run folder of this repository's, or set "stateDir" in its .claude/night-shift.json for a new one`);
   // K6: the tree, chosen before the state folder is made, so that a refused one leaves nothing inside it.
   const fresh = Boolean(planning) || Boolean(opt["prompt-file"]) || typeof opt.prompt === "string";
   const wt = treeChoice({ repo, state, opt, cfg, from, fresh, prev: fs.existsSync(path.join(state, "run.json")) ? parseOr(read(path.join(state, "run.json")), {}) : null });
@@ -1485,7 +1488,10 @@ async function doctor(opt) {
     state = defaultState(repo, cfg);
     const wide = stateDirProblem(state, { home: os.homedir(), repo, temp: tempRoot() });
     let foreign = null;
-    try { foreign = !wide && foreignState(state) && "is not empty and holds no earlier run; start would refuse it"; } catch (e) { foreign = `cannot be read (${e.code || e.message})`; }
+    try {
+      const owner = !wide && otherRepoRun(state, repo);
+      foreign = !wide && (foreignState(state) ? "is not empty and holds no earlier run; start would refuse it" : owner ? `holds a run of ${owner}, not of ${repo}; start would refuse it` : null);
+    } catch (e) { foreign = `cannot be read (${e.code || e.message})`; }
     if (wide) row("FAIL", "state", `${cfg.stateDir ? "stateDir " : ""}${state} ${wide}`);
     else if (fs.existsSync(state) && !fs.statSync(state).isDirectory()) row("FAIL", "state", `${state} is a file`);
     else if (foreign) row("FAIL", "state", `${state} ${foreign}`);

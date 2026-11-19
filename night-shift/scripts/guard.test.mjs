@@ -1390,6 +1390,27 @@ test("on Linux a worktree run's main tree is protected in its own case; on macOS
   assert.equal(pwrite("/work/Repo-night/src/a.ts", LINUX, wt), null);
 });
 
+// Session 33's re-review: a main tree under /tmp beside its worktree, judged by the POSIX path rules.
+test("off Windows a worktree run's main tree under /tmp stays the user's, in its own case on Linux and in any case on macOS", () => {
+  const wt = { ...penv, NIGHT_SHIFT_REPO: "/tmp/app-night", NIGHT_SHIFT_MAIN_TREE: "/tmp/app", NIGHT_SHIFT_STATE: "/tmp/app/.night" };
+  const mainTree = /the main tree.*: it is the user's while the chain works in its worktree/;
+  for (const P of [LINUX, MAC]) {
+    assert.match(pwrite("/tmp/app/src/a.ts", P, wt) ?? "", mainTree, P.name);
+    assert.equal(pbash("rm /tmp/app/src/a.ts", P, wt), "refusing a delete in the main tree (/tmp/app/src/a.ts): it is the user's while the chain works in its worktree", P.name);
+    assert.match(pbash("rm -rf /tmp/app/src", P, wt) ?? "", mainTree, P.name);
+    assert.match(pbash("mv /tmp/app/src/a.ts /tmp/b.ts", P, wt) ?? "", mainTree, P.name);
+    // The worktree, a folder whose name only starts with the main tree's, and the state folder inside it stay the run's.
+    assert.equal(pwrite("/tmp/app-night/src/a.ts", P, wt), null, P.name);
+    assert.equal(pwrite("/tmp/apps/a.ts", P, wt), null, P.name);
+    assert.equal(pwrite("/tmp/app/.night/notes.md", P, wt), null, P.name);
+  }
+  // Linux keeps case: /tmp/App is another folder under the temp root. macOS folds case: it is the main tree.
+  assert.equal(pwrite("/tmp/App/src/a.ts", LINUX, wt), null);
+  assert.match(pwrite("/tmp/App/src/a.ts", MAC, wt) ?? "", mainTree);
+  assert.equal(pbash("rm -rf /tmp/App/src", LINUX, wt), null);
+  assert.match(pbash("rm -rf /tmp/App/src", MAC, wt) ?? "", mainTree);
+});
+
 // Session 32's final review: the project's rules of a POSIX worktree run (asMainTree's POSIX branch, Linux's own case,
 // Write's main-tree forms). The main tree is a real folder whose file the guard reads: off Windows the folder as made,
 // on Windows its spelling from the drive's root, which node reads on the current folder's drive.

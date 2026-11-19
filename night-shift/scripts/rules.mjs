@@ -48,13 +48,14 @@ export function readRuleFile(file) {
 // A comment starts at a line that begins with <!-- and ends at the first --> after it; the text after that --> stays,
 // and is read again: one more comment right after it goes too. A <!-- inside a line or inside a ``` or ~~~ code block is
 // text (a rule may be about HTML), and so is one never closed. A code block ends at a bare fence of its character at
-// least as long as the one that opened it (CommonMark): a fence with an info string, or a shorter one, is its text.
+// least as long as the one that opened it (CommonMark): a fence with an info string, or a shorter one, is its text. A
+// backtick fence's info string holds no backtick, so a line that starts with a code span (```npm test``` …) is text.
 function dropComments(text) {
   const lines = text.split("\n"), out = [];
   let fence = null;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i], mark = /^\s*(`{3,}|~{3,})(.*)$/.exec(line);
-    if (mark) {
+    if (mark && !(mark[1][0] === "`" && mark[2].includes("`"))) {
       if (fence === null) fence = mark[1];
       else if (mark[1][0] === fence[0] && mark[1].length >= fence.length && !mark[2].trim()) fence = null;
       out.push(line);
