@@ -240,3 +240,30 @@ test("the plugin manifest and its marketplace name the version the code knows an
   assert.ok(readme.includes(`claude plugin install ${entry.name}@${market.name}`), "README: install the plugin");
   assert.ok(readme.includes("`.claude-plugin/plugin.json`"), "README: the manifest");
 });
+
+// C4: examples/ holds a small roadmap, a first prompt and a project rules file, each linked from README and generic.
+// The rules file opens with the comment init writes, which reaches no session, and has real rules below it.
+test("examples/ holds a roadmap, a first prompt and a rules file README links, the rules init's comment and rules below it", { skip: !fs.existsSync(readmePath) && "no README beside this copy" }, async () => {
+  const { INIT_RULES } = await import("./night-chain.mjs");
+  const { readRuleFile, RULES_MAX_BYTES } = await import("./rules.mjs");
+  const dir = path.join(root, "..", "examples"), readme = fs.readFileSync(readmePath, "utf8");
+  for (const f of ["roadmap.md", "first-prompt.md", "night-shift-rules.md"]) {
+    assert.ok(readme.includes(`(examples/${f})`), `README links examples/${f}`);
+    const text = fs.readFileSync(path.join(dir, f), "utf8");
+    assert.doesNotMatch(text, /[^\P{L}a-zA-Z]|\b[A-Z]:[\\/]|\/(home|Users)\/|night-shift-skill/iu, `${f}: generic (no machine's path) and ASCII`);
+    assert.ok(Buffer.byteLength(text) < 4096, `${f} stays short`);
+  }
+  // A checkout with CRLF reads the same (readRuleFile turns it into LF too); the limit counts the bytes on disk.
+  const rules = path.join(dir, "night-shift-rules.md"), raw = fs.readFileSync(rules, "utf8").replace(/\r\n/g, "\n");
+  assert.ok(raw.startsWith(INIT_RULES), "the comment init writes, as it writes it");
+  const read = readRuleFile(rules);
+  assert.equal(read.error, undefined);
+  assert.ok(fs.statSync(rules).size <= RULES_MAX_BYTES);
+  assert.equal(read.text, raw.slice(INIT_RULES.length).trim(), "only the rules below the comment reach a session");
+  assert.match(read.text, /^- \S/, "rules, not an empty file");
+  // The first prompt has the shape SKILL.md's last step gives next-prompt.md: the piece's line, then four headings.
+  const prompt = fs.readFileSync(path.join(dir, "first-prompt.md"), "utf8").replace(/\r\n/g, "\n");
+  assert.match(prompt, /^[^#\s][^\n]+\n\n## Rules\n/);
+  assert.deepEqual(prompt.match(/^## .*/gm), ["## Rules", "## State", "## This piece", "## Lessons for this piece"]);
+  assert.match(fs.readFileSync(path.join(dir, "roadmap.md"), "utf8"), /^Approved: /m, "the roadmap is marked approved");
+});

@@ -1322,7 +1322,8 @@ const INIT_CONFIG = {
   _lessons: "docs/agents/NOTES.md",
   _deny: [{ pattern: "\\bmy-app\\.exe\\b", reason: "that is the app running on my desktop" }],
 };
-const INIT_RULES = `<!--
+// examples/night-shift-rules.md opens with this text and has rules below it (skill-text.test.mjs checks).
+export const INIT_RULES = `<!--
 This project's rules for night-shift. Every night session on this repository gets the text of this file in its
 header, where it wins over the skill's defaults and over your own rules file (~/.claude/night-shift/rules.md).
 Text inside these comment marks reaches no session: write your rules below the closing mark, in any language.
