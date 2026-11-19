@@ -2288,12 +2288,25 @@ test("start refuses --model and --state with no value, naming the flag", () => {
   assert.equal(model.status, 1);
   assert.match(model.stderr, /--model wants a model name \(got no value\)/);
   const c = pointerCase();
+  assert.match(c.run("start", ["--model", "--allow-dirty", "--prompt", "x", "--state", c.state]).stderr, /--model wants a model name \(got no value\)/);
   for (const extra of [["--state"], ["--state", "--allow-dirty"]]) {
     const r = c.run("start", ["--prompt", "x", "--allow-dirty", ...extra]);
     assert.equal(r.status, 1, extra.join(" "));
     assert.match(r.stderr, /--state wants the folder of an earlier run \(got no value\)/, extra.join(" "));
     assert.doesNotMatch(r.stderr, /launch refused/);
   }
+});
+
+// F2: a project's file that raises a cap stops start with the flag to pass; with that flag the user's word wins and the
+// file's value is not used.
+test("start refuses a project's raised cap, naming the flag, and runs with the flag given", () => {
+  const raised = startRun([], { fableCeiling: 0.8 });
+  assert.equal(raised.status, 1);
+  assert.match(raised.stderr, /"fableCeiling" 0\.8 is above the 0\.6 that applies without this file \(the default\); a project's file may lower it, not raise it: pass --fable-ceiling 0\.8 to start instead/);
+  assert.equal(startRun(["--fable-ceiling", "0.8"], { fableCeiling: 0.8 }).run.fableCeiling, 0.8);
+  assert.equal(startRun(["--fable-ceiling", "0.7"], { fableCeiling: 0.8 }).run.fableCeiling, 0.7);
+  // Another flag does not lift it.
+  assert.match(startRun(["--max-usd", "5"], { fableCeiling: 0.8 }).stderr, /pass --fable-ceiling 0\.8 to start instead/);
 });
 
 // The texts start reads from references/: a copy of the skill's scripts/ and references/ with one of them gone, or
@@ -2426,6 +2439,14 @@ test("--max-usd counts a session with no result line at what its transcript is p
   assert.match(r.log, /chain ends: this start's sessions cost \$28\.00, at or over the \$20\.00 cap \(--max-usd\)/);
   assert.doesNotMatch(r.log, /session 03 starts/);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(r.state, "limits.json"), "utf8")).usd, { [id1]: 4, [id2]: 24 });
+  // With no other session's dollars to price it by, it counts nothing, and chain.log says why.
+  const alone = await fableRun("first", { 1: { stream: s2, next: "second" }, 2: { next: "STOP: done" } }, { maxUsd: 20 }, (state, { home }) => {
+    const project = path.join(home, ".claude", "projects", "demo-app");
+    fs.mkdirSync(project, { recursive: true });
+    fs.writeFileSync(path.join(project, `${id2}.jsonl`), turn(id2, "t1", 6, 6) + "\n");
+  });
+  assert.match(alone.log, /session 01 wrote no result line, and no other session's dollars price its transcript: --max-usd counts nothing for it$/m);
+  assert.match(alone.log, /chain ends: STOP: done/);
 });
 
 // T4: --weekly-ceiling ends the chain before a new session once the seven-day window's last reading is at or over it.

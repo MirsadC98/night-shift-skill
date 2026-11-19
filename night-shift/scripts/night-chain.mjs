@@ -185,8 +185,9 @@ function repoRoot(dir) {
     return path.resolve(execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: dir, encoding: "utf8", windowsHide: true }).trim());
   } catch { fail(`not a git repository: ${dir}`); }
 }
-const projectConfig = (repo) => {
-  const { config, from, errors } = mergedConfig(repo);
+// flags: start's, so that a cap the user passes is theirs whatever a project's file says (config.mjs, CAPS).
+const projectConfig = (repo, flags = {}) => {
+  const { config, from, errors } = mergedConfig(repo, undefined, flags);
   if (errors.length) fail(errors.join("; "));
   return { config, from };
 };
@@ -293,7 +294,7 @@ async function start(opt) {
     if (!ptr.pid && age < HANDOVER_MS) fail(`a run was scheduled ${Math.round(age / 1000)} s ago and its runner has not come up yet; wait, or run stop`);
   }
 
-  const { config: cfg, from } = projectConfig(repo);
+  const { config: cfg, from } = projectConfig(repo, opt);
   // Unlike the other numbers, a wrong one here is not quietly replaced: a wait of 1 h or 6 h is not what was typed.
   const waitArg = opt["max-wait-hours"];
   if (waitArg !== undefined && !(typeof waitArg === "string" && Number.isFinite(Number(waitArg)) && Number(waitArg) > 0)) {
@@ -750,7 +751,8 @@ async function runChain(opt) {
     // and the killed ones are the dearest: it counts what the report prices its transcript at.
     if (result.sessionId) {
       const spent = readLimits(state).usd || {}, cost = result.resulted ? result.cost : estimatedCost(state, nn);
-      if (!result.resulted && run.maxUsd) log(`session ${nn} wrote no result line: --max-usd counts ${usd(cost)} for it, what its transcript is priced at`);
+      if (!result.resulted && run.maxUsd) log(cost ? `session ${nn} wrote no result line: --max-usd counts ${usd(cost)} for it, what its transcript is priced at`
+        : `session ${nn} wrote no result line, and no other session's dollars price its transcript: --max-usd counts nothing for it`);
       writeLimits(state, { usd: { ...spent, [result.sessionId]: Math.max(Number(spent[result.sessionId]) || 0, cost || 0) } });
     }
     // A session that wrote its handover has done its piece, even when a limit cut off what came after.

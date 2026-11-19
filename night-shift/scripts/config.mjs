@@ -3,8 +3,9 @@
 // so that a state folder too wide to be a state folder is refused by both. Imports only node.
 //   readProjectConfig(repo) -> { config, errors }   never throws; config holds only the valid keys
 //   readGlobalConfig(home)  -> { config, errors }   the same for ~/.claude/night-shift/config.json (run-wide keys only)
-//   mergedConfig(repo, home) -> { config, from, errors }  the global file overlaid key by key with the project's (from: key -> file);
-//                                                     a project's file may lower the four allowance caps, never raise them
+//   mergedConfig(repo, home, flags) -> { config, from, errors }  the global file overlaid key by key with the project's (from: key -> file);
+//                                                     a project's file may lower the four allowance caps, never raise them,
+//                                                     unless flags (start's, by name) sets that cap itself
 //   stateDirProblem(dir, { home, repo, temp, env }) null, or why dir may not be the state folder
 //   claudeHome(home, env) -> CLAUDE_CONFIG_DIR's folder when set, else <home>/.claude
 //   isMain(import.meta)                              whether node was started with this script (night-chain, night-report, guard)
@@ -147,15 +148,16 @@ export const readGlobalConfig = (home = os.homedir()) => readConfigFile(globalCo
 
 // A repository's file may come from someone else, while a cap in the user's own file is their word: for these keys a
 // project's file may lower what applies without it (the global file's value, else the runner's default), never raise
-// it. A raise is that file's error, so start refuses and names the flag, which stays the user's own word and wins.
+// it. A raise is that file's error, so start refuses and names the flag, which stays the user's own word and wins: with
+// the flag given (flags["max-usd"] …), the file's value is not used and not refused.
 const CAPS = { fableCeiling: ["fable-ceiling", 0.6], fableSessions: ["fable-sessions", 2], weeklyCeiling: ["weekly-ceiling", Infinity], maxUsd: ["max-usd", Infinity] };
 // A share as a ratio (0.6) or a percentage (60), compared as the runner reads it.
 const capShare = (k, v) => ((k === "fableCeiling" || k === "weeklyCeiling") && v > 1 ? v / 100 : v);
 
-export function mergedConfig(repo, home = os.homedir()) {
+export function mergedConfig(repo, home = os.homedir(), flags = {}) {
   const global = readGlobalConfig(home), project = readProjectConfig(repo);
   for (const [k, [flag, fallback]] of Object.entries(CAPS)) {
-    if (!Object.hasOwn(project.config, k)) continue;
+    if (!Object.hasOwn(project.config, k) || flags[flag] !== undefined) continue;
     const own = Object.hasOwn(global.config, k), base = own ? global.config[k] : fallback, v = project.config[k];
     if (capShare(k, v) <= capShare(k, base)) continue;
     delete project.config[k];

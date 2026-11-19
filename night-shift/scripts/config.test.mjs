@@ -168,6 +168,10 @@ test("a project's file may lower the four allowance caps, never raise them: a ra
     // The raise is not applied: a reader that went on would get what applies without the file.
     assert.deepEqual(m.config, { ...g, effort: "high" });
   }
+  // start's flag for that cap is the user's own word: the file's value is neither refused nor what applies then.
+  const repo = repoWith({ maxUsd: 100000 }), home = tmpHome({ maxUsd: 20 });
+  assert.deepEqual(mergedConfig(repo, home, { "max-usd": "50" }).errors, []);
+  assert.equal(mergedConfig(repo, home, { "fable-ceiling": "0.5" }).errors.length, 1);
 });
 test("the project file wins over the global one, key by key", () => {
   const home = tmpHome({ lang: "xx", effort: "high" }), repo = repoWith({ effort: "max" });
