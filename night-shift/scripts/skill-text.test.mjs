@@ -291,3 +291,38 @@ test("README opens with what the skill is for, then the warnings and a five-step
   assert.equal(readme.split(moved).length - 1, 1, "said once");
   assert.ok(readme.indexOf(moved) > readme.indexOf("\n## Use\n"), "under Use");
 });
+
+// C4: CONTRIBUTING.md says how to run the tests and what a change keeps; the bug report form asks for --version and
+// doctor's output, both required, and a feature request for the job and what it lets a night session do. GitHub's
+// template chooser needs no config.yml.
+test("CONTRIBUTING.md and the issue forms ask for what a change and a report need", { skip: !fs.existsSync(readmePath) && "no README beside this copy" }, () => {
+  const read = (f) => fs.readFileSync(path.join(root, "..", f), "utf8").replace(/\r\n/g, "\n");
+  const contributing = read("CONTRIBUTING.md");
+  for (const w of ["npm test", "**No dependencies.**", "**English and LF.**", "**The guard is not loosened without a test.**", "**A failing test first.**", "(SECURITY.md)"]) {
+    assert.ok(contributing.includes(w), `CONTRIBUTING.md: ${w}`);
+  }
+  assert.match(contributing, /apart from the `mcp` list/i, "CONTRIBUTING.md names the one key that lets more through");
+  const forms = ["bug_report.yml", "feature_request.yml"];
+  for (const f of ["CONTRIBUTING.md", ...forms.map((x) => `.github/ISSUE_TEMPLATE/${x}`)]) assert.doesNotMatch(read(f), /[^\t\n\x20-\x7e]/, `${f}: ASCII`);
+  const items = (f) => read(`.github/ISSUE_TEMPLATE/${f}`).split(/^ {2}- type: /m).slice(1);
+  // No YAML parser here (no dependencies): the shape GitHub needs, checked by its lines.
+  for (const f of forms) {
+    const text = read(`.github/ISSUE_TEMPLATE/${f}`);
+    assert.match(text, /^labels: \["[a-z]+"\]\nbody:\n {2}- type: /m, `${f}: labels, then the body's items`);
+    const ids = items(f).map((b) => b.match(/\n {4}id: ([a-z]+)\n/)?.[1]).filter(Boolean);
+    assert.equal(new Set(ids).size, ids.length, `${f}: ids are unique`);
+    for (const b of items(f)) {
+      assert.match(b, /^(markdown|input|textarea|dropdown|checkboxes)\n/, `${f}: a type GitHub knows`);
+      if (!b.startsWith("markdown")) assert.match(b, /\n {6}label: \S/, `${f}: every field has a label`);
+    }
+  }
+  const field = (f, id) => items(f).find((b) => b.includes(`\n    id: ${id}\n`)) ?? "";
+  assert.match(field("bug_report.yml", "version"), /night-chain\.mjs --version/);
+  assert.match(field("bug_report.yml", "doctor"), /night-chain\.mjs doctor --repo/);
+  for (const id of ["version", "doctor", "what"]) assert.match(field("bug_report.yml", id), /\n {4}validations:\n {6}required: true\n/, `bug report: ${id} is required`);
+  for (const id of ["doctor", "logs"]) assert.match(field("bug_report.yml", id), /\n {6}render: text\n/, `bug report: ${id} keeps its lines as pasted`);
+  for (const id of ["job", "trust"]) assert.ok(field("feature_request.yml", id), `feature request: ${id}`);
+  // A form shows in the chooser only with a name over three characters.
+  for (const f of forms) assert.match(read(`.github/ISSUE_TEMPLATE/${f}`), /^name: [^"'\s].{3,}\ndescription: .+\n/, f);
+  assert.ok(fs.readFileSync(readmePath, "utf8").includes("(CONTRIBUTING.md)"), "README links CONTRIBUTING.md");
+});

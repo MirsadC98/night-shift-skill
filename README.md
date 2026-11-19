@@ -240,6 +240,8 @@ In a clone of this repository, `npm test` at its root runs both. The tests use a
 
 On GitHub, `.github/workflows/test.yml` runs both on every push and pull request. On Windows they must pass, on Node 22 and on the newest LTS. On macOS and Linux they run but may fail without failing the workflow: the runner, the watcher and their tests use Windows' own tools (Task Scheduler, PowerShell, `taskkill`) today, and those systems are untested on real machines.
 
+To change the code, read [CONTRIBUTING.md](CONTRIBUTING.md): what a pull request keeps (no dependencies, English and LF line endings, no part of the guard loosened without a test). A bug report goes through the issue form, which asks for `--version` and `doctor`'s output.
+
 ## Versions
 
 `night-chain.mjs --version` prints the version of a copy, and each run keeps the version that started it in its `run.json`. [CHANGELOG.md](CHANGELOG.md) says what each version brought.

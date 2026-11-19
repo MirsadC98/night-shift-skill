@@ -1,0 +1,21 @@
+name: Feature request
+description: Something a chain should do that it does not do today
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: job
+    attributes:
+      label: The job
+      description: What you want a chain to get done, and what stops it today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you would like
+      description: The change you have in mind, if you have one (a flag, a config key, a command, a text).
+  - type: textarea
+    id: trust
+    attributes:
+      label: What it would let a night session do
+      description: "If it widens what an unattended session may do, or who may steer it, say how it stays safe. The guard is a fixed floor: apart from the `mcp` server list, no flag or config key loosens it."
