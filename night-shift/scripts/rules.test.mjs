@@ -22,6 +22,19 @@ test("the two files sit where the user is told to put them", () => {
   });
 });
 
+// C4: init's skeleton is all comment, so an untouched one puts nothing into a session's header.
+test("a comment that starts a line with <!-- reaches no session; the text around it does", () => {
+  assert.equal(readRuleFile(fileOf("<!--\nWrite your rules below.\n- an example\n-->\n")).text, "");
+  assert.equal(readRuleFile(fileOf("<!-- a note -->\nNever push.\n  <!-- another\nnote -->\nAsk before a merge.\n")).text, "Never push.\nAsk before a merge.");
+  assert.equal(readRuleFile(fileOf("<!-- a note --> Never push.\r\n")).text, "Never push.", "the text after its --> stays");
+  assert.equal(readRuleFile(fileOf("<!-- never closed\nA rule.")).text, "<!-- never closed\nA rule.", "an unclosed mark is text");
+});
+
+test("a <!-- inside a line or a code block is text: a rule may be about HTML", () => {
+  for (const t of ["Keep <!-- this --> line.", "Never write `<!--` in HTML.\nUse `-->` to close.", "a <!-- b <!-- c --> d -->",
+    "Put this at the top of a generated file:\n```html\n<!-- generated -->\n```", "~~~\n<!-- kept\n```\n-->\n~~~"]) assert.equal(readRuleFile(fileOf(t)).text, t);
+});
+
 test("the limit counts bytes, and exactly 8192 passes", () => {
   assert.equal(readRuleFile(fileOf("a".repeat(8192))).text.length, 8192);
   assert.equal(readRuleFile(fileOf("a".repeat(8193))).error, "is 8193 bytes, over the 8192 limit");

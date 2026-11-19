@@ -39,11 +39,14 @@ node ~/.claude/skills/night-shift/scripts/night-chain.mjs status --repo <dir>
 node ~/.claude/skills/night-shift/scripts/night-chain.mjs wait   --repo <dir>
 node ~/.claude/skills/night-shift/scripts/night-chain.mjs stop   --repo <dir> [--now]
 node ~/.claude/skills/night-shift/scripts/night-chain.mjs reload --repo <dir>
+node ~/.claude/skills/night-shift/scripts/night-chain.mjs init   --repo <dir>
 node ~/.claude/skills/night-shift/scripts/night-chain.mjs doctor [--repo <dir>]
 node ~/.claude/skills/night-shift/scripts/night-chain.mjs --version
 ```
 
 `doctor` checks what a start needs without starting anything, one line a check (`ok`, `warn`, `skip` or `FAIL`), and exits 1 on a `FAIL`: the skill's copy (whole, and whether it is the one at `~/.claude/skills/night-shift` whose files the guard protects); Node, git and the CLI; your config file and the project's, read as `start` reads them with no flags, so a cap the project's file raises fails with `start`'s message; the model the mode gives; the rule files; the language table; the project's `"mcp"` list; the state folder a start would use today (it makes a probe folder in it, or in its nearest folder that exists, and removes it); the guard's self-test; the guard run as the hook the runner writes, on a call it must refuse and one it must let through; and a `~/.claude` that is a link, whose settings the guard must refuse by the target's path too. It makes no network or model call. Without `--repo` it checks the repository the current folder is in, or only your own files outside one. Run it after installing and on a repository that has not run a chain yet.
+
+`init --repo <dir>` writes a starter `.claude/night-shift.json` (the defaults written out, with examples as comments; it sets nothing your own `config.json` sets) and a rules file skeleton, `.claude/night-shift-rules.md`, which is all comment until you write below it. It never writes over a file that exists, and it prints the next steps: commit the two files (`start` wants a committed tree), run `doctor`, start a chain.
 
 A chain works from an approved roadmap: the pieces in order, each one session's work. Without one, give `start` the goal instead of a prompt, with `--goal <text>` or `--goal-file <file>` (one of the two, and never beside `--prompt` or `--prompt-file`). The runner wraps it in the planning prompt `references/goal.md`. The first session reads the repository and your recorded preferences, writes the roadmap (the pieces in order, what done looks like for each, the checks, what is out of scope), has one reviewer check it, marks it approved and commits it; the work starts in the second session. The goal approves the work it needs and nothing beyond it. Keep a long specification in the repository and name it in the goal ("the spec in docs/spec.md"): the first session reads the goal again in every call. Like a prompt, a goal starts fresh: it replaces a kept `next-prompt.md` and a session kept in `resume.json`.
 
@@ -113,7 +116,7 @@ Write rules in plain text, in any language, in either file:
 - `~/.claude/night-shift/rules.md`: for every project.
 - `<repo>/.claude/night-shift-rules.md`: for one project. Its rules win over the global ones, and both win over the skill's defaults.
 
-Each file is at most 8 KB (UTF-8 bytes) and is read again at every session start, so an edit takes effect on the next session. `start` and `status` name the files in force. A file that grows too big or cannot be read mid-chain keeps its last text, and the log and Telegram say so; a file you empty or remove drops out. A project rule file is a file in the repository: commit it (or ignore it in git) before `start`, which refuses a working tree with uncommitted changes, an untracked file included (`--allow-dirty` exists).
+Text between `<!--` and `-->` is a comment that reaches no session when its `<!--` starts a line, outside a ```` ``` ```` code block (a `<!--` inside a line is text, so a rule can name it); `init` writes the project's file as one such comment. Each file, comments included, is at most 8 KB (UTF-8 bytes) and is read again at every session start, so an edit takes effect on the next session. `start` and `status` name the files in force. A file that grows too big or cannot be read mid-chain keeps its last text, and the log and Telegram say so; a file you empty or remove drops out. A project rule file is a file in the repository: commit it (or ignore it in git) before `start`, which refuses a working tree with uncommitted changes, an untracked file included (`--allow-dirty` exists).
 
 | A rule can change | A rule cannot change |
 |---|---|

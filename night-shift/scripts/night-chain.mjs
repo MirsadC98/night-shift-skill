@@ -48,6 +48,9 @@
 //   node night-chain.mjs reload --repo <dir>       (a running chain takes up this code after
 //                                                   the session in progress, watcher included)
 //   node night-chain.mjs run    --state <dir>      (what start schedules)
+//   node night-chain.mjs init --repo <dir>         (writes a starter .claude/night-shift.json and a rules file
+//                                                   skeleton, .claude/night-shift-rules.md, never over a file,
+//                                                   and prints the next steps)
 //   node night-chain.mjs doctor [--repo <dir>]     (checks what a start needs, one line a check: the skill's copy,
 //                                                   Node, git and the CLI, the config and rule files, the language
 //                                                   table, the MCP list, the state folder, the guard's self-test and
@@ -1307,9 +1310,59 @@ async function doctor(opt) {
   process.exitCode = failed ? 1 : 0;
 }
 
+// ---------------------------------------------------------------- init
+// C4: a starter .claude/night-shift.json and a rules skeleton for a repository, never over a file that exists (each is
+// opened with "wx"), then the next steps. The starter holds only a project's own keys, so nothing in it overrides the
+// user's own config.json, and its examples are comments (a key that starts with _). The skeleton is one comment, which
+// rules.mjs drops, so an untouched one adds nothing to a session's header.
+const INIT_CONFIG = {
+  _: "night-shift's settings for this repository. Every key is optional; the night-shift README's \"Per-project settings\" names them all. A key that starts with _ is a comment: drop the _ to turn an example on.",
+  report: "NIGHT_RUNS.md",
+  mcp: "none",
+  _lessons: "docs/agents/NOTES.md",
+  _deny: [{ pattern: "\\bmy-app\\.exe\\b", reason: "that is the app running on my desktop" }],
+};
+const INIT_RULES = `<!--
+This project's rules for night-shift. Every night session on this repository gets the text of this file in its
+header, where it wins over the skill's defaults and over your own rules file (~/.claude/night-shift/rules.md).
+Text inside these comment marks reaches no session: write your rules below the closing mark, in any language.
+The whole file, this comment included, is at most 8 KB. A rule cannot loosen the guard: what it refuses stays refused.
+
+A rule can change:
+- which decisions wait for you in the morning (the five tests in the skill's SKILL.md, "What reaches the user");
+- how the work is split into pieces, and when a session asks for another model;
+- the stops the guard does not enforce: your live desktop, physical tests, messages, work outside the roadmap.
+
+For example:
+- The app on my desktop is never started; tests run headless only.
+- A change to the save file format waits for me.
+-->
+`;
+function init(opt) {
+  if (opt.repo === true) fail("--repo wants a folder (got no value)");
+  const repo = repoRoot(typeof opt.repo === "string" ? opt.repo : process.cwd());
+  const files = [[projectConfigFile(repo), `${JSON.stringify(INIT_CONFIG, null, 2)}\n`, "starter settings, every key optional"],
+    [ruleFiles(repo).project, INIT_RULES, "your rules for this project, none until you write them below its comment"]];
+  try { fs.mkdirSync(path.join(repo, ".claude"), { recursive: true }); } catch (e) { fail(`${path.join(repo, ".claude")} cannot be made (${e.code || e.message})`); }
+  const lines = [`night-shift init for ${repo}`], wrote = [];
+  for (const [file, text, what] of files) {
+    try { fs.writeFileSync(file, text, { flag: "wx" }); wrote.push(file); lines.push(`  wrote  ${file}: ${what}`); }
+    catch (e) {
+      if (e.code !== "EEXIST") { console.log(lines.join("\n")); fail(`${file} cannot be written (${e.code || e.message})`); }
+      lines.push(`  kept   ${file}: it exists; init writes over nothing`);
+    }
+  }
+  const steps = [
+    ...(wrote.length ? [`Commit ${wrote.length === 2 ? "the two files" : path.relative(repo, wrote[0])}: start wants a committed tree (unless .gitignore keeps them out).`] : []),
+    `Check the setup: node "${SELF}" doctor --repo "${repo}"`,
+    `Ask a Claude Code chat for a night shift ("run a night shift on the plan in docs/plan.md until it is done"), or start one:\n     node "${SELF}" start --repo "${repo}" --prompt-file <file>   (or --goal "<what to do>" without a plan)`,
+  ];
+  console.log([...lines, "next:", ...steps.map((s, i) => `  ${i + 1}. ${s}`)].join("\n"));
+}
+
 // Only as a command: night-chain.test.mjs imports cutOffSession.
 const opt = parseArgs(process.argv.slice(2));
-const commands = { start, run: runChain, status, wait: waitChain, stop, reload, doctor, "--version": () => console.log(`night-shift ${VERSION}`) };
+const commands = { start, run: runChain, status, wait: waitChain, stop, reload, doctor, init, "--version": () => console.log(`night-shift ${VERSION}`) };
 if (!isMain(import.meta)) { /* imported */ }
 else if (commands[opt.cmd]) await commands[opt.cmd](opt);
 else {

@@ -180,9 +180,11 @@ test("package.json, CHANGELOG.md and the README agree with the code on the versi
 });
 
 // C4: doctor is named where a user or the starting chat looks for the runner's commands.
-test("the help, interactive.md and the README name doctor", { skip: !fs.existsSync(readmePath) && "no README beside this copy" }, () => {
-  const help = fs.readFileSync(path.join(root, "scripts", "night-chain.mjs"), "utf8");
-  for (const [name, t] of [["night-chain.mjs", help], ["interactive.md", interactive], ["README.md", fs.readFileSync(readmePath, "utf8")]]) assert.ok(t.includes("night-chain.mjs doctor"), `${name}: doctor`);
+test("the help, interactive.md and the README name doctor, and the help and the README init", { skip: !fs.existsSync(readmePath) && "no README beside this copy" }, () => {
+  const help = fs.readFileSync(path.join(root, "scripts", "night-chain.mjs"), "utf8"), readme = fs.readFileSync(readmePath, "utf8");
+  for (const [name, t] of [["night-chain.mjs", help], ["interactive.md", interactive], ["README.md", readme]]) assert.ok(t.includes("night-chain.mjs doctor"), `${name}: doctor`);
+  for (const [name, t] of [["night-chain.mjs", help], ["README.md", readme]]) assert.match(t, /night-chain\.mjs init +--repo/, `${name}: init`);
+  assert.match(readme, /`<!--` and `-->`/, "README: a rule file's comments");
 });
 
 // C4: CI runs the suite and the guard's self-test on Windows, the gate, on the oldest Node package.json's engines allows

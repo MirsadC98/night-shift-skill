@@ -2320,6 +2320,63 @@ test("doctor recognises a linked ~/.claude: the guard refuses its settings by th
   assert.match(doctorLine(r.stdout, "ok", "home")[0], /\.claude is a link to .*claude-elsewhere; the guard refuses a write to .*claude-elsewhere.settings\.json too$/);
 });
 
+// C4: init, run as a user runs it: a starter .claude/night-shift.json and a rules skeleton, never over a file.
+test("init writes a starter night-shift.json and a rules skeleton that change nothing yet, and prints the next steps", async () => {
+  const { readProjectConfig, GLOBAL_KEYS } = await import("./config.mjs");
+  const { readRuleFile } = await import("./rules.mjs");
+  const c = pointerCase();
+  const cfgFile = path.join(c.repo, ".claude", "night-shift.json"), rulesFile = path.join(c.repo, ".claude", "night-shift-rules.md");
+  const r = c.run("init");
+  assert.equal(r.status, 0, r.stderr);
+  const read = readProjectConfig(c.repo);
+  assert.deepEqual(read.errors, []);
+  assert.deepEqual(Object.keys(read.config).sort(), ["mcp", "report"]);
+  assert.deepEqual([read.config.mcp, read.config.report], ["none", "NIGHT_RUNS.md"], "the defaults, written out; deny is only an example, so dropping its _ makes no second key");
+  assert.deepEqual(Object.keys(read.config).filter((k) => GLOBAL_KEYS.includes(k)), [], "nothing over the user's own config.json");
+  // Each example key, its _ dropped, is a key start takes.
+  const raw = JSON.parse(fs.readFileSync(cfgFile, "utf8"));
+  const examples = Object.entries(raw).filter(([k]) => /^_./.test(k)).map(([k, v]) => [k.slice(1), v]);
+  assert.ok(examples.length >= 2, "examples to turn on");
+  const other = pointerCase();
+  fs.mkdirSync(path.join(other.repo, ".claude"));
+  fs.writeFileSync(path.join(other.repo, ".claude", "night-shift.json"), JSON.stringify(Object.fromEntries(examples)));
+  assert.deepEqual(readProjectConfig(other.repo).errors, []);
+  assert.equal(readRuleFile(rulesFile).text, "", "an untouched skeleton puts nothing into a session's header");
+  assert.match(r.stdout, /^  wrote  .*night-shift\.json: /m);
+  assert.match(r.stdout, /^  wrote  .*night-shift-rules\.md: /m);
+  assert.match(r.stdout, /Commit the two files/);
+  assert.match(r.stdout, /night-chain\.mjs" doctor --repo "/);
+  assert.match(r.stdout, /night-chain\.mjs" start --repo "/);
+  // A second init writes over neither, and a rule written below the comment is the rule.
+  fs.appendFileSync(rulesFile, "Never run the app on my desktop.\n");
+  const before = [cfgFile, rulesFile].map((f) => fs.readFileSync(f, "utf8"));
+  const again = c.run("init");
+  assert.equal(again.status, 0);
+  assert.match(again.stdout, /^  kept   .*night-shift\.json: it exists; init writes over nothing$/m);
+  assert.match(again.stdout, /^  kept   .*night-shift-rules\.md: it exists; init writes over nothing$/m);
+  assert.doesNotMatch(again.stdout, /Commit the two files/);
+  assert.deepEqual([cfgFile, rulesFile].map((f) => fs.readFileSync(f, "utf8")), before);
+  assert.equal(readRuleFile(rulesFile).text, "Never run the app on my desktop.");
+});
+
+test("init writes the file that is missing beside one that exists, and refuses a folder that is no repository", () => {
+  const c = pointerCase();
+  const cfgFile = path.join(c.repo, ".claude", "night-shift.json");
+  fs.mkdirSync(path.dirname(cfgFile));
+  fs.writeFileSync(cfgFile, '{ "mcp": "inherit" }');
+  const r = c.run("init");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^  kept   .*night-shift\.json: /m);
+  assert.match(r.stdout, /^  wrote  .*night-shift-rules\.md: /m);
+  assert.match(r.stdout, /Commit .*night-shift-rules\.md/);
+  assert.equal(fs.readFileSync(cfgFile, "utf8"), '{ "mcp": "inherit" }');
+  const outside = path.join(c.repo, "..");
+  const bare = c.run("init", ["--repo", outside]);
+  assert.equal(bare.status, 1);
+  assert.match(bare.stderr, /not a git repository/);
+  assert.equal(fs.existsSync(path.join(outside, ".claude")), false);
+});
+
 test("start refuses an --until, --max-sessions or --session-hours of the wrong shape", () => {
   for (const [extra, re] of [
     [["--until", "7"], /--until wants a time HH:MM/], [["--until", "25:00"], /--until wants a time HH:MM/], [["--until", "7:60"], /--until wants a time HH:MM/],

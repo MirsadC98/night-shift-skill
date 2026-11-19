@@ -2,7 +2,8 @@
 // <repo>/.claude/night-shift-rules.md (project), which the runner puts into every session's header
 // where they win over the skill's defaults. Imports only node.
 //   ruleFiles(repo, home)  -> { global, project }   the two paths
-//   readRuleFile(file)     -> { text } | { error }  never throws; text is "" for a missing or blank file
+//   readRuleFile(file)     -> { text } | { error }  never throws; text is "" for a missing or blank file, and a
+//                                                    comment (a line that starts with <!--, up to -->) reaches no session
 //   rulesBlock({ global, project }) -> the header's block, "" when both are empty
 
 import fs from "node:fs";
@@ -40,7 +41,31 @@ export function readRuleFile(file) {
   if (bytes.length > RULES_MAX_BYTES) return { error: `is ${bytes.length} bytes, over the ${RULES_MAX_BYTES} limit` };
   let text;
   try { text = decode(bytes); } catch { return { error: "cannot be read: it is not UTF-8 text (save it as UTF-8)" }; }
-  return { text: text.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").trim() };
+  return { text: dropComments(text.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n")).trim() };
+}
+
+// C4: a comment is the user's note to themselves, and init's skeleton is one: an untouched file adds nothing to a header.
+// A comment starts at a line that begins with <!-- and ends at the first --> after it; the text after that --> stays. A
+// <!-- inside a line or inside a ``` or ~~~ code block is text (a rule may be about HTML), and so is one never closed.
+function dropComments(text) {
+  const lines = text.split("\n"), out = [];
+  let fence = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i], mark = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (mark) { if (fence === null) fence = mark[1][0]; else if (mark[1][0] === fence) fence = null; out.push(line); continue; }
+    if (fence === null && /^\s*<!--/.test(line)) {
+      let end = i, at = line.indexOf("-->", line.indexOf("<!--") + 4);
+      while (at < 0 && ++end < lines.length) at = lines[end].indexOf("-->");
+      if (at >= 0) {
+        const rest = lines[end].slice(at + 3);
+        if (rest.trim()) out.push(rest);
+        i = end;
+        continue;
+      }
+    }
+    out.push(line);
+  }
+  return out.join("\n");
 }
 
 export function rulesBlock({ global = "", project = "" }) {
