@@ -157,3 +157,23 @@ test("interactive.md names the runner's end lines at the weekly ceiling, the dol
     assert.ok(interactive.includes("`" + line), `interactive.md: ${line}`);
   }
 });
+
+// C4: the repository's package.json and CHANGELOG.md name the version the code knows (version.mjs), and README the Node
+// version package.json's engines holds; an installed copy of the skill has none of the three.
+test("package.json, CHANGELOG.md and the README agree with the code on the version and the Node it needs", { skip: !fs.existsSync(readmePath) && "no README beside this copy" }, async () => {
+  const { VERSION } = await import("./version.mjs");
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, "..", "package.json"), "utf8"));
+  assert.equal(pkg.version, VERSION);
+  assert.equal(pkg.type, "module");
+  assert.equal(pkg.private, true, "npm publish is refused by npm itself");
+  assert.deepEqual(Object.keys(pkg.dependencies || {}), [], "Node's built-ins only");
+  const node = /^>=(\d+)$/.exec(pkg.engines?.node || "");
+  assert.ok(node, `engines.node: ${pkg.engines?.node}`);
+  assert.ok(fs.readFileSync(readmePath, "utf8").includes(`Node.js ${node[1]} or later`), "README: the Node version");
+  // The suite and the guard's self-test, from the repository root; the glob quoted, since cmd.exe expands none.
+  assert.equal(pkg.scripts?.test, 'cd night-shift && node --test "scripts/*.test.mjs" && node scripts/guard.mjs --self-test');
+  const heading = fs.readFileSync(path.join(root, "..", "CHANGELOG.md"), "utf8").split("\n").find((l) => l.startsWith("## "));
+  const base = VERSION.replace(/-.*/, "");
+  assert.ok(heading?.startsWith(`## ${base} `), `CHANGELOG.md's first version: ${heading}`);
+  if (base !== VERSION) assert.match(heading, /unreleased/, "a pre-release version is the unreleased part");
+});

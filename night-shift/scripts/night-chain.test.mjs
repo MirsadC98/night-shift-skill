@@ -2226,6 +2226,16 @@ const startRun = (extra, cfg) => {
   return { ...r, c, run: r.stderr.includes("launch refused (test)") ? JSON.parse(fs.readFileSync(path.join(c.state, "run.json"), "utf8")) : undefined };
 };
 
+// C4: the version the code knows (version.mjs), printed by --version and kept in run.json for a report of what ran.
+test("--version prints the runner's version, and start keeps it in run.json", async () => {
+  const { VERSION } = await import("./version.mjs");
+  assert.match(VERSION, /^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/);
+  const r = spawnSync(process.execPath, [CHAIN, "--version"], { encoding: "utf8" });
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout, `night-shift ${VERSION}\n`);
+  assert.equal(startRun([]).run.version, VERSION);
+});
+
 test("start refuses an --until, --max-sessions or --session-hours of the wrong shape", () => {
   for (const [extra, re] of [
     [["--until", "7"], /--until wants a time HH:MM/], [["--until", "25:00"], /--until wants a time HH:MM/], [["--until", "7:60"], /--until wants a time HH:MM/],

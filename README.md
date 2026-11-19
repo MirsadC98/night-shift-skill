@@ -13,7 +13,7 @@ It runs a chain of fresh headless sessions (`claude -p`). Each session is like o
 ## Requirements
 
 - Windows 10 or 11
-- Node.js (tested on 22)
+- Node.js 22 or later; nothing to install from npm, the skill uses Node's built-ins only
 - The Claude Code CLI, installed globally with npm or with the native installer (`~/.local/bin/claude.exe`). The runner looks only in those places, not on `PATH`; for any other location, set `NIGHT_SHIFT_CLAUDE` to the path of `claude.exe`.
 - git; the target repository must have no uncommitted changes before a start
 
@@ -39,6 +39,7 @@ node ~/.claude/skills/night-shift/scripts/night-chain.mjs status --repo <dir>
 node ~/.claude/skills/night-shift/scripts/night-chain.mjs wait   --repo <dir>
 node ~/.claude/skills/night-shift/scripts/night-chain.mjs stop   --repo <dir> [--now]
 node ~/.claude/skills/night-shift/scripts/night-chain.mjs reload --repo <dir>
+node ~/.claude/skills/night-shift/scripts/night-chain.mjs --version
 ```
 
 A chain works from an approved roadmap: the pieces in order, each one session's work. Without one, give `start` the goal instead of a prompt, with `--goal <text>` or `--goal-file <file>` (one of the two, and never beside `--prompt` or `--prompt-file`). The runner wraps it in the planning prompt `references/goal.md`. The first session reads the repository and your recorded preferences, writes the roadmap (the pieces in order, what done looks like for each, the checks, what is out of scope), has one reviewer check it, marks it approved and commits it; the work starts in the second session. The goal approves the work it needs and nothing beyond it. Keep a long specification in the repository and name it in the goal ("the spec in docs/spec.md"): the first session reads the goal again in every call. Like a prompt, a goal starts fresh: it replaces a kept `next-prompt.md` and a session kept in `resume.json`.
@@ -176,9 +177,14 @@ In the bot's chat, `/status` shows what is running and `/report` lists this run'
 ```bash
 cd ~/.claude/skills/night-shift
 node --test scripts/*.test.mjs
+node scripts/guard.mjs --self-test
 ```
 
-The tests use a temporary home folder and launch nothing through Task Scheduler.
+In a clone of this repository, `npm test` at its root runs both. The tests use a temporary home folder and launch nothing through Task Scheduler.
+
+## Versions
+
+`night-chain.mjs --version` prints the version of a copy, and each run keeps the version that started it in its `run.json`. [CHANGELOG.md](CHANGELOG.md) says what each version brought.
 
 ## License
 

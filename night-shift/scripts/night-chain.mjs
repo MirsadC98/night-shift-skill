@@ -48,6 +48,7 @@
 //   node night-chain.mjs reload --repo <dir>       (a running chain takes up this code after
 //                                                   the session in progress, watcher included)
 //   node night-chain.mjs run    --state <dir>      (what start schedules)
+//   node night-chain.mjs --version                 (this copy's version, which start keeps in run.json)
 //
 // start schedules `run` through Task Scheduler so the chain outlives the
 // editor and the shell that started it. It runs in a hidden console
@@ -71,6 +72,7 @@ import { mergedConfig, isLangCode, MODES, CONFIG_KEYS, stateDirProblem, tempRoot
 import { sessionOutcome, windowSpan, fieldsGone } from "./session-outcome.mjs";
 import { listedServers, mcpArgs, claudeJson, mcpConfigArg, MCP_ARG_MAX } from "./mcp.mjs";
 import { ruleFiles, readRuleFile, rulesBlock } from "./rules.mjs";
+import { VERSION } from "./version.mjs";
 import { MAIN_MODEL, SUB_MODEL, MAIN_EFFORT, subEffortText, MAX_NOTE, nightModelSettings, sessionPlan, promptDirectives,
   directiveLines, fableGate, mainGate, fallbackNote, resolveMode, familyOf, isPremium, modelName, runModelIds, premiumNote,
   deniedNote, runsOn } from "./effort.mjs";
@@ -437,6 +439,8 @@ async function start(opt) {
     // The task runs with the user's stored environment, which may lack this shell's CLAUDE_CONFIG_DIR: the runner
     // sets it from here, so it, its sessions and the guard use the Claude folder this start used (claudeHome).
     ...(process.env.CLAUDE_CONFIG_DIR ? { claudeConfigDir: claudeHome() } : {}),
+    // C4: the copy that started the run, for a report of what ran (a reload takes up newer code without changing it).
+    version: VERSION,
     startedAt: now(),
   };
   fs.writeFileSync(path.join(state, "run.json"), JSON.stringify(run, null, 2));
@@ -1164,7 +1168,7 @@ function reload(opt) {
 
 // Only as a command: night-chain.test.mjs imports cutOffSession.
 const opt = parseArgs(process.argv.slice(2));
-const commands = { start, run: runChain, status, wait: waitChain, stop, reload };
+const commands = { start, run: runChain, status, wait: waitChain, stop, reload, "--version": () => console.log(`night-shift ${VERSION}`) };
 if (!isMain(import.meta)) { /* imported */ }
 else if (commands[opt.cmd]) await commands[opt.cmd](opt);
 else {

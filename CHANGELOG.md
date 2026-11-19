@@ -1,0 +1,47 @@
+# Changelog
+
+What each version brought, newest first. The code knows its version (`scripts/version.mjs`, printed by `night-chain.mjs --version` and kept in each run's `run.json`); a version with a pre-release part, such as `0.3.0-dev`, is the unreleased part below. Versions 0.1.0 and 0.2.0 were never tagged: each names the commit range of `main` it covers. Commit messages say the rest (`git log`).
+
+## 0.3.0 (unreleased)
+
+Not on `main` yet: the commits after `2c14b8b`.
+
+### Added
+
+- `--mode mythos` and `MODEL: mythos`: Mythos on Fable's seat, sharing its weekly allowance and ceiling.
+- `start --goal <text>` and `--goal-file <file>`: a chain from a goal with no roadmap; its first session writes the roadmap, has it reviewed and approves it, and the work starts in the session after it.
+- `start --attended` (`"attended": true`): for a job by day. Sessions write a question that needs you to `<state>/questions.md` and go on; the watcher sends each as a card, and `wait` wakes on it with exit 3.
+- Phone commands in the Telegram bot's chat: `/stop` and `/stop now`, and `/inbox <text>`, which is off until the global config sets `"telegramInbox": true`.
+- Caps: `weeklyCeiling` (`--weekly-ceiling`) for the seven-day window and `maxUsd` (`--max-usd`) for a start's dollars, each ending the chain with `next-prompt.md` kept; no session starts at or over 90 % of the five-hour window, the chain waits for its reset.
+- `"mcp"` as a list of server names: a session starts only those servers, each from its own config.
+- The night report's Tokens part shows each job's starting context; a handover prompt over 12 KB is flagged, on its card too.
+- `night-chain.mjs --version`, a `version` in `run.json`, this changelog, and `package.json` with `npm test` (the suite and the guard's self-test).
+
+### Changed
+
+- `--max-sessions <n>` counts the sessions a `start` runs; it was the number of the last session.
+- English is the only language in the repository: the bundled Turkish table left it, and any other language is a table you keep in `~/.claude/night-shift/lang/<code>.mjs`.
+- Each mode's rules moved from `SKILL.md` into `references/mode-<mode>.md`, which the runner puts into a new session's header.
+- Chain sessions refuse messages from your other Claude Code sessions (`crossSessionInbound: "refuse"`); their own subagents' results still arrive.
+- A project's `.claude/night-shift.json` may lower `fableCeiling`, `fableSessions`, `weeklyCeiling` and `maxUsd` but not raise them; `start`'s flag for a cap is your word and wins.
+- `CLAUDE_CONFIG_DIR` is followed by the runner, the guard and the report.
+- The guard knows a linked `~/.claude`, refuses `git config` of a remote's URL and a push to a URL, reads the project's rules on written paths too, and protects the caps' count, the waiter's marks and your stop request in the state folder.
+
+### Fixed
+
+- A session that writes STOP after `--until` ends the chain with its reason; a killed or crashed session counts against `--max-usd`; the report counts only real guard denials; many smaller fixes (`git log 2c14b8b..`).
+
+## 0.2.0 (2026-11-16 to 2026-11-18, `c83fae8..2c14b8b`)
+
+- A usage limit whose reset is too far away ends the chain (`--max-wait-hours`), a limit an empty result line follows is read, and a session the limit cut off after it wrote STOP finishes the chain; API and network failures are waited out; a session the timer killed and a runner crash are named.
+- The guard reads commands by their words: wrappers (`bash -c`, `powershell -c`, `eval`, `xargs`, `find -exec`), git's abbreviations, aliases and its config, include and transport routes, deletes through globs, braces and pipes, stream and short paths; a call it cannot check is denied.
+- MCP tools are refused unless `.claude/night-shift.json` lists their server.
+- Telegram cards are sent until Telegram takes them, long reports split between lines, and the token stays out of the watcher's log.
+- Modes (`--mode opus|fable`), a global config file below the project's, your rule files (global and per project) in every session's header and protected by the guard, and a language setting (`lang`) with English and Turkish tables.
+- A STOP written by the last session `--max-sessions` allows ends the chain with its reason.
+- The skill's texts say nothing of one person's setup.
+
+## 0.1.0 (2026-11-15, `ca5fb74..c2f071d`)
+
+- The first public version: `night-chain.mjs` chains fresh headless sessions through `<state>/next-prompt.md`, started through Task Scheduler (`start`, `status`, `wait`, `stop`, `reload`, `run`), waiting out a usage limit and resuming the session it cut off; the guard hook; the night report and its Telegram cards.
+- Hardening after a security review, and `MODEL: fable` for one hard piece, behind a gate on Fable's weekly allowance.

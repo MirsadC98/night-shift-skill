@@ -1,0 +1,14 @@
+{
+  "name": "night-shift",
+  "version": "0.3.0-dev",
+  "description": "A Claude Code skill that runs a chain of fresh headless sessions unattended for hours, behind a guard hook",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "cd night-shift && node --test \"scripts/*.test.mjs\" && node scripts/guard.mjs --self-test"
+  }
+}
