@@ -13,7 +13,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, realpathSync, mkdtempSync, mkdirSync, symlinkSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { norm, readProjectConfig, stateDirProblem, tempRoot, isMain } from "./config.mjs";
+import { norm, readProjectConfig, stateDirProblem, tempRoot, isMain, mcpToolName } from "./config.mjs";
 
 const under = (p, root) => root && (p === root || p.startsWith(root + "/"));
 
@@ -1314,7 +1314,8 @@ export function decide(input, env = process.env, opts = {}) {
     const { config, errors } = env.NIGHT_SHIFT_REPO ? readProjectConfig(env.NIGHT_SHIFT_REPO) : { config: {}, errors: [] };
     if (errors.length) return `.claude/night-shift.json is invalid (${errors[0]}); the user must fix it`;
     const mode = config.mcp ?? "none", server = tool.slice(5, Math.max(5, tool.lastIndexOf("__")));
-    if (mode === "inherit" || (Array.isArray(mode) && mode.includes(server))) return null;
+    // A listed name in the tools' spelling: "plugin:x:y", as `claude mcp list` shows a plugin's server, names tools mcp__plugin_x_y__….
+    if (mode === "inherit" || (Array.isArray(mode) && mode.some((s) => mcpToolName(s) === server))) return null;
     return `MCP tools are off in a night run (server "${server}"); the user allows one with "mcp": ["${server}"] in .claude/night-shift.json`;
   }
   if (tool === "Bash" || tool === "PowerShell") {

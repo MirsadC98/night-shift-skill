@@ -231,6 +231,11 @@ test("an MCP tool is refused unless the project's config allows its server", () 
   assert.equal(call("mcp__blender__execute_blender_code", inherit), null);
   // The server is what lies before the last "__"; a longer name that merely starts with a listed one is another server.
   assert.ok(call("mcp__plugin_x_y_z__do_it", listed));
+  // A plugin's server listed as `claude mcp list` names it, and a name its tools spell with _, are the same server.
+  const spelled = repoWithConfig({ mcp: ["plugin:x:y", "my.server"] });
+  assert.equal(call("mcp__plugin_x_y__do_it", spelled), null);
+  assert.equal(call("mcp__my_server__look", spelled), null);
+  assert.ok(call("mcp__plugin_x_z__do_it", spelled));
   // Outside a project (no repo named) it is the same as "none".
   assert.ok(call("mcp__blender__look", { ...env, NIGHT_SHIFT_REPO: "" }));
   // A config that does not validate refuses, as it does for a shell command.

@@ -56,6 +56,7 @@ import { buildReport, userWaits, stateLang } from "./night-report.mjs";
 import { strings, langOf, loadLang } from "./lang/index.mjs";
 import { mergedConfig, isLangCode, MODES, CONFIG_KEYS, stateDirProblem, tempRoot, isMain, claudeHome } from "./config.mjs";
 import { sessionOutcome, windowSpan } from "./session-outcome.mjs";
+import { listedServers, mcpArgs, claudeJson, mcpConfigArg, MCP_ARG_MAX } from "./mcp.mjs";
 import { ruleFiles, readRuleFile, rulesBlock } from "./rules.mjs";
 import { MAIN_MODEL, SUB_MODEL, MAIN_EFFORT, subEffortText, MAX_NOTE, nightModelSettings, sessionPlan, promptDirectives,
   directiveLines, fableGate, mainGate, fallbackNote, resolveMode, familyOf, isPremium, modelName, runModelIds, premiumNote,
@@ -231,6 +232,10 @@ function scheduleRun(run, extra = []) {
 
 // ---------------------------------------------------------------- start
 const HANDOVER_MS = 180_000;
+// Where a listed MCP server came from, for start's line, and where one is looked for (mcp.mjs).
+const MCP_SOURCE = { local: () => "yours, this repository only", project: () => "this repository's .mcp.json", user: () => "yours",
+  plugin: (name) => `plugin ${name.split(":")[1]}` };
+const MCP_PLACES = (repo) => `${claudeJson(os.homedir(), process.env)}, ${path.join(repo, ".mcp.json")}`;
 async function start(opt) {
   const repo = repoRoot(opt.repo || process.cwd());
   const ptr = readPointer(repo);
@@ -279,6 +284,15 @@ async function start(opt) {
   // A file the runner would have to leave out is refused here, while the user is at the keyboard.
   const badRules = ruleStatus(repo).filter((f) => f.error);
   if (badRules.length) fail(badRules.map((f) => `${f.file} ${f.error}`).join("; "));
+  // A listed MCP server is started from its own config (mcp.mjs): one no config holds would be missing all night.
+  const mcpFound = Array.isArray(cfg.mcp) ? listedServers(cfg.mcp, { repo }) : null;
+  if (mcpFound?.missing.length) {
+    fail(`"mcp" in ${from.mcp} names ${mcpFound.missing.map((n) => JSON.stringify(n)).join(", ")}, which no MCP config holds (looked in ${MCP_PLACES(repo)} and the installed plugins); ` +
+      'a claude.ai connector or a server in an .mcpb bundle starts only with "mcp": "inherit"');
+  }
+  // The configs go on the session's command line, which Windows cuts at 32,767 characters: a session that cannot start would be retried for hours.
+  const mcpSize = mcpFound ? mcpConfigArg(mcpFound.servers).length : 0;
+  if (mcpSize > MCP_ARG_MAX) fail(`the configs of the MCP servers "mcp" lists take ${mcpSize} characters, more than a session's command line holds (${MCP_ARG_MAX}); list fewer, or set "mcp": "inherit"`);
   let state = path.resolve(typeof opt.state === "string" ? opt.state
     : (cfg.stateDir || path.join(tempRoot(), `night-shift-${path.basename(repo)}-{date}`)).replace("{date}", today()));
   // The runner writes here and a session reads its instructions from here: not a folder of the user's own.
@@ -357,6 +371,8 @@ async function start(opt) {
   console.log(modelLine(run));
   console.log(`  until:  ${run.until ? `${run.until} (no new session after that)` : "the work is done (STOP)"}${run.maxSessions ? `, at most ${run.maxSessions} sessions, the last of them session ${String(run.lastSession).padStart(2, "0")}` : ""}`);
   for (const l of ruleLines(ruleStatus(repo))) console.log(l);
+  if (mcpFound?.found.length) console.log(`  mcp:    ${mcpFound.found.map((f) => `${f.name} (${MCP_SOURCE[f.source](f.name)})`).join(", ")}; no other server starts`);
+  else if (cfg.mcp === "inherit") console.log("  mcp:    inherit: every MCP server you have starts in each session, and the guard lets all their tools through");
   console.log(`  status: node "${SELF}" status --repo "${repo}"`);
   console.log(`  stop:   node "${SELF}" stop --repo "${repo}" [--now]`);
 }
@@ -524,6 +540,14 @@ async function runChain(opt) {
     }
     return rulesBlock({ global: ruleMemo.global.text, project: ruleMemo.project.text });
   };
+  // The MCP flags, worked out before every session: a listed server's config may change while the chain runs.
+  // A listed server no config holds any more is told once; the sessions start without it.
+  const mcpTold = new Set();
+  const readMcp = () => {
+    const { args, missing } = mcpArgs(run.mcp, { repo });
+    for (const name of missing.filter((n) => !mcpTold.has(n))) { mcpTold.add(name); log(`mcp: ${JSON.stringify(name)} is in no MCP config any more; sessions start without it`); }
+    return args;
+  };
   // Why the gate refused a session, after "asked for <Model>, but" or "<Model> is the main model, but".
   // The count is of Fable and Mythos sessions together: they draw on one allowance.
   const whyText = (g) => (g.why === "out" ? `its allowance is used up until ${stamp(g.until)}`
@@ -585,7 +609,7 @@ async function runChain(opt) {
     // Fable and Mythos sessions count together: one allowance.
     if (isPremium(plan.family) && !resume && !premiumMode) writeFable({ sessions: (readFable().sessions || 0) + 1 });
     writeSettings({ [plan.family]: plan.effort });
-    const result = await runSession(run, session, plan, nn, resume, readRules());
+    const result = await runSession(run, session, plan, nn, resume, readRules(), readMcp());
     log(`session ${nn} ends: ${result.summary}`);
     // A session that wrote its handover has done its piece, even when a limit cut off what came after.
     const wrote = fs.statSync(next).mtimeMs > before && read(next).trim() !== prompt;
@@ -714,7 +738,8 @@ async function runChain(opt) {
 // plan: sessionPlan's { model, family, effort, body }, with downgrade (the gate's answer), wanted (the
 // family it asked for) and why (the gate's answer in words) when Fable or Mythos was refused.
 // rules: the user's rulesBlock ("" for none), the header's last part (a new session's before its separator, a resumed one's after an empty line).
-function runSession(run, session, plan, nn, resume, rules = "") {
+// mcp: the MCP flags (mcp.mjs, mcpArgs); none for "inherit", --strict-mcp-config alone for no server.
+function runSession(run, session, plan, nn, resume, rules = "", mcp = ["--strict-mcp-config"]) {
   const resumeId = resume?.sessionId;
   const { effort, body } = plan;
   const header = resumeId ? [
@@ -748,8 +773,9 @@ function runSession(run, session, plan, nn, resume, rules = "") {
     "--settings", path.join(run.state, "night-settings.json"),
     "--disallowedTools", "AskUserQuestion,EnterPlanMode,ExitPlanMode"];
   args.push("--model", plan.model);
-  // Without MCP no server starts at all; with "inherit" or a list the user's servers load and the guard decides per server.
-  if ((run.mcp ?? "none") === "none") args.push("--strict-mcp-config");
+  // Without MCP no server starts at all, with a list only the listed ones (each from its own config), with "inherit"
+  // every server of the user's; the guard still decides per server.
+  args.push(...mcp);
   if (effort === "max") args.push("--effort", "max");
   // Without --fork-session the conversation keeps its id, so the report still finds its transcript.
   if (resumeId) args.push("--resume", resumeId);

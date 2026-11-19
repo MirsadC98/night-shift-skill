@@ -60,6 +60,9 @@ export const norm = (p) => {
 const under = (p, root) => root && (p === root || p.startsWith(root + "/"));
 
 const isStr = (v) => typeof v === "string";
+// A server's part of its tools' names (mcp__<it>__<tool>): the CLI puts _ for what is not a letter, a digit, _ or -,
+// so "plugin:context7:context7" names tools mcp__plugin_context7_context7__… (the guard and mcp.mjs compare in this form).
+export const mcpToolName = (name) => String(name).replace(/[^A-Za-z0-9_-]/g, "_");
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 // The run's main model: Opus, or Fable or Mythos, which are one model under two names (effort.mjs, resolveMode).
 export const MODES = ["opus", "fable", "mythos"];

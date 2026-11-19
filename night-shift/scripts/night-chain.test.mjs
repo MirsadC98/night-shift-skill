@@ -372,10 +372,11 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
 });
 
 // ---------------------------------------------------------------- Fable
-test("the hook covers MCP tools, and a run without MCP starts its sessions without servers", async () => {
-  // One session per run mode; the stand-in writes its argv and ends the chain.
-  const argvOf = async (patch) => {
-    const { state, env, root } = setup();
+test("the hook covers MCP tools; a session starts no server, every one (inherit), or only the listed ones", async () => {
+  // One session per run mode; the stand-in writes its argv and ends the chain. home: the user's files to put first.
+  const argvOf = async (patch, homeFiles = {}) => {
+    const { state, env, root, home } = setup();
+    for (const [f, data] of Object.entries(homeFiles)) fs.writeFileSync(path.join(home, f), JSON.stringify(data));
     const fake = path.join(root, "fake-mcp.mjs");
     fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path";
 const st = process.env.NIGHT_SHIFT_STATE; for await (const c of process.stdin);
@@ -388,15 +389,30 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     const { code } = await runOnce(["--state", state, "--headless"], env, root);
     assert.equal(code, 0, fs.readFileSync(path.join(state, "chain.log"), "utf8"));
     return { argv: JSON.parse(fs.readFileSync(path.join(state, "argv-1.json"), "utf8")),
-      settings: JSON.parse(fs.readFileSync(path.join(state, "night-settings.json"), "utf8")) };
+      settings: JSON.parse(fs.readFileSync(path.join(state, "night-settings.json"), "utf8")),
+      log: fs.readFileSync(path.join(state, "chain.log"), "utf8") };
   };
   const none = await argvOf({});
   assert.equal(none.settings.hooks.PreToolUse[0].matcher, "Bash|PowerShell|Write|Edit|MultiEdit|NotebookEdit|mcp__.*");
   assert.ok(none.argv.includes("--strict-mcp-config"), "no mcp in run.json means none");
+  assert.ok(!none.argv.includes("--mcp-config"));
+  assert.doesNotMatch(none.log, /\] mcp: /, "a run without MCP says nothing about it");
   assert.ok((await argvOf({ mcp: "none" })).argv.includes("--strict-mcp-config"));
-  // The user's servers load for these two; the guard refuses what the list does not name.
+  // inherit: every server of the user's loads, as in an interactive session.
   assert.ok(!(await argvOf({ mcp: "inherit" })).argv.includes("--strict-mcp-config"));
-  assert.ok(!(await argvOf({ mcp: ["plugin_x_y"] })).argv.includes("--strict-mcp-config"));
+  // A list: only its servers, each with its own config, the other servers of the user's not at all.
+  const servers = { github: { type: "stdio", command: "gh-mcp", args: [] }, blender: { command: "blender-mcp" } };
+  const listed = await argvOf({ mcp: ["github", "plugin_x_y"], effort: "max" }, { ".claude.json": { mcpServers: servers } });
+  assert.ok(listed.argv.includes("--strict-mcp-config"));
+  const at = listed.argv.indexOf("--mcp-config");
+  assert.deepEqual(JSON.parse(listed.argv[at + 1]), { mcpServers: { github: servers.github } });
+  // --mcp-config takes several values: the next word after its one value is a flag of its own.
+  assert.deepEqual(listed.argv.slice(at + 2, at + 4), ["--effort", "max"]);
+  // A listed server that left every config since start: the session starts without it, and chain.log says so once.
+  assert.match(listed.log, /\] mcp: "plugin_x_y" is in no MCP config any more; sessions start without it\n/);
+  const gone = await argvOf({ mcp: ["plugin_x_y"] });
+  assert.ok(gone.argv.includes("--strict-mcp-config"));
+  assert.ok(!gone.argv.includes("--mcp-config"));
 });
 
 test("start copies the project's mcp setting into run.json", () => {
@@ -410,7 +426,48 @@ test("start copies the project's mcp setting into run.json", () => {
   };
   assert.equal(modeOf({}), "none");
   assert.equal(modeOf({ mcp: "inherit" }), "inherit");
-  assert.deepEqual(modeOf({ mcp: ["plugin_x_y"] }), ["plugin_x_y"]);
+  assert.deepEqual(modeOf({ mcp: [] }), []);
+});
+
+test("start refuses a listed MCP server that no config holds, and prints where each listed one comes from", () => {
+  const c = pointerCase();
+  fs.mkdirSync(path.join(c.repo, ".claude"), { recursive: true });
+  fs.writeFileSync(path.join(c.repo, ".claude", "night-shift.json"), JSON.stringify({ mcp: ["github", "plugin:ctx:ctx", "claude.ai Docs"] }));
+  fs.writeFileSync(path.join(c.home, ".claude.json"), JSON.stringify({ mcpServers: { github: { command: "gh-mcp" } } }));
+  const refused = c.run("start", ["--state", c.state, "--allow-dirty", "--prompt", "x"]);
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /"mcp" in .*night-shift\.json names "plugin:ctx:ctx", "claude\.ai Docs", which no MCP config holds \(looked in .*\.claude\.json, .*\.mcp\.json and the installed plugins\); a claude\.ai connector or a server in an \.mcpb bundle starts only with "mcp": "inherit"/);
+  assert.doesNotMatch(refused.stderr, /launch refused/, "refused before anything is scheduled");
+  const root = path.join(c.home, ".claude", "plugins", "cache", "m", "ctx");
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(path.join(root, ".mcp.json"), JSON.stringify({ mcpServers: { ctx: { type: "http", url: "https://ctx.example/mcp" } } }));
+  fs.writeFileSync(path.join(c.home, ".claude", "plugins", "installed_plugins.json"), JSON.stringify({ version: 2, plugins: { "ctx@m": [{ scope: "user", installPath: root }] } }));
+  fs.writeFileSync(path.join(c.repo, ".claude", "night-shift.json"), JSON.stringify({ mcp: ["github", "plugin:ctx:ctx"] }));
+  const ok = c.run("start", ["--state", c.state, "--allow-dirty", "--prompt", "x"]);
+  assert.match(ok.stderr, /launch refused \(test\)/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(c.state, "run.json"), "utf8")).mcp, ["github", "plugin:ctx:ctx"]);
+  // Configs too long for a session's command line are refused too.
+  fs.writeFileSync(path.join(c.home, ".claude.json"), JSON.stringify({ mcpServers: { github: { command: "gh-mcp", args: ["x".repeat(25_000)] } } }));
+  const long = c.run("start", ["--state", c.state, "--allow-dirty", "--prompt", "x"]);
+  assert.equal(long.status, 1);
+  assert.match(long.stderr, /the configs of the MCP servers "mcp" lists take \d+ characters, more than a session's command line holds \(20000\); list fewer, or set "mcp": "inherit"/);
+});
+
+test("start prints the MCP servers a list starts, and inherit, but nothing without MCP", async () => {
+  const listed = await startPrints(({ repo, home }) => {
+    fs.mkdirSync(path.join(repo, ".claude"), { recursive: true });
+    fs.writeFileSync(path.join(repo, ".claude", "night-shift.json"), JSON.stringify({ mcp: ["github", "db"] }));
+    fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ mcpServers: { github: { command: "gh-mcp" } } }));
+    fs.writeFileSync(path.join(repo, ".mcp.json"), JSON.stringify({ mcpServers: { db: { command: "db-mcp" } } }));
+    fs.appendFileSync(path.join(repo, ".git", "info", "exclude"), "/.mcp.json\n");
+  });
+  assert.match(listed, /^ {2}mcp: {4}github \(yours\), db \(this repository's \.mcp\.json\); no other server starts$/m);
+  const inherit = await startPrints(({ repo }) => {
+    fs.mkdirSync(path.join(repo, ".claude"), { recursive: true });
+    fs.writeFileSync(path.join(repo, ".claude", "night-shift.json"), JSON.stringify({ mcp: "inherit" }));
+  });
+  assert.match(inherit, /^ {2}mcp: {4}inherit: every MCP server you have starts in each session/m);
+  assert.doesNotMatch(await startPrints(() => {}), /^ {2}mcp:/m);
 });
 
 // A stand-in that notes what each session got (its flags, input, env and the settings layer) and
