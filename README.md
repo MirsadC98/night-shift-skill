@@ -49,7 +49,7 @@ The setup takes about five minutes, on Windows with Node.js 22 or later, git and
 
 - Windows 10 or 11
 - Node.js 22 or later; nothing to install from npm, the skill uses Node's built-ins only
-- The Claude Code CLI, installed globally with npm or with the native installer (`~/.local/bin/claude.exe`). The runner looks only in those places, not on `PATH`; for any other location, set `NIGHT_SHIFT_CLAUDE` to the path of `claude.exe`.
+- The Claude Code CLI, installed globally with npm or with the native installer (`~/.local/bin/claude.exe`; on macOS and Linux `claude` beside `node`, in `~/.local/bin`, or in Homebrew's `/opt/homebrew/bin` or `/usr/local/bin`). The runner looks only in those places, not on `PATH`; for any other location, set `NIGHT_SHIFT_CLAUDE` to the path of the CLI.
 - git; the target repository must have no uncommitted changes before a start
 
 ## Install

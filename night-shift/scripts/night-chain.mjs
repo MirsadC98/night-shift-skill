@@ -1112,7 +1112,7 @@ async function waitChain(opt) {
     if (pid && alive(pid)) {
       const code = await exitOf(pid, stopWaiting.signal).catch((e) => fail(`could not wait for runner pid ${pid}: ${e.message}`));
       if (stopWaiting.signal.aborted) return; // woken by a question: its text is going out, and the exit follows it
-      if (code !== 3 && alive(pid)) fail(`could not wait for runner pid ${pid} (PowerShell exit ${code})`);
+      if (code !== 3 && alive(pid)) fail(`could not wait for runner pid ${pid} (${platform.name === "win32" ? "PowerShell " : ""}exit ${code})`);
     }
     let next = pointerOr(repo);
     if (!next || !runner(pid)(next)) {

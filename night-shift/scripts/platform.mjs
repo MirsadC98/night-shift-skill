@@ -47,7 +47,11 @@ export function platformFor(name = process.platform, deps = {}) {
   const run = deps.execFileSync || execFileSync;
   const start = deps.spawn || spawn;
   const writeFile = deps.writeFileSync || fs.writeFileSync;
+  const readFile = deps.readFileSync || fs.readFileSync;
+  const readDir = deps.readdirSync || fs.readdirSync;
   const env = () => deps.env || process.env;
+  const self = deps.pid ?? process.pid;
+  const pollMs = deps.pollMs ?? 1000;
 
   // The temp folder in long form. %TEMP% is often written as an 8.3 short name (C:\Users\JOHNSM~1\…),
   // which the guard refuses in any path, so the tool's own temp paths all come from this one spelling.
@@ -165,34 +169,98 @@ export function platformFor(name = process.platform, deps = {}) {
     return POSIX_SYSTEM.test(dir) ? "is inside a system or program folder" : null;
   };
 
-  // Signal 0 only asks. No pid is no process (on Windows, process.kill(0, 0) asks about this process).
-  const alive = (pid, { denied = false } = {}) => {
-    if (!pid) return false;
-    try { kill(pid, 0); return true; } catch (e) { return denied && e.code === "EPERM"; }
+  // /proc/<pid>/stat's fields after the command's name, which sits in parentheses and may hold spaces and ")":
+  // [state, parent pid, ...]; null when it cannot be read.
+  const procStat = (pid) => {
+    try { const s = String(readFile(`/proc/${pid}/stat`, "utf8")); return s.slice(s.lastIndexOf(")") + 2).split(" "); } catch { return null; }
   };
 
+  // Signal 0 only asks. No pid is no process (on Windows, process.kill(0, 0) asks about this process). On Linux a zombie,
+  // ended but not yet collected by its parent, still answers signal 0: its state Z says it is gone.
+  const alive = (pid, { denied = false } = {}) => {
+    if (!pid) return false;
+    try { kill(pid, 0); } catch (e) { return denied && e.code === "EPERM"; }
+    return name !== "linux" || procStat(pid)?.[0] !== "Z";
+  };
+
+  // Linux reads the kernel's copy (NULs between the words); macOS asks ps, which exits 1 for no such process; Windows
+  // asks PowerShell's CIM.
   const commandLine = (pid) => {
+    const n = Number(pid);
+    if (name === "linux") {
+      try { return String(readFile(`/proc/${n}/cmdline`, "utf8")).replace(/\0+$/, "").replace(/\0/g, " "); }
+      catch (e) { return e.code === "ENOENT" || e.code === "ESRCH" ? "" : null; }
+    }
+    if (!win) {
+      try { return String(run("ps", ["-ww", "-o", "args=", "-p", String(n)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })).replace(/\s+$/, ""); }
+      catch (e) { return e.status === 1 ? "" : null; }
+    }
     try {
       return run("powershell", ["-NoProfile", "-NonInteractive", "-Command",
         `(Get-CimInstance Win32_Process -Filter "ProcessId=${Number(pid)}").CommandLine`], { encoding: "utf8", windowsHide: true });
     } catch { return null; }
   };
 
+  // Every process's parent: Linux's /proc/<pid>/stat, macOS's ps.
+  const parents = () => (name === "linux"
+    ? readDir("/proc").filter((d) => /^\d+$/.test(d)).map((d) => [Number(d), Number(procStat(d)?.[1])])
+    : String(run("ps", ["-A", "-o", "pid=,ppid="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })).split("\n")
+      .map((l) => /^\s*(\d+)\s+(\d+)/.exec(l)).filter(Boolean).map((m) => [Number(m[1]), Number(m[2])]));
+
   // taskkill /T ends the tree by parent process id, so a detached child (the watcher) goes with the runner's tree.
+  // Elsewhere the tree comes from the process table, all of it read before any kill (a killed parent's children move
+  // to init); then each pid with SIGKILL, the process group pid leads (a detached runner leads one, and what it started
+  // stays in it unless it left), and this process last: the watcher that answers /stop now is in the runner's tree.
+  // Every failure is swallowed, as taskkill's is; no pid, 1 or less, ends nothing.
   const killTree = (pid) => {
-    try { run("taskkill", ["/T", "/F", "/PID", String(pid)], { stdio: "ignore", windowsHide: true }); } catch {}
+    if (win) { try { run("taskkill", ["/T", "/F", "/PID", String(pid)], { stdio: "ignore", windowsHide: true }); } catch {} return; }
+    const root = Number(pid);
+    if (!(root > 1)) return;
+    let table = [];
+    try { table = parents(); } catch { /* no table: the pid and its group */ }
+    const tree = new Set([root]);
+    for (const p of tree) for (const [child, parent] of table) if (parent === p) tree.add(child);
+    const hit = (target) => { try { kill(target, "SIGKILL"); } catch {} };
+    for (const p of tree) if (p !== self) hit(p);
+    hit(-root);
+    if (tree.has(self)) hit(self);
   };
 
-  // A hidden PowerShell that holds the system awake (ES_CONTINUOUS | ES_SYSTEM_REQUIRED) and exits once pid is gone.
-  const keepAwake = (pid) => start("powershell", ["-NoProfile", "-NonInteractive", "-Command",
-    `$k=Add-Type -MemberDefinition '[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);' -Name K -Namespace NightShift -PassThru; ` +
-    `[void]$k::SetThreadExecutionState([uint32]2147483649); while (Get-Process -Id ${pid} -ErrorAction SilentlyContinue) { Start-Sleep -Seconds 60 }`],
-  { stdio: "ignore", windowsHide: true });
+  // A helper that holds the system awake while pid lives and then exits; its kill() ends it sooner. Windows: a hidden
+  // PowerShell (ES_CONTINUOUS | ES_SYSTEM_REQUIRED); macOS: caffeinate -w; Linux: systemd-inhibit around a loop that
+  // ends with pid. A helper that cannot start emits an error, swallowed here: no keep-awake, never a crash.
+  const keepAwake = (pid) => {
+    const helper = win ? start("powershell", ["-NoProfile", "-NonInteractive", "-Command",
+      `$k=Add-Type -MemberDefinition '[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);' -Name K -Namespace NightShift -PassThru; ` +
+      `[void]$k::SetThreadExecutionState([uint32]2147483649); while (Get-Process -Id ${pid} -ErrorAction SilentlyContinue) { Start-Sleep -Seconds 60 }`],
+    { stdio: "ignore", windowsHide: true })
+      : name === "darwin" ? start("caffeinate", ["-i", "-w", String(Number(pid))], { stdio: "ignore", windowsHide: true })
+      : start("systemd-inhibit", ["--what=idle:sleep", "--who=night-shift", "--why=a night-shift chain is running", "--mode=block",
+        "sh", "-c", `while kill -0 ${Number(pid)} 2>/dev/null; do sleep 60; done`], { stdio: "ignore", windowsHide: true });
+    helper.on("error", () => {});
+    return helper;
+  };
 
-  // No polling: a hidden PowerShell waits on the process handle. unless (required) is a PowerShell regex: a live pid whose command
-  // line does not match it belongs to another program now (Windows reuses numbers), so what was waited for is gone.
+  // Off Windows nothing waits on a process that is not one's child: one look at its command line (a live pid whose
+  // command line does not match unless, case-blind as PowerShell's -notmatch, runs another program now: 3), then alive
+  // (a process it may not signal counts as alive) every pollMs until the pid is gone (0). Aborting signal resolves "woken".
+  const pollExit = (pid, { signal, unless }) => new Promise((resolve) => {
+    if (signal?.aborted) return resolve("woken");
+    const gone = () => !alive(pid, { denied: true });
+    if (gone()) return resolve(0);
+    const c = commandLine(pid);
+    if (c && unless && !new RegExp(unless, "i").test(c)) return resolve(3);
+    const end = (v) => { clearInterval(timer); signal?.removeEventListener("abort", woken); resolve(v); };
+    const woken = () => end("woken");
+    const timer = setInterval(() => { if (gone()) end(0); }, pollMs);
+    signal?.addEventListener("abort", woken, { once: true });
+  });
+
+  // No polling on Windows: a hidden PowerShell waits on the process handle. unless (required) is a regex read alike by PowerShell
+  // and JavaScript (off Windows it is a JavaScript one; the runner passes night-chain\.mjs): a live pid
+  // whose command line does not match it belongs to another program now (Windows reuses numbers), so what was waited for is gone.
   // Aborting signal kills the PowerShell and resolves "woken"; any other error rejects.
-  const waitExit = (pid, { signal, unless } = {}) => new Promise((resolve, reject) => {
+  const waitExit = (pid, { signal, unless } = {}) => (!win ? pollExit(pid, { signal, unless }) : new Promise((resolve, reject) => {
     const ps = start("powershell", ["-NoProfile", "-NonInteractive", "-Command",
       `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if (-not $p) { exit 0 }; ` +
       `$c = (Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine; ` +
@@ -200,15 +268,16 @@ export function platformFor(name = process.platform, deps = {}) {
     { stdio: "ignore", windowsHide: true, signal });
     ps.on("error", (e) => (e.name === "AbortError" ? resolve("woken") : reject(e)));
     ps.on("exit", resolve);
-  });
+  }));
 
-  // Beside node (an npm install next to it), npm's global folder, and the native installer's.
-  const cliName = "claude.exe";
-  const cliCandidates = (nodeDir) => [
+  // Windows: beside node (an npm install next to it), npm's global folder, and the native installer's. Elsewhere: beside
+  // node (npm's global bin is node's own folder there), the native installer's ~/.local/bin, and Homebrew's two folders.
+  const cliName = win ? "claude.exe" : "claude";
+  const cliCandidates = (nodeDir) => (win ? [
     path.join(nodeDir, "node_modules", "@anthropic-ai", "claude-code", "bin", cliName),
     path.join(homedir(), "AppData", "Roaming", "npm", "node_modules", "@anthropic-ai", "claude-code", "bin", cliName),
     path.join(homedir(), ".local", "bin", cliName),
-  ];
+  ] : [...new Set([pp.join(nodeDir, cliName), pp.join(homedir(), ".local", "bin", cliName), "/opt/homebrew/bin/claude", "/usr/local/bin/claude"])]);
 
   // Through Task Scheduler's task `task`, written over each time. No trigger, so only start (or a runner handing over)
   // runs it and a finished chain never comes back on its own; no time limit (schtasks' default stops a task after

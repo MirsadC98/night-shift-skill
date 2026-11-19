@@ -289,3 +289,121 @@ test("off Windows the review's cases: the data volume over /private, 8.3 names o
   assert.equal(linux.systemDirProblem("/var/lib/other/x", at), "is inside a system or program folder");
   assert.equal(linux.systemDirProblem("/Library/x", { home: "/home/u", temp: "/tmp" }), null);
 });
+
+// Off Windows: what a method read, ran, started and killed, under a linux or darwin object.
+const posixRec = (name, { files = {}, dirs = {}, ps = () => "", kill = () => true, pid = 1 } = {}) => {
+  const calls = [], killed = [], children = [];
+  const p = platformFor(name, {
+    tmpdir: () => "/tmp", realpath: fail("ENOENT"), homedir: () => "/home/u", pid, pollMs: 5,
+    readFileSync: (f) => { if (!(f in files)) fail("ENOENT")(); if (files[f] instanceof Error) throw files[f]; return files[f]; },
+    readdirSync: (d) => dirs[d] ?? [],
+    execFileSync: (file, args, opts) => { calls.push([file, args, opts]); return ps(file, args); },
+    spawn: (file, args, opts) => { calls.push([file, args, opts]); const c = new EventEmitter(); children.push(c); return c; },
+    kill: (target, s) => { killed.push([target, s]); return kill(target, s); },
+  });
+  return { p, calls, killed, children };
+};
+const NUL = String.fromCharCode(0);
+const stat = (pid, ppid, state = "S") => `${pid} (node (x)) ${state} ${ppid} ${pid} ${pid} 0`;
+
+test("commandLine off Windows reads /proc on Linux and asks ps on macOS: \"\" once gone, null when it cannot ask", () => {
+  const L = posixRec("linux", { files: { "/proc/12/cmdline": `node${NUL}/s/night-chain.mjs${NUL}run${NUL}`,
+    "/proc/13/cmdline": Object.assign(new Error("EACCES"), { code: "EACCES" }) } });
+  assert.equal(L.p.commandLine("12"), "node /s/night-chain.mjs run");
+  assert.equal(L.p.commandLine(14), "");
+  assert.equal(L.p.commandLine(13), null);
+  assert.deepEqual(L.calls, []);
+  const M = posixRec("darwin", { ps: (file, args) => (args.at(-1) === "12" ? "node /s/night-chain.mjs run\n" : fail("1")()) });
+  assert.equal(M.p.commandLine("12"), "node /s/night-chain.mjs run");
+  assert.deepEqual(M.calls[0], ["ps", ["-ww", "-o", "args=", "-p", "12"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }]);
+  const gone = posixRec("darwin", { ps: () => { throw Object.assign(new Error("exit 1"), { status: 1 }); } });
+  assert.equal(gone.p.commandLine(12), "");
+  const broken = posixRec("darwin", { ps: () => { throw Object.assign(new Error("spawn ps ENOENT"), { code: "ENOENT" }); } });
+  assert.equal(broken.p.commandLine(12), null);
+});
+
+test("alive on Linux counts a zombie as gone; elsewhere signal 0's answer stands", () => {
+  const files = { "/proc/12/stat": stat(12, 1, "Z"), "/proc/13/stat": stat(13, 1) };
+  const L = posixRec("linux", { files });
+  assert.equal(L.p.alive(12), false);
+  assert.equal(L.p.alive(13), true);
+  assert.equal(L.p.alive(14), true);
+  assert.equal(posixRec("linux", { files, kill: fail("EPERM") }).p.alive(12, { denied: true }), true);
+  assert.equal(posixRec("darwin", { files }).p.alive(12), true);
+  assert.equal(platformFor("win32", { kill: () => true, readFileSync: () => stat(12, 1, "Z") }).alive(12), true);
+});
+
+test("killTree off Windows ends the tree from the process table: each pid, then its group, the caller last, errors swallowed", () => {
+  const files = { "/proc/10/stat": stat(10, 1), "/proc/11/stat": stat(11, 10), "/proc/12/stat": stat(12, 11), "/proc/13/stat": stat(13, 10),
+    "/proc/20/stat": stat(20, 1), "/proc/30/stat": stat(30, 13) };
+  const dirs = { "/proc": ["10", "11", "12", "13", "20", "30", "self", "net"] };
+  const L = posixRec("linux", { files, dirs, pid: 13, kill: (t) => { if (t === 11) fail("ESRCH")(); return true; } });
+  assert.equal(L.p.killTree(10), undefined);
+  assert.deepEqual(L.killed, [[10, "SIGKILL"], [11, "SIGKILL"], [12, "SIGKILL"], [30, "SIGKILL"], [-10, "SIGKILL"], [13, "SIGKILL"]]);
+  assert.deepEqual(L.calls, []);
+  const M = posixRec("darwin", { ps: () => "   10     1\n   11    10\n   12    11\n   20     1\n" });
+  M.p.killTree("10");
+  assert.deepEqual(M.calls[0], ["ps", ["-A", "-o", "pid=,ppid="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }]);
+  assert.deepEqual(M.killed, [[10, "SIGKILL"], [11, "SIGKILL"], [12, "SIGKILL"], [-10, "SIGKILL"]]);
+  const blind = posixRec("darwin", { ps: () => { throw new Error("no ps"); } });
+  blind.p.killTree(10);
+  assert.deepEqual(blind.killed, [[10, "SIGKILL"], [-10, "SIGKILL"]]);
+  for (const bad of [0, 1, -5, "x", undefined]) {
+    const none = posixRec("linux", { files, dirs });
+    none.p.killTree(bad);
+    assert.deepEqual(none.killed, [], String(bad));
+  }
+});
+
+test("keepAwake off Windows: caffeinate on macOS, systemd-inhibit around a kill -0 loop on Linux; a helper that fails to start throws nothing", () => {
+  const M = posixRec("darwin");
+  const helper = M.p.keepAwake(42);
+  assert.equal(helper, M.children[0]);
+  assert.deepEqual(M.calls[0], ["caffeinate", ["-i", "-w", "42"], { stdio: "ignore", windowsHide: true }]);
+  assert.doesNotThrow(() => helper.emit("error", new Error("spawn caffeinate ENOENT")));
+  const L = posixRec("linux");
+  L.p.keepAwake("42; reboot");
+  assert.deepEqual(L.calls[0], ["systemd-inhibit", ["--what=idle:sleep", "--who=night-shift", "--why=a night-shift chain is running", "--mode=block",
+    "sh", "-c", "while kill -0 NaN 2>/dev/null; do sleep 60; done"], { stdio: "ignore", windowsHide: true }]);
+  L.p.keepAwake(42);
+  assert.equal(L.calls[1][1].at(-1), "while kill -0 42 2>/dev/null; do sleep 60; done");
+  assert.doesNotThrow(() => L.children[1].emit("error", new Error("spawn systemd-inhibit ENOENT")));
+  const { p, child } = recorder();
+  p.keepAwake(42);
+  assert.doesNotThrow(() => child.emit("error", new Error("spawn powershell ENOENT")));
+});
+
+test("waitExit off Windows polls alive: 0 once gone, 3 when the pid runs another program, \"woken\" on an abort", async () => {
+  let up = true;
+  const L = posixRec("linux", { files: { "/proc/42/cmdline": `node${NUL}/s/Night-Chain.mjs${NUL}run` },
+    kill: () => (up ? true : fail("ESRCH")()) });
+  const w = L.p.waitExit(42, { unless: "night-chain\\.mjs" });
+  up = false;
+  assert.equal(await w, 0);
+  assert.equal(await L.p.waitExit(42, { unless: "x" }), 0);
+  up = true;
+  assert.equal(await L.p.waitExit(42, { unless: "other\\.mjs" }), 3);
+  const ac = new AbortController();
+  const woken = L.p.waitExit(42, { signal: ac.signal, unless: "night-chain\\.mjs" });
+  ac.abort();
+  assert.equal(await woken, "woken");
+  const done = new AbortController();
+  done.abort();
+  assert.equal(await L.p.waitExit(42, { signal: done.signal, unless: "x" }), "woken");
+  // A process it may not signal still lives; one whose command line cannot be read is waited for.
+  let tries = 0;
+  const E = posixRec("linux", { files: { "/proc/42/cmdline": Object.assign(new Error("EACCES"), { code: "EACCES" }) },
+    kill: () => (++tries < 3 ? fail("EPERM")() : fail("ESRCH")()) });
+  assert.equal(E.p.commandLine(42), null);
+  assert.equal(await E.p.waitExit(42, { unless: "night-chain\\.mjs" }), 0);
+  assert.equal(tries, 3);
+  assert.deepEqual(L.calls, []);
+});
+
+test("cliCandidates off Windows are claude beside node, in the native installer's folder and Homebrew's", () => {
+  const p = posixRec("linux").p;
+  assert.equal(p.cliName, "claude");
+  assert.deepEqual(p.cliCandidates("/home/u/.nvm/versions/node/v22/bin"), ["/home/u/.nvm/versions/node/v22/bin/claude", "/home/u/.local/bin/claude",
+    "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]);
+  assert.deepEqual(posixRec("darwin").p.cliCandidates("/usr/local/bin"), ["/usr/local/bin/claude", "/home/u/.local/bin/claude", "/opt/homebrew/bin/claude"]);
+});
