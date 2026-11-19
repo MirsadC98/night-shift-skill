@@ -786,8 +786,9 @@ export async function notify(state, headline, opt = {}) {
 // order written. A line counts once it ends in a newline, so one still being written, or cut off by stop --now, is not
 // read half. The watcher and `wait` (night-chain.mjs) keep what they reported by the line's text, not by a count: a line a
 // session rewrote or removed then neither hides a later question nor reports the rest again.
+// A BOM goes too: Windows PowerShell 5's Set-Content -Encoding UTF8 starts the file with one, which hid its first question.
 export function questionLines(state) {
-  const lines = read(path.join(state, "questions.md")).replace(/\r\n/g, "\n").split("\n").slice(0, -1).map((l) => l.trimEnd());
+  const lines = read(path.join(state, "questions.md")).replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").split("\n").slice(0, -1).map((l) => l.trimEnd());
   return [...new Set(lines.filter((l) => /^Q\d+ · /.test(l)))];
 }
 
@@ -1065,5 +1066,9 @@ if (isMain(import.meta)) {
         console.log(lines.join("\n"));
       }
     }
-  } else console.log(read(SELF).split("\n").slice(1, 14).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
+  } else {
+    // The whole header comment, the shebang left out, up to the first line that is no comment.
+    const head = read(SELF).split("\n").slice(1);
+    console.log(head.slice(0, head.findIndex((l) => !l.startsWith("//"))).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
+  }
 }

@@ -4,7 +4,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildReport, sessionMessage, chainMessage } from "./night-report.mjs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { buildReport, sessionMessage, chainMessage, questionLines } from "./night-report.mjs";
 import { reportSection } from "./telegram-cards.mjs";
 // A CLAUDE_CONFIG_DIR of the user's own would move every file these tests read or write (claudeHome in config.mjs).
 delete process.env.CLAUDE_CONFIG_DIR;
@@ -175,4 +177,18 @@ test("a section the cards cannot read says so: no section at all, or one without
   assert.match(failedPlain, /#01 ended with an error/);
   assert.doesNotMatch(failedPlain, /night-report section/);
   assert.doesNotMatch(buildReport(finished(job, { report: "# Night runs\n", runStart: "2026-11-19 05:00:00" }), { focus: "all", pid: 0 }).plain, /night-report section/);
+});
+
+// F6 (session 20's closure): --help printed only the header's first lines, so the bot's commands never showed.
+test("night-report.mjs --help prints the whole header comment: the bot's commands and the language note", () => {
+  const r = spawnSync(process.execPath, [fileURLToPath(new URL("./night-report.mjs", import.meta.url)), "--help"], { encoding: "utf8" });
+  for (const w of ["/status", "/report", "/stop now", "/inbox <text>", "telegramInbox", "the run's language"]) assert.ok(r.stdout.includes(w), w);
+  assert.doesNotMatch(r.stdout, /^import |^\/\//m, "the comment only, its slashes taken off");
+});
+
+// F7: Windows PowerShell 5's Set-Content -Encoding UTF8 starts the file with a BOM, which hid its first question.
+test("questionLines reads a questions.md that starts with a BOM and has CRLF line ends", () => {
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), "night-questions-"));
+  fs.writeFileSync(path.join(state, "questions.md"), "\uFEFFQ1 · Which name? · picked A · B changes the menu\r\nQ2 · Ship it? · picked yes · no keeps it local\r\nQ3 · half-written");
+  assert.deepEqual(questionLines(state), ["Q1 · Which name? · picked A · B changes the menu", "Q2 · Ship it? · picked yes · no keeps it local"]);
 });

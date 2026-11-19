@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { pointerFile } from "./runs.mjs";
 // A CLAUDE_CONFIG_DIR of the user's own would move every file these tests read or write (claudeHome in config.mjs).
@@ -80,7 +80,9 @@ async function scene(answer, { chatId = 42, notified, env = {}, token = "T", lan
     fs.writeFileSync(file, "setTimeout(() => {}, 60000);\n");
     helper = spawn(process.execPath, [file], { stdio: "ignore", windowsHide: true });
     fs.mkdirSync(path.dirname(pointerFile(root, home)), { recursive: true });
-    fs.writeFileSync(pointerFile(root, home), typeof runner === "string" ? runner : JSON.stringify({ pid: helper.pid, state, finished: false, startedAt: "test" }));
+    // An object patches the pointer (a pid of 0 for a runner that never started, a dead one for a runner gone).
+    fs.writeFileSync(pointerFile(root, home), typeof runner === "string" ? runner
+      : JSON.stringify({ pid: helper.pid, state, finished: false, startedAt: "test", ...(typeof runner === "object" ? runner : {}) }));
   } else helper = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore", windowsHide: true });
   let watcher, code;
   let onExit;
@@ -534,6 +536,51 @@ test("the table's own names answer /stop and /stop now, in the run's language", 
   });
 });
 
+// The answers to stopRun's other outcomes. A watcher whose PATH has no PowerShell cannot check what the runner's process
+// is (unsure); one whose PATH has PowerShell but no taskkill sees the runner outlive the kill (failed), its second answer.
+test("/stop's answers for a runner that never started, one already gone, one it could not check, and one that outlived the kill", async () => {
+  const dead = spawnSync(process.execPath, ["-e", ""]).pid;
+  for (const [pid, reason] of [[0, "its runner never started"], [dead, "its runner was already gone"]]) {
+    await scene(asking("/stop"), { runner: { pid } }, async ({ api, state, home, repo }) => {
+      await until(() => api.sends().length >= 1, 10_000, "the /stop answer");
+      assert.equal(api.sends()[0].body.text, "repo: its runner was not running; marked finished");
+      assert.equal(pointer(repo, home).finished, true);
+      assert.equal(pointer(repo, home).reason, reason);
+      assert.ok(after(state));
+    });
+  }
+  const empty = fs.mkdtempSync(path.join(os.tmpdir(), "ns-nopath-"));
+  await scene(asking("/stop now"), { runner: true, env: { PATH: empty, Path: empty } }, async ({ api, state, home, repo, helper }) => {
+    await until(() => api.sends().length >= 1, 10_000, "the /stop now answer");
+    assert.equal(api.sends()[0].body.text, "⚠️ repo: could not check what the runner's process is, so nothing was killed; it stops after the session in progress");
+    assert.ok(alive(helper.pid));
+    assert.equal(pointer(repo, home).finished, false);
+    assert.ok(after(state));
+  });
+  const ps = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0");
+  await scene(asking("/stop now"), { runner: true, env: { PATH: ps, Path: ps } }, async ({ api, state, home, repo, helper }) => {
+    await until(() => api.sends().length >= 2, 15_000, "the second answer");
+    assert.deepEqual(api.sends().map((s) => s.body.text), ["🛑 repo stops now: the session in progress is killed, and its work stays uncommitted in the tree",
+      "⚠️ repo: the runner outlived the kill; it stops after the session in progress"]);
+    assert.ok(alive(helper.pid));
+    // A runner that lives on keeps its pointer as it was.
+    assert.equal(pointer(repo, home).finished, false);
+    await until(() => /\/stop now: failed, sent, \d+ s after the message/.test(logOf(state)), 5_000, "the watch.log line");
+  });
+});
+
+test("a command addressed to the bot by name (/stop@bot now, /inbox@bot <text>) is that command", async () => {
+  await scene(asking("/stop@demo_bot now"), { runner: true }, async ({ api, helper, exited }) => {
+    await Promise.race([exited, sleep(15_000)]);
+    assert.deepEqual(api.sends().map((s) => s.body.text), ["🛑 repo stops now: the session in progress is killed, and its work stays uncommitted in the tree"]);
+    assert.equal(alive(helper.pid), false);
+  });
+  await scene(asking("/inbox@demo_bot A1: yes"), ON, async ({ api, state }) => {
+    await until(() => api.sends().length >= 1, 10_000, "the /inbox answer");
+    assert.match(inboxOf(state), /^\[[^\]]+ · Telegram\] A1: yes\n$/);
+  });
+});
+
 // /inbox: off until the user's global config holds "telegramInbox": true; read at each command.
 const inboxOf = (state) => (fs.existsSync(path.join(state, "inbox.md")) ? fs.readFileSync(path.join(state, "inbox.md"), "utf8") : null);
 const menu = (api) => api.calls.find((c) => c.method === "setMyCommands").body.commands.map((c) => c.command);
@@ -595,6 +642,25 @@ test("/inbox on: an inbox that cannot be written gets an answer saying nothing w
     assert.match(api.sends()[0].body.text, /^⚠️ repo: the inbox could not be written \(EISDIR[^)]*\); nothing was added$/);
     await until(() => /\/inbox: failed \(EISDIR[^)]*\), sent, \d+ s after the message/.test(logOf(state)), 5_000, "the watch.log line");
     assert.equal(ended(), false);
+  });
+});
+
+// The gate /inbox shares with /stop: only the user's own chat, and nothing sent more than a minute before the watcher
+// started. An unattended run (this scene's run.json has no "attended") takes it as an attended one does.
+test("/inbox from another chat, or from before the watcher's minute of grace, adds nothing; an unattended run takes the rest", async () => {
+  const at = Math.floor(Date.now() / 1000);
+  const updates = { ok: true, result: [
+    { update_id: 1, message: { chat: { id: 7 }, date: at, text: "/inbox from a stranger" } },
+    { update_id: 2, message: { chat: { id: 42 }, date: at - 120, text: "/inbox too old" } },
+    { update_id: 3, message: { chat: { id: 42 }, date: at, text: "/inbox go on" } },
+  ] };
+  await scene((m, b, n) => (m === "getUpdates" && n === 0 ? [200, updates] : m === "sendMessage" ? [200, { ok: true }] : undefined), ON, async ({ api, state }) => {
+    assert.equal(JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8")).attended, undefined);
+    await until(() => api.sends().length >= 1, 10_000, "the /inbox answer");
+    await until(() => api.calls.filter((c) => c.method === "getUpdates").length >= 3, 10_000, "the poll after the commands");
+    await sleep(300);
+    assert.equal(api.sends().length, 1);
+    assert.match(inboxOf(state), /^\[[^\]]+ · Telegram\] go on\n$/);
   });
 });
 
