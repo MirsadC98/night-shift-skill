@@ -8,12 +8,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { claudeHome } from "./config.mjs";
 
 // Every session reads the header on every call; a file over this is a mistake (a pasted log), not rules.
 export const RULES_MAX_BYTES = 8192;
 
 export const ruleFiles = (repo, home = os.homedir()) => ({
-  global: path.join(home, ".claude", "night-shift", "rules.md"),
+  global: path.join(claudeHome(home), "night-shift", "rules.md"),
   project: path.join(repo, ".claude", "night-shift-rules.md"),
 });
 

@@ -19,7 +19,7 @@ It runs a chain of fresh headless sessions (`claude -p`). Each session is like o
 
 ## Install
 
-Copy the `night-shift` folder to `~/.claude/skills/night-shift/`. The guard protects the skill's files at that path from night sessions, so a copy anywhere else is not protected; the commands below use it too.
+Copy the `night-shift` folder to `~/.claude/skills/night-shift/`. The guard protects the skill's files at that path from night sessions, so a copy anywhere else is not protected; the commands below use it too. If you set `CLAUDE_CONFIG_DIR`, Claude Code keeps its folder there instead, and so does this skill: read that folder wherever this page says `~/.claude` (the runner, the guard and the report follow it, and the guard protects `~/.claude` as well). `status`, `stop` and `wait` find a run only from a shell that has the variable too.
 
 ```bash
 git clone https://github.com/<you>/<this-repo>.git
@@ -40,7 +40,7 @@ node ~/.claude/skills/night-shift/scripts/night-chain.mjs stop   --repo <dir> [-
 node ~/.claude/skills/night-shift/scripts/night-chain.mjs reload --repo <dir>
 ```
 
-`start` also takes `--until HH:MM`, `--max-sessions <n>`, `--model <m>`, `--effort <level>`, `--fable-ceiling <share>`, `--fable-sessions <n>`, `--mode opus|fable|mythos`, `--lang <code>`, `--max-wait-hours <h>` (the longest wait for a usage limit or an outage, default 6; a value that is not a positive number stops `start`), `--state <dir>` (continue in an earlier run's folder) and `--window` (a visible console; closing it stops the chain). `start` without a prompt goes on from a session a limit or an error cut off, kept in `<state>/resume.json`.
+`start` also takes `--until HH:MM`, `--max-sessions <n>` (the sessions this `start` runs, counted from the first, also in an earlier run's folder), `--session-hours <h>`, `--model <m>`, `--effort <level>`, `--fable-ceiling <share>`, `--fable-sessions <n>`, `--mode opus|fable|mythos`, `--lang <code>`, `--max-wait-hours <h>` (the longest wait for a usage limit or an outage, default 6), `--state <dir>` (continue in an earlier run's folder) and `--window` (a visible console; closing it stops the chain). A value of the wrong shape for any of them stops `start` and names the flag; a flag with a config key below takes the values that key takes. `start` without a prompt goes on from a session a limit or an error cut off, kept in `<state>/resume.json`.
 
 While a chain runs, write new work or changed rules into `<state>/inbox.md`. The next session reads that file first.
 

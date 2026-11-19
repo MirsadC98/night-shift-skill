@@ -14,8 +14,8 @@
 //    session it cut off is resumed with --resume once the limit resets. start without
 //    a prompt also resumes such a session, kept in <state>/resume.json, and a session the
 //    last runner left unfinished (a power cut, a crash), whose own uncommitted work it lets
-//    through. --state goes on
-//    in an earlier run's folder, from its next-prompt.md and session count. Every session runs
+//    through. --state goes on in an earlier run's folder, from its next-prompt.md and session
+//    count; --max-sessions counts the sessions this start runs. Every session runs
 //    --model opus (or --model, "model" in .claude/night-shift.json) at xhigh (--effort, "effort"),
 //    its subagents on Sonnet at medium (high when a call asks) and Haiku at high, whatever the user's own settings say (effort.mjs); a
 //    prompt that opens with "EFFORT: high|xhigh|max" runs that one session at that level, and one that
@@ -54,7 +54,7 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { buildReport, userWaits, stateLang } from "./night-report.mjs";
 import { strings, langOf, loadLang } from "./lang/index.mjs";
-import { mergedConfig, isLangCode, MODES, stateDirProblem, tempRoot, isMain } from "./config.mjs";
+import { mergedConfig, isLangCode, MODES, CONFIG_KEYS, stateDirProblem, tempRoot, isMain, claudeHome } from "./config.mjs";
 import { sessionOutcome, windowSpan } from "./session-outcome.mjs";
 import { ruleFiles, readRuleFile, rulesBlock } from "./rules.mjs";
 import { MAIN_MODEL, SUB_MODEL, MAIN_EFFORT, subEffortText, MAX_NOTE, nightModelSettings, sessionPlan, promptDirectives,
@@ -84,7 +84,7 @@ const today = () => now().slice(0, 10).replace(/-/g, "");
 const read = (f) => (fs.existsSync(f) ? fs.readFileSync(f, "utf8") : "");
 const parseOr = (t, d) => { try { return JSON.parse(t) || d; } catch { return d; } };
 // The settings files below the runner's layer: the user's, the project's and its local one.
-const lowerSettings = (repo) => [path.join(os.homedir(), ".claude", "settings.json"), path.join(repo, ".claude", "settings.json"),
+const lowerSettings = (repo) => [path.join(claudeHome(), "settings.json"), path.join(repo, ".claude", "settings.json"),
   path.join(repo, ".claude", "settings.local.json")].map((f) => parseOr(read(f), {}));
 // CLAUDE_CODE_EFFORT_LEVEL would set every level, the subagents' included.
 const withoutEffortEnv = (env) => { const { CLAUDE_CODE_EFFORT_LEVEL, ...rest } = env; return rest; };
@@ -132,7 +132,7 @@ const ruleStatus = (repo) => Object.values(ruleFiles(repo)).flatMap((file) => {
 const ruleLines = (found) => (found.length ? found : [{ none: true }])
   .map((f) => `  rules:  ${f.none ? "none" : f.error ? `${f.file} ${f.error}` : `${f.file} (${f.bytes} bytes)`}`);
 const slug = (repo) => `${path.basename(repo)}-${crypto.createHash("sha1").update(repo.toLowerCase()).digest("hex").slice(0, 8)}`;
-const pointerFile = (repo) => path.join(os.homedir(), ".claude", "night-shift", "runs", `${slug(repo)}.json`);
+const pointerFile = (repo) => path.join(claudeHome(), "night-shift", "runs", `${slug(repo)}.json`);
 const readPointer = (repo) => { const t = read(pointerFile(repo)); return t ? JSON.parse(t) : null; };
 const writePointer = (repo, data) => {
   fs.mkdirSync(path.dirname(pointerFile(repo)), { recursive: true });
@@ -151,14 +151,24 @@ function findClaude() {
   return found;
 }
 
+// --until's clock time, 0:00 to 23:59. Before 2026-11-19 "7" passed (its minutes NaN), and the chain had no end time.
+const UNTIL = /^([01]?\d|2[0-3]):([0-5]\d)$/;
 function deadline(hhmm) {
-  const [h, m] = String(hhmm).split(":").map(Number);
-  if (Number.isNaN(h) || Number.isNaN(m)) fail(`--until wants HH:MM, got ${hhmm}`);
+  const t = UNTIL.exec(String(hhmm));
+  if (!t) fail(`--until wants a time HH:MM, such as 07:30 (got ${hhmm})`);
+  const [h, m] = [Number(t[1]), Number(t[2])];
   const d = new Date();
   d.setHours(h, m, 0, 0);
   if (d <= new Date()) d.setDate(d.getDate() + 1);
   return d.getTime();
 }
+
+// The session a runner runs first in this state folder: one a limit or a stop cut off goes on, else the one after the last.
+const firstSession = (state) => Number(parseOr(read(path.join(state, "resume.json")), null)?.nn) ||
+  fs.readdirSync(path.join(state, "prompts")).filter((f) => /^\d+\.md$/.test(f)).length + 1;
+// The last session --max-sessions lets run: start stores it (lastSession); a run.json from before 2026-11-19 has only
+// maxSessions, which was that number.
+const lastSessionOf = (run) => run.lastSession ?? run.maxSessions ?? null;
 
 // The session chain.log shows as started and never ended, with its conversation id.
 export function cutOffSession(state) {
@@ -237,6 +247,21 @@ async function start(opt) {
   if (waitArg !== undefined && !(typeof waitArg === "string" && Number.isFinite(Number(waitArg)) && Number(waitArg) > 0)) {
     fail(`--max-wait-hours must be a positive number of hours (got ${waitArg === true ? "no value" : waitArg})`);
   }
+  // The same for the other limits, and a flag that has a config key gets that key's check: before 2026-11-19 a
+  // wrong --max-sessions meant no limit, a wrong --session-hours ended each session at once, and a wrong
+  // --fable-ceiling became 0.6 over the config's value.
+  const got = (v) => (v === true ? "no value" : v);
+  const num = (v) => (typeof v === "string" && v.trim() ? Number(v) : NaN);
+  if (opt.until !== undefined && !UNTIL.test(String(opt.until))) fail(`--until wants a time HH:MM, such as 07:30 (got ${got(opt.until)})`);
+  if (opt["max-sessions"] !== undefined && !/^0*[1-9]\d*$/.test(String(opt["max-sessions"]))) fail(`--max-sessions must be a whole number above 0 (got ${got(opt["max-sessions"])})`);
+  const hoursArg = opt["session-hours"];
+  // At most 500: a timer over 2^31 ms (about 596 h) fires at once.
+  if (hoursArg !== undefined && !(num(hoursArg) > 0 && num(hoursArg) <= 500)) fail(`--session-hours must be a positive number of hours, at most 500 (got ${got(hoursArg)})`);
+  for (const [flag, key] of [["effort", "effort"], ["fable-ceiling", "fableCeiling"], ["fable-sessions", "fableSessions"]]) {
+    const v = opt[flag];
+    const bad = v !== undefined && CONFIG_KEYS[key](key === "effort" ? v : num(v));
+    if (bad) fail(`--${flag} ${bad} (got ${got(v)})`);
+  }
   // A language is never guessed from "PT" or "pt-BR": a night in English that was asked for in another language is worse than a refusal.
   if (opt.lang !== undefined && !isLangCode(opt.lang)) fail(`--lang must be a language code in lowercase, such as en or pt-br (got ${opt.lang === true ? "no value" : opt.lang})`);
   if (opt.mode !== undefined && !MODES.includes(opt.mode)) fail(`--mode must be one of ${MODES.join(", ")} (got ${opt.mode === true ? "no value" : opt.mode})`);
@@ -286,13 +311,16 @@ async function start(opt) {
   // The task runs with the user's stored environment, not this shell's: keep
   // this PATH, minus fnm's per-shell links, with the real node directory first.
   const sessionPath = [path.dirname(NODE), ...String(process.env.PATH || "").split(path.delimiter).filter((p) => p && !/fnm_multishells/i.test(p))].join(path.delimiter);
+  // --max-sessions counts the sessions this start runs, a resumed one first, in an earlier run's folder too.
+  const maxSessions = opt["max-sessions"] !== undefined ? Number(opt["max-sessions"]) : null;
   const run = {
     repo,
     state,
     until: opt.until || null,
     deadline: opt.until ? deadline(opt.until) : null,
-    maxSessions: opt["max-sessions"] ? Number(opt["max-sessions"]) : null,
-    sessionHours: Number(opt["session-hours"] || 4),
+    maxSessions,
+    lastSession: maxSessions ? firstSession(state) + maxSessions - 1 : null,
+    sessionHours: hoursArg !== undefined ? Number(hoursArg) : 4,
     mode: picked.mode,
     model: picked.model,
     opusModel: picked.opusModel,
@@ -310,6 +338,9 @@ async function start(opt) {
     report: cfg.report || "NIGHT_RUNS.md",
     path: sessionPath,
     window: Boolean(opt.window),
+    // The task runs with the user's stored environment, which may lack this shell's CLAUDE_CONFIG_DIR: the runner
+    // sets it from here, so it, its sessions and the guard use the Claude folder this start used (claudeHome).
+    ...(process.env.CLAUDE_CONFIG_DIR ? { claudeConfigDir: claudeHome() } : {}),
     startedAt: now(),
   };
   fs.writeFileSync(path.join(state, "run.json"), JSON.stringify(run, null, 2));
@@ -324,7 +355,7 @@ async function start(opt) {
   if (cut) console.log(`  resumes session ${cut.nn} (${cut.sessionId}), which the last runner left unfinished`);
   console.log(`  state:  ${state}`);
   console.log(modelLine(run));
-  console.log(`  until:  ${run.until ? `${run.until} (no new session after that)` : "the work is done (STOP)"}${run.maxSessions ? `, at most ${run.maxSessions} sessions` : ""}`);
+  console.log(`  until:  ${run.until ? `${run.until} (no new session after that)` : "the work is done (STOP)"}${run.maxSessions ? `, at most ${run.maxSessions} sessions, the last of them session ${String(run.lastSession).padStart(2, "0")}` : ""}`);
   for (const l of ruleLines(ruleStatus(repo))) console.log(l);
   console.log(`  status: node "${SELF}" status --repo "${repo}"`);
   console.log(`  stop:   node "${SELF}" stop --repo "${repo}" [--now]`);
@@ -341,6 +372,8 @@ async function runChain(opt) {
   const premiumMode = isPremium(run.mode);
   const main = premiumMode ? run.mode : null;
   const { repo } = run;
+  // The Claude folder start used (claudeHome), for this runner, its sessions, their guard and the watcher.
+  if (run.claudeConfigDir && !process.env.CLAUDE_CONFIG_DIR) process.env.CLAUDE_CONFIG_DIR = run.claudeConfigDir;
   const logFile = path.join(state, "chain.log");
   const log = (line) => { const l = `[${now()}] ${line}`; console.log(l); fs.appendFileSync(logFile, l + "\n"); };
   const next = path.join(state, "next-prompt.md");
@@ -461,8 +494,8 @@ async function runChain(opt) {
   // the limit resets; resume.json keeps it across a restarted chain too.
   const resumeFile = path.join(state, "resume.json");
   const pendingResume = () => parseOr(read(resumeFile), null);
-  let session = Number(pendingResume()?.nn) ||
-    fs.readdirSync(path.join(state, "prompts")).filter((f) => /^\d+\.md$/.test(f)).length + 1;
+  let session = firstSession(state);
+  const lastAllowed = lastSessionOf(run);
   let failures = 0;
   // A run of API or network errors: when it began, how many tries it took, and how many resumes in
   // a row ended without a turn (a conversation that cannot be resumed).
@@ -506,13 +539,13 @@ async function runChain(opt) {
     while (Date.now() < until && !fs.existsSync(stopFile)) await new Promise((r) => setTimeout(r, tick));
   };
 
-  log(`chain starts in ${repo}${reloaded ? " (runner reloaded)" : ""}, until ${run.until || "the work is done"}, from session ${session}${run.maxSessions ? ` to ${run.maxSessions}` : ""}, ${run.model || MAIN_MODEL} at ${run.effort || "xhigh"}, subagents ${SUB_MODEL} (${subEffortText()}), ${premiumMode
+  log(`chain starts in ${repo}${reloaded ? " (runner reloaded)" : ""}, until ${run.until || "the work is done"}, from session ${session}${lastAllowed ? ` to ${lastAllowed}` : ""}, ${run.model || MAIN_MODEL} at ${run.effort || "xhigh"}, subagents ${SUB_MODEL} (${subEffortText()}), ${premiumMode
     ? `${modelName(main)} as the main model under ${pct(fableCeiling)} of its allowance, else ${opusModel} at ${MAIN_EFFORT.opus}`
     : `Fable or Mythos on request under ${pct(fableCeiling)} of their shared allowance (${fableSessions} sessions while unknown)`}`);
   // The user's language table, loaded once by this runner; one that is gone or does not load reads English (lang/index.mjs).
   const langLoad = await loadLang(langOf(run));
   if (langLoad.error) log(`language table: ${langLoad.error}; what the user reads is in English`);
-  while (!run.maxSessions || session <= run.maxSessions) {
+  while (!lastAllowed || session <= lastAllowed) {
     if (fs.existsSync(stopFile)) finish("stop requested");
     if (fs.existsSync(reloadFile)) handOver(); // returns only when the hand-over failed
     const prompt = read(next).trim();
@@ -674,7 +707,7 @@ async function runChain(opt) {
   // The last allowed session may have written a STOP handover: that reason ends the chain, not the cap.
   const last = sessionPlan(read(next).trim(), run).body;
   if (isStop(last)) finish(last.split("\n")[0]);
-  finish(`reached ${run.maxSessions} sessions`);
+  finish(run.lastSession ? `reached ${run.maxSessions} sessions (--max-sessions; the last was session ${String(lastAllowed).padStart(2, "0")})` : `reached ${run.maxSessions} sessions`);
   } catch (e) { die(e); }
 }
 
@@ -693,7 +726,7 @@ function runSession(run, session, plan, nn, resume, rules = "") {
     `(commit, night report, ${path.join(run.state, "next-prompt.md")}).`,
     ...(rules ? ["", rules] : []),
   ].join("\n") : [
-    `Night shift (night-shift), session ${session}${run.maxSessions ? `/${run.maxSessions}` : ""}, ${now()}.`,
+    `Night shift (night-shift), session ${session}${lastSessionOf(run) ? `/${lastSessionOf(run)}` : ""}, ${now()}.`,
     `The user is away ${run.until ? `until ${run.until}` : "until the chain ends"} and cannot answer any question.`,
     `First invoke the night-shift skill and follow its "Inside a night session" part.`,
     `The user reads ${strings(langOf(run)).name}: write the night report's own text and its Waits-for-you items in that language, and keep the report's fixed words as the skill gives them.`,

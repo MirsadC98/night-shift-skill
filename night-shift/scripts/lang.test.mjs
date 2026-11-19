@@ -7,6 +7,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { strings, langOf, loadLang, langFile } from "./lang/index.mjs";
 import en from "./lang/en.mjs";
+// A CLAUDE_CONFIG_DIR of the user's own would move every file these tests read or write (claudeHome in config.mjs).
+delete process.env.CLAUDE_CONFIG_DIR;
 
 const XX = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "lang-xx.mjs");
 const throwaway = () => fs.mkdtempSync(path.join(os.tmpdir(), "ns-lang-"));

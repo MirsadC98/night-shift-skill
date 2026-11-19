@@ -12,7 +12,7 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync, realpathSync, mkdtempSync, mkdirSync, symlinkSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { norm, readProjectConfig, stateDirProblem, tempRoot, isMain } from "./config.mjs";
 
 const under = (p, root) => root && (p === root || p.startsWith(root + "/"));
@@ -27,11 +27,16 @@ const RUNNER_FILES = /^(night-settings\.json|run\.json|launch\.cmd|resume\.json|
 // The home as the file system resolves it: on Windows an MSYS drive (Git Bash's HOME, /c/Users/u) is a drive path.
 // Not norm(): it lowercases, and a case-sensitive file system resolves a path only as typed.
 const fsHome = (home) => (process.platform === "win32" ? String(home).replace(/^\/([a-zA-Z])(?=\/)/, "$1:") : String(home));
-function claudeSpellings(home) {
+// A folder named by CLAUDE_CONFIG_DIR is where Claude Code keeps them instead: one more spelling (with its own
+// link's target), so it is protected as ~/.claude is, and ~/.claude stays protected too.
+function claudeSpellings(home, configDir) {
   const c = `${norm(home)}/.claude`;
-  let real = "";
-  try { real = norm(realpathSync.native(join(fsHome(home), ".claude"))); } catch { /* no such folder */ }
-  return real && real !== c ? [c, real] : [c];
+  const out = [c];
+  const add = (p) => { if (p && !out.includes(p)) out.push(p); };
+  const real = (dir) => { try { add(norm(realpathSync.native(dir))); } catch { /* no such folder */ } };
+  real(join(fsHome(home), ".claude"));
+  if (configDir) { add(norm(resolve(configDir))); real(resolve(configDir)); }
+  return out;
 }
 // p, and p under each other spelling of ~/.claude when it lies under one of them.
 const spellings = (p, r) => {
@@ -45,7 +50,7 @@ function roots(env) {
   const repo = norm(env.NIGHT_SHIFT_REPO || "");
   // A state folder that is a drive, the home folder or the like (a typo in stateDir) would make
   // all of it writable: it adds nothing, and the runner refuses to start with one.
-  const state = env.NIGHT_SHIFT_STATE && !stateDirProblem(env.NIGHT_SHIFT_STATE, { home, repo, temp: tempRoot() }) ? norm(env.NIGHT_SHIFT_STATE) : "";
+  const state = env.NIGHT_SHIFT_STATE && !stateDirProblem(env.NIGHT_SHIFT_STATE, { home, repo, temp: tempRoot(), env }) ? norm(env.NIGHT_SHIFT_STATE) : "";
   return {
     repo,
     state,
@@ -57,7 +62,7 @@ function roots(env) {
       `${home}/appdata/local/temp`,
     ].filter(Boolean),
     home,
-    claude: claudeSpellings(env.USERPROFILE || env.HOME || homedir()),
+    claude: claudeSpellings(env.USERPROFILE || env.HOME || homedir(), env.CLAUDE_CONFIG_DIR),
   };
 }
 

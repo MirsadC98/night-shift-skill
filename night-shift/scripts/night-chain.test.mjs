@@ -9,6 +9,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+// A CLAUDE_CONFIG_DIR of the user's own would move every file these tests read or write (claudeHome in config.mjs).
+delete process.env.CLAUDE_CONFIG_DIR;
 
 const CHAIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "night-chain.mjs");
 // A made-up language table, "xx", copied into a throwaway home as the user's own (lang/index.mjs).
@@ -1143,6 +1145,11 @@ test("report and job card: the progress counts only this run's jobs, from the re
   // Live, from the real clock: one job left at the mean of 45 min, which late in the evening
   // falls on the next day ("tomorrow ~00:15"; telegram-cards.test.mjs pins the label with a fixed clock).
   assert.match(buildReport(state, { pid: process.pid }).plain, /Running · job 07\/4 · 2\/4 jobs done · estimated end (?:tomorrow )?~\d\d:\d\d · /);
+  // A run.json since --max-sessions counts from the start: the line names the last session, not the count.
+  const counted = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+  fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...counted, maxSessions: 2, lastSession: 8 }));
+  assert.match(buildReport(state, { pid: process.pid }).plain, /Running · job 07\/8 · /);
+  fs.writeFileSync(path.join(state, "run.json"), JSON.stringify(counted));
   // As at the job's end: two left at the mean of 45 min from 14:13.
   assert.match(sessionMessage(state, "06", process.pid).text, /\n📊 2\/4 jobs done · estimated end ~15:45\n/);
 });
@@ -1693,8 +1700,8 @@ function pointerCase(ptrOf) {
   const file = path.join(home, ".claude", "night-shift", "runs", `${slug}.json`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const write = (p) => fs.writeFileSync(file, JSON.stringify({ state, task: "x", finished: false, ...p }));
-  const run = (cmd, extra = []) => spawnSync(process.execPath, [CHAIN, cmd, "--repo", repo, ...extra],
-    { env: { ...env, NIGHT_SHIFT_LAUNCH: "fail", NIGHT_SHIFT_CLAUDE: process.execPath, TEMP: root, TMP: root }, encoding: "utf8", cwd: root });
+  const run = (cmd, extra = [], more = {}) => spawnSync(process.execPath, [CHAIN, cmd, "--repo", repo, ...extra],
+    { env: { ...env, NIGHT_SHIFT_LAUNCH: "fail", NIGHT_SHIFT_CLAUDE: process.execPath, TEMP: root, TMP: root, ...more }, encoding: "utf8", cwd: root });
   return { write, run, state, repo, home, read: () => JSON.parse(fs.readFileSync(file, "utf8")) };
 }
 const stamped = (ms) => new Date(ms).toLocaleString("sv-SE");
@@ -2117,4 +2124,127 @@ test("start prints the rule files in force: each with its bytes, or none", async
   assert.match(some, /^ {2}until: .*\n {2}rules: /m, "after the until line");
   assert.match(some, /^ {2}state: .*\n {2}model: {2}Opus at xhigh \(mode opus\); MODEL: fable or MODEL: mythos runs one piece/m, "after the state line");
   assert.match(await startPrints(() => {}), / {2}rules: {2}none/);
+});
+
+// P6, P14: a flag's value of the wrong shape stops start before anything is scheduled, as --max-wait-hours does;
+// one of the right shape is kept as typed (a share as a ratio).
+const startRun = (extra, cfg) => {
+  const c = pointerCase();
+  if (cfg) { fs.mkdirSync(path.join(c.repo, ".claude"), { recursive: true }); fs.writeFileSync(path.join(c.repo, ".claude", "night-shift.json"), JSON.stringify(cfg)); }
+  const r = c.run("start", ["--state", c.state, "--prompt", "x", "--allow-dirty", ...extra]);
+  return { ...r, c, run: r.stderr.includes("launch refused (test)") ? JSON.parse(fs.readFileSync(path.join(c.state, "run.json"), "utf8")) : undefined };
+};
+
+test("start refuses an --until, --max-sessions or --session-hours of the wrong shape", () => {
+  for (const [extra, re] of [
+    [["--until", "7"], /--until wants a time HH:MM/], [["--until", "25:00"], /--until wants a time HH:MM/], [["--until", "7:60"], /--until wants a time HH:MM/],
+    [["--until"], /--until wants a time HH:MM.*no value/], [["--until", "seven"], /--until wants a time HH:MM/],
+    [["--max-sessions", "abc"], /--max-sessions must be a whole number above 0/], [["--max-sessions"], /--max-sessions .*no value/],
+    [["--max-sessions", "0"], /--max-sessions must be/], [["--max-sessions", "-1"], /--max-sessions must be/], [["--max-sessions", "2.5"], /--max-sessions must be/],
+    [["--session-hours", "abc"], /--session-hours must be a positive number of hours/], [["--session-hours", "0"], /--session-hours must be/],
+    [["--session-hours", "1000"], /--session-hours .*at most 500/], [["--session-hours", "Infinity"], /--session-hours must be/],
+  ]) {
+    const r = startRun(extra);
+    assert.equal(r.status, 1, extra.join(" "));
+    assert.match(r.stderr, re, extra.join(" "));
+    assert.doesNotMatch(r.stderr, /launch refused/, extra.join(" "));
+  }
+  const ok = startRun(["--until", "7:05", "--max-sessions", "3", "--session-hours", "2.5"]).run;
+  assert.equal(ok.until, "7:05");
+  assert.equal(typeof ok.deadline, "number");
+  assert.equal(new Date(ok.deadline).getHours() * 60 + new Date(ok.deadline).getMinutes(), 7 * 60 + 5);
+  assert.deepEqual([ok.maxSessions, ok.sessionHours], [3, 2.5]);
+  assert.equal(startRun(["--until", "23:59"]).run.until, "23:59");
+  assert.equal(startRun(["--max-sessions", "03"]).run.maxSessions, 3, "a leading zero, as before");
+});
+
+test("start refuses an --effort, --fable-ceiling or --fable-sessions its config key would refuse, even with a good one in the config", () => {
+  for (const [extra, re] of [
+    [["--effort", "turbo"], /--effort must be one of low, medium, high, xhigh, max \(got turbo\)/], [["--effort"], /--effort must be one of .*no value/],
+    [["--fable-ceiling", "abc"], /--fable-ceiling must be a number above 0 and at most 100/], [["--fable-ceiling"], /--fable-ceiling .*no value/],
+    [["--fable-ceiling", "0"], /--fable-ceiling must be/], [["--fable-ceiling", "101"], /--fable-ceiling must be/], [["--fable-ceiling", "-0.5"], /--fable-ceiling must be/],
+    [["--fable-sessions", "two"], /--fable-sessions must be a whole number, 0 or more/], [["--fable-sessions", "1.5"], /--fable-sessions must be/],
+    [["--fable-sessions", "-1"], /--fable-sessions must be/],
+  ]) {
+    const r = startRun(extra, { effort: "high", fableCeiling: 0.5, fableSessions: 1 });
+    assert.equal(r.status, 1, extra.join(" "));
+    assert.match(r.stderr, re, extra.join(" "));
+    assert.doesNotMatch(r.stderr, /launch refused/, extra.join(" "));
+  }
+  const ok = startRun(["--effort", "max", "--fable-ceiling", "40", "--fable-sessions", "0"], { effort: "high", fableCeiling: 0.5 }).run;
+  assert.deepEqual([ok.effort, ok.fableCeiling, ok.fableSessions], ["max", 0.4, 0]);
+  const cfg = startRun([], { effort: "high", fableCeiling: 0.5, fableSessions: 1 }).run;
+  assert.deepEqual([cfg.effort, cfg.fableCeiling, cfg.fableSessions], ["high", 0.5, 1]);
+  assert.equal(startRun(["--fable-ceiling", "0.25"]).run.fableCeiling, 0.25);
+});
+
+// P7: --max-sessions counts the sessions this start runs, in an earlier run's folder too; run.json keeps the count and the last number.
+test("start counts --max-sessions from the session it runs first, a resumed one included", () => {
+  const c = pointerCase();
+  for (const nn of ["01", "02", "03"]) fs.writeFileSync(path.join(c.state, "prompts", `${nn}.md`), "old");
+  c.run("start", ["--state", c.state, "--prompt", "x", "--allow-dirty", "--max-sessions", "2"]);
+  const fresh = JSON.parse(fs.readFileSync(path.join(c.state, "run.json"), "utf8"));
+  assert.deepEqual([fresh.maxSessions, fresh.lastSession], [2, 5]);
+  fs.writeFileSync(path.join(c.state, "resume.json"), JSON.stringify({ nn: "03", sessionId: "00000000-0000-4000-8000-000000000003", why: "limit" }));
+  c.run("start", ["--state", c.state, "--allow-dirty", "--max-sessions", "2"]);
+  const resumed = JSON.parse(fs.readFileSync(path.join(c.state, "run.json"), "utf8"));
+  assert.deepEqual([resumed.maxSessions, resumed.lastSession], [2, 4]);
+  c.run("start", ["--state", c.state, "--prompt", "x", "--allow-dirty"]);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(c.state, "run.json"), "utf8")).lastSession, null);
+});
+
+test("a run with lastSession runs its count from the folder's next session and says so in the header and the end line", async () => {
+  const { state, env, root } = setup();
+  const fake = path.join(root, "fake-count.mjs");
+  fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path";
+const st = process.env.NIGHT_SHIFT_STATE, n = process.env.NIGHT_SHIFT_SESSION;
+let input = ""; for await (const c of process.stdin) input += c;
+fs.appendFileSync(path.join(st, "headers.txt"), input.split("\\n")[0] + "\\n");
+fs.writeFileSync(path.join(st, "next-prompt.md"), "piece after " + n);
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-" + n, result: "ok" }));
+`);
+  fs.writeFileSync(path.join(state, "prompts", "01.md"), "an earlier run's piece");
+  const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+  fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake, maxSessions: 2, lastSession: 3 }));
+  const { code } = await runOnce(["--state", state, "--headless"], env, root);
+  const log = fs.readFileSync(path.join(state, "chain.log"), "utf8");
+  assert.equal(code, 0, log);
+  assert.match(log, /from session 2 to 3,/);
+  assert.match(log, /chain ends: reached 2 sessions \(--max-sessions; the last was session 03\)/);
+  const headers = fs.readFileSync(path.join(state, "headers.txt"), "utf8");
+  assert.match(headers, /^Night shift \(night-shift\), session 2\/3, .*\nNight shift \(night-shift\), session 3\/3, /);
+  assert.ok(!fs.existsSync(path.join(state, "prompts", "04.md")));
+});
+
+// U16: start keeps the user's CLAUDE_CONFIG_DIR in run.json, and the runner (started by Task Scheduler with the user's
+// stored environment, which may lack it) gives it to its sessions and keeps its pointer there.
+test("CLAUDE_CONFIG_DIR: start keeps it, the runner and its sessions use it, and status finds the pointer there", async () => {
+  const c = pointerCase();
+  const cfg = path.join(path.dirname(c.home), "claude-config");
+  c.run("start", ["--state", c.state, "--prompt", "x", "--allow-dirty"], { CLAUDE_CONFIG_DIR: cfg });
+  assert.equal(JSON.parse(fs.readFileSync(path.join(c.state, "run.json"), "utf8")).claudeConfigDir, path.resolve(cfg));
+  c.run("start", ["--state", c.state, "--prompt", "x", "--allow-dirty"]);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(c.state, "run.json"), "utf8")).claudeConfigDir, undefined, "only when it is set");
+  // The runner, started without the variable, from a run.json that holds it.
+  const { state, env, root, repo, home } = setup();
+  const conf = path.join(root, "claude-config");
+  const fake = path.join(root, "fake-config.mjs");
+  fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path";
+const st = process.env.NIGHT_SHIFT_STATE;
+for await (const c of process.stdin);
+fs.writeFileSync(path.join(st, "config-dir.txt"), process.env.CLAUDE_CONFIG_DIR || "unset");
+fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done");
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-1", result: "ok" }));
+`);
+  const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+  fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake, maxSessions: null, claudeConfigDir: conf }));
+  const { code } = await runOnce(["--state", state, "--headless"], env, root);
+  assert.equal(code, 0, fs.readFileSync(path.join(state, "chain.log"), "utf8"));
+  assert.equal(fs.readFileSync(path.join(state, "config-dir.txt"), "utf8"), conf);
+  assert.equal(fs.readdirSync(path.join(conf, "night-shift", "runs")).length, 1, "the pointer sits in the configured folder");
+  assert.ok(!fs.existsSync(path.join(home, ".claude", "night-shift", "runs")), "and not in ~/.claude");
+  // status, given the variable, finds that pointer; without it, it finds none.
+  const status = (more) => spawnSync(process.execPath, [CHAIN, "status", "--repo", repo], { env: { ...env, ...more }, encoding: "utf8", cwd: root }).stdout;
+  assert.doesNotMatch(status({ CLAUDE_CONFIG_DIR: conf }), /no night-shift run recorded/);
+  assert.match(status({}), /no night-shift run recorded/);
 });

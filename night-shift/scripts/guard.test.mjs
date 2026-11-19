@@ -1025,3 +1025,30 @@ test("a linked home known only by an MSYS HOME (no USERPROFILE) still knows the 
     assert.equal(bash(`echo x > "${t}/notes.md"`, e), null);
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
+
+// U16: with CLAUDE_CONFIG_DIR set, Claude Code keeps its settings, skills and the user's night-shift folder there.
+test("a folder named by CLAUDE_CONFIG_DIR is protected as ~/.claude is, also by its link's target, and ~/.claude stays protected", () => {
+  const e = { ...env, CLAUDE_CONFIG_DIR: "C:/temp/claude-config" };
+  const write = (file_path, en = e) => decide({ tool_name: "Write", tool_input: { file_path } }, en);
+  for (const [c, why] of [["echo x > C:/temp/claude-config/settings.json", /Claude settings/], ["echo x > C:/temp/claude-config/CLAUDE.md", /global CLAUDE\.md/],
+    ["cp a.mjs C:/temp/claude-config/skills/night-shift/scripts/guard.mjs", /night-shift skill/], ["echo x > C:/temp/claude-config/night-shift/rules.md", /night-shift settings/],
+    ["rm -rf C:/temp/claude-config/night-shift", /night-shift settings/], ["echo x > C:/Users/u/.claude/settings.json", /Claude settings/]])
+    assert.match(bash(c, e) ?? "", why, c);
+  assert.match(write("C:/temp/claude-config/skills/night-shift/SKILL.md") ?? "", /night-shift skill/);
+  assert.equal(write("C:/temp/claude-config/notes.md"), null, "the rest of a folder in temp stays writable");
+  // Without the variable that folder is only a folder in temp.
+  assert.equal(write("C:/temp/claude-config/CLAUDE.md", env), null);
+  // A state folder inside that folder is no writable root (stateDirProblem reads the guard's own env).
+  const inCfg = { ...env, CLAUDE_CONFIG_DIR: "D:/claude-config", NIGHT_SHIFT_STATE: "D:/claude-config/night" };
+  assert.match(write("D:/claude-config/night/notes.md", inCfg) ?? "", /writes are limited/);
+  assert.equal(write("D:/claude-config/night/notes.md", { ...inCfg, CLAUDE_CONFIG_DIR: undefined }), null);
+  const base = mkdtempSync(join(tempRoot(), "night-config-dir-"));
+  const target = join(base, "real-config"), link = join(base, "config-link");
+  mkdirSync(target);
+  symlinkSync(target, link, "junction");
+  try {
+    const t = target.replace(/\\/g, "/");
+    assert.match(bash(`echo x > "${t}/settings.json"`, { ...env, CLAUDE_CONFIG_DIR: link }) ?? "", /Claude settings/);
+    assert.equal(bash(`echo x > "${t}/notes.md"`, { ...env, CLAUDE_CONFIG_DIR: link }), null);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});

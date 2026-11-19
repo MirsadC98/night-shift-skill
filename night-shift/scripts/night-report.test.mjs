@@ -6,6 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { buildReport, sessionMessage, chainMessage } from "./night-report.mjs";
 import { reportSection } from "./telegram-cards.mjs";
+// A CLAUDE_CONFIG_DIR of the user's own would move every file these tests read or write (claudeHome in config.mjs).
+delete process.env.CLAUDE_CONFIG_DIR;
 
 const FIXTURE = new URL("./fixtures/session-guard-text-2026-11-19.jsonl", import.meta.url);
 const line = (j) => JSON.stringify(j);
@@ -70,6 +72,19 @@ test("a model with dollars in the totals but no rows in the transcripts keeps it
   assert.match(plain, /main opus 5\.5\s+1 call\s+\$1\.20/);
   // the night total is the sessions' own total
   assert.match(plain.split("Night total")[1] ?? "", /total \$1\.50/);
+});
+
+// U16: the transcripts sit in the Claude folder the run used; start keeps it in run.json when CLAUDE_CONFIG_DIR is set.
+test("the main rows come from the transcript in run.json's Claude folder, read from a shell without the variable", () => {
+  const call = (id) => line({ type: "assistant", message: { id, model: "claude-opus-5-5", role: "assistant", content: [{ type: "text", text: "ok" }], usage: { input_tokens: 10, output_tokens: 7 } } });
+  const state = finished([call("msg_a"), success({ "claude-opus-5-5": used(20, 14, 1) }, 1)]);
+  assert.match(buildReport(state, { focus: "all", pid: 0 }).plain, /main opus 5\.5\s+1 call\s/, "the stream, with no transcript found");
+  const cfg = path.join(path.dirname(state), "claude-config");
+  fs.mkdirSync(path.join(cfg, "projects", "demo-app"), { recursive: true });
+  fs.writeFileSync(path.join(cfg, "projects", "demo-app", `${SID}.jsonl`), [call("msg_a"), call("msg_b"), ""].join("\n"));
+  const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+  fs.writeFileSync(path.join(state, "run.json"), line({ ...run, claudeConfigDir: cfg }));
+  assert.match(buildReport(state, { focus: "all", pid: 0 }).plain, /main opus 5\.5\s+2 calls\s/);
 });
 
 test("two keys of one model in the totals (the plain id and its [1m] form) add up, on a row of its own too", () => {

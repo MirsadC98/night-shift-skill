@@ -5,6 +5,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { RULES_MAX_BYTES, ruleFiles, readRuleFile, rulesBlock } from "./rules.mjs";
+// A CLAUDE_CONFIG_DIR of the user's own would move every file these tests read or write (claudeHome in config.mjs).
+delete process.env.CLAUDE_CONFIG_DIR;
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "night-rules-test-"));
 let n = 0;

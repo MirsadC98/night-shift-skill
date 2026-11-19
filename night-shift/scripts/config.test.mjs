@@ -6,7 +6,9 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { readProjectConfig, readGlobalConfig, mergedConfig, globalConfigFile, CONFIG_KEYS, stateDirProblem, tempRoot, norm, isMain, isLangCode } from "./config.mjs";
+import { readProjectConfig, readGlobalConfig, mergedConfig, globalConfigFile, CONFIG_KEYS, stateDirProblem, tempRoot, norm, isMain, isLangCode, claudeHome } from "./config.mjs";
+// A CLAUDE_CONFIG_DIR of the user's own would move every file these tests read (claudeHome).
+delete process.env.CLAUDE_CONFIG_DIR;
 
 const LANG_ERR = "must be a language code in lowercase, such as en or pt-br (a table at ~/.claude/night-shift/lang/<code>.mjs)";
 
@@ -189,4 +191,28 @@ test("the runner, the report and the guard work when started through a linked fo
     assert.equal(r.status, 0);
     assert.equal(JSON.parse(r.stdout || "{}").hookSpecificOutput?.permissionDecision, "deny");
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+// U16: Claude Code keeps its folder at CLAUDE_CONFIG_DIR when the user set it, so every file of ours under ~/.claude follows it.
+test("claudeHome is CLAUDE_CONFIG_DIR when it is set, else ~/.claude, and the global files follow it", async () => {
+  const { ruleFiles } = await import("./rules.mjs");
+  const { langFile } = await import("./lang/index.mjs");
+  const home = emptyHome(), cfg = path.join(emptyHome(), "claude-config");
+  assert.equal(claudeHome(home, {}), path.join(home, ".claude"));
+  assert.equal(claudeHome(home, { CLAUDE_CONFIG_DIR: cfg }), path.resolve(cfg));
+  assert.equal(claudeHome(home, { CLAUDE_CONFIG_DIR: "" }), path.join(home, ".claude"), "an empty value is no folder");
+  const saved = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = cfg;
+  try {
+    assert.equal(globalConfigFile(home), path.join(cfg, "night-shift", "config.json"));
+    assert.equal(ruleFiles("C:/work/repo", home).global, path.join(cfg, "night-shift", "rules.md"));
+    assert.equal(langFile("xx", home), path.join(cfg, "night-shift", "lang", "xx.mjs"));
+    fs.mkdirSync(path.join(cfg, "night-shift"), { recursive: true });
+    fs.writeFileSync(path.join(cfg, "night-shift", "config.json"), JSON.stringify({ lang: "xx" }));
+    assert.deepEqual(readGlobalConfig(home).config, { lang: "xx" });
+    // The state folder: never inside the Claude folder, nor one that holds it, wherever it is.
+    for (const bad of [path.join(cfg, "night"), path.dirname(cfg)]) assert.match(String(stateDirProblem(bad, { home, repo: "", temp: tempRoot() })), /Claude folder/, bad);
+  } finally {
+    if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = saved;
+  }
 });

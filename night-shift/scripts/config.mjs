@@ -4,7 +4,8 @@
 //   readProjectConfig(repo) -> { config, errors }   never throws; config holds only the valid keys
 //   readGlobalConfig(home)  -> { config, errors }   the same for ~/.claude/night-shift/config.json (run-wide keys only)
 //   mergedConfig(repo, home) -> { config, from, errors }  the global file overlaid key by key with the project's (from: key -> file)
-//   stateDirProblem(dir, { home, repo, temp })      null, or why dir may not be the state folder
+//   stateDirProblem(dir, { home, repo, temp, env }) null, or why dir may not be the state folder
+//   claudeHome(home, env) -> CLAUDE_CONFIG_DIR's folder when set, else <home>/.claude
 //   isMain(import.meta)                              whether node was started with this script (night-chain, night-report, guard)
 
 import fs from "node:fs";
@@ -118,12 +119,17 @@ function readConfigFile(file, allowed) {
   return { config, errors };
 }
 
+// The folder Claude Code keeps its settings, skills and transcripts in: CLAUDE_CONFIG_DIR when the user set it,
+// else ~/.claude. The user's night-shift folder (config, rules, language tables, Telegram, the runs) lives in it.
+export const claudeHome = (home = os.homedir(), env = process.env) =>
+  (env.CLAUDE_CONFIG_DIR ? path.resolve(env.CLAUDE_CONFIG_DIR) : path.join(String(home), ".claude"));
+
 export const projectConfigFile = (repo) => path.join(String(repo), ".claude", "night-shift.json");
 export const readProjectConfig = (repo) => readConfigFile(projectConfigFile(repo));
 
 // Only what is about the run as a whole; anything that names a path or a rule of one repository stays per project.
 export const GLOBAL_KEYS = ["mode", "lang", "effort", "fableCeiling", "fableSessions", "maxWaitHours"];
-export const globalConfigFile = (home = os.homedir()) => path.join(String(home), ".claude", "night-shift", "config.json");
+export const globalConfigFile = (home = os.homedir()) => path.join(claudeHome(home), "night-shift", "config.json");
 export const readGlobalConfig = (home = os.homedir()) => readConfigFile(globalConfigFile(home), GLOBAL_KEYS);
 
 export function mergedConfig(repo, home = os.homedir()) {
@@ -139,15 +145,18 @@ export function mergedConfig(repo, home = os.homedir()) {
 // The runner writes into the state folder, trusts inbox.md and next-prompt.md there as
 // instructions, and the guard lets a night session write into it: so never a folder that holds
 // anything else the user owns.
-export function stateDirProblem(dir, { home = os.homedir(), repo = "", temp = tempRoot() } = {}) {
+export function stateDirProblem(dir, { home = os.homedir(), repo = "", temp = tempRoot(), env = process.env } = {}) {
   const d = norm(dir);
   if (!d) return "is empty";
   if (d.replace(/^\/\/|^[a-z]:/, "").split("/").filter(Boolean).length < 2) return "is a drive root or sits directly below one";
-  for (const [name, p] of [["the home folder", home], ["the repository", repo], ["the temp folder", temp], ["C:/temp", "c:/temp"]]) {
+  // CLAUDE_CONFIG_DIR's folder, wherever it is (claudeHome); null when it is ~/.claude, which the lines below cover.
+  const claude = home && env.CLAUDE_CONFIG_DIR ? claudeHome(home, env) : null;
+  for (const [name, p] of [["the home folder", home], ["the repository", repo], ["the temp folder", temp], ["C:/temp", "c:/temp"], ["the Claude folder", claude]]) {
     if (p && under(norm(p), d)) return `is, or holds, ${name}`;
   }
   if (repo && under(d, `${norm(repo)}/.git`)) return "is inside .git";
   if (home && under(d, `${norm(home)}/.claude`)) return "is inside ~/.claude";
+  if (claude && under(d, norm(claude))) return "is inside the Claude folder (CLAUDE_CONFIG_DIR)";
   // The guard lets a night session write into the state folder, so not where Windows runs things from:
   // the Startup folder lives in AppData\Roaming, and the system's own folders hold programs.
   if (home && under(d, `${norm(home)}/appdata`) && !under(d, norm(temp))) return "is inside AppData, outside the temp folder";

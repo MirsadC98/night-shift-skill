@@ -11,12 +11,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { isLangCode, mergedConfig, readGlobalConfig } from "../config.mjs";
+import { isLangCode, mergedConfig, readGlobalConfig, claudeHome } from "../config.mjs";
 import en from "./en.mjs";
 
 const loaded = new Map([["en", en]]);
 
-export const langFile = (code, home = os.homedir()) => path.join(home, ".claude", "night-shift", "lang", `${code}.mjs`);
+export const langFile = (code, home = os.homedir()) => path.join(claudeHome(home), "night-shift", "lang", `${code}.mjs`);
 
 const isTable = (v) => Boolean(v) && typeof v === "object" && !Array.isArray(v);
 // English's keys, each with the user's value where it has the same kind; a nested group (ev, note, cli) key by key.

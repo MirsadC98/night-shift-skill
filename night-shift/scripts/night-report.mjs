@@ -19,16 +19,16 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { sessionCard, eventLine, chainCard, statusCard, reportCard, reportSection, chainProgress, progressText, splitHtml } from "./telegram-cards.mjs";
 import { sessionPlan, resolveMode, isPremium, modelName as familyName } from "./effort.mjs";
 import { strings, langOf, loadLang } from "./lang/index.mjs";
-import { isMain } from "./config.mjs";
+import { isMain, claudeHome } from "./config.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
-const TELEGRAM = path.join(os.homedir(), ".claude", "night-shift", "telegram.json");
+// A function: the runner sets CLAUDE_CONFIG_DIR from run.json after this module has loaded (claudeHome).
+const telegramFile = () => path.join(claudeHome(), "night-shift", "telegram.json");
 const QUIET_MINUTES = 30;
 // Anthropic's price ratios to fresh input. They only split a model's dollars
 // between rows; the dollars themselves are the sessions' own totals.
@@ -76,9 +76,12 @@ function usageByModel(entries, keep = () => true) {
   return byModel;
 }
 
+// The Claude folder the run used: the one start kept in run.json (CLAUDE_CONFIG_DIR), so a shell without the variable
+// still finds the run's transcripts and runner; else this process's (claudeHome).
+const claudeOf = (state) => readJson(path.join(state, "run.json")).claudeConfigDir || claudeHome();
 // <projects>/<project>/<sid>: the main transcript is <sid>.jsonl, subagents live under <sid>/.
-function transcriptBase(sid) {
-  const root = path.join(os.homedir(), ".claude", "projects");
+function transcriptBase(sid, state) {
+  const root = path.join(claudeOf(state), "projects");
   for (const p of sid && fs.existsSync(root) ? fs.readdirSync(root) : []) {
     const base = path.join(root, p, sid);
     if (fs.existsSync(`${base}.jsonl`) || fs.existsSync(base)) return base;
@@ -95,7 +98,7 @@ function lastActivity(state, nn) {
   const fd = fs.openSync(file, "r"), head = Buffer.alloc(65536);
   const sid = /"session_id":"([^"]+)"/.exec(head.toString("utf8", 0, fs.readSync(fd, head, 0, head.length, 0)))?.[1];
   fs.closeSync(fd);
-  const base = transcriptBase(sid);
+  const base = transcriptBase(sid, state);
   const walk = (d) => {
     for (const e of fs.readdirSync(d, { withFileTypes: true })) {
       const f = path.join(d, e.name);
@@ -167,7 +170,7 @@ function parseSession(state, nn) {
   const result = entries.findLast((j) => j.type === "result") || null;
   // The stream's usage lines stop at the start of each response, so main-thread
   // tokens come from the session's transcript on disk.
-  const base = transcriptBase(sid);
+  const base = transcriptBase(sid, state);
   const mainEntries = base && fs.existsSync(`${base}.jsonl`) ? jsonl(`${base}.jsonl`) : entries;
   const rows = Object.entries(usageByModel(mainEntries, (j) => !j.parent_tool_use_id && !j.isSidechain))
     .map(([model, usage]) => ({ kind: "ana", model, agents: 0, usage }));
@@ -234,7 +237,7 @@ function chainEvents(state) {
 }
 
 function runnerPid(state) {
-  const dir = path.join(os.homedir(), ".claude", "night-shift", "runs");
+  const dir = path.join(claudeOf(state), "night-shift", "runs");
   for (const f of fs.existsSync(dir) ? fs.readdirSync(dir) : []) {
     try {
       const p = JSON.parse(read(path.join(dir, f)));
@@ -406,7 +409,7 @@ export function buildReport(state, { headline = "", focus = null, pid = null } =
 
   const out = [];
   const progress = running ? progressOf(c) : null;
-  const status = ended ? T.ended(esc(ended.text.slice(12))) : running ? T.runningLine({ nn: parsed.at(-1)?.nn || "—", max: run.maxSessions, until: run.until, progress: progress ? esc(progress) : "" }) : T.stopped;
+  const status = ended ? T.ended(esc(ended.text.slice(12))) : running ? T.runningLine({ nn: parsed.at(-1)?.nn || "—", max: run.lastSession ?? run.maxSessions, until: run.until, progress: progress ? esc(progress) : "" }) : T.stopped;
   out.push(`🌙 <b>${T.reportTitle} · ${esc(path.basename(run.repo || state))}</b>\n${headline ? `${esc(headline)}\n` : ""}${status} · ${hm(new Date())}`);
   out.push(`<b>${T.problemsHead}</b>\n${issues.length ? issues.join("\n") : `✅ ${T.noProblems}`}`);
 
@@ -722,7 +725,7 @@ export function chooseChat(cfg, updates, wanted = null) {
 // the request threw or Telegram was busy or down (429, 5xx), so that asking again may work.
 async function send(messages) {
   let cfg;
-  try { cfg = JSON.parse(read(TELEGRAM)); } catch { return "no telegram.json"; }
+  try { cfg = JSON.parse(read(telegramFile())); } catch { return "no telegram.json"; }
   if (!cfg?.token) return "no token";
   try {
     const chat = cfg.chatId;
@@ -781,7 +784,7 @@ async function watch(opt) {
     }
     if (outcome !== "sent") watchLog(state, outcome);
   };
-  const cfg = readJson(TELEGRAM);
+  const cfg = readJson(telegramFile());
   if (cfg.token && !opt.dry) {
     await telegram("setMyCommands", cfg, { commands: [
       { command: T.cmdStatus, description: T.cmdStatusDesc }, { command: T.cmdReport, description: T.cmdReportDesc }] }).catch(() => {});
@@ -865,7 +868,7 @@ async function watch(opt) {
 // /status and /report from the user's own chat, read by long polling in place of the
 // loop's wait. Two runs watching the same bot take turns (Telegram answers 409).
 async function commands(state, pid, mark, save, started, seconds, T = strings()) {
-  const cfg = readJson(TELEGRAM, null);
+  const cfg = readJson(telegramFile(), null);
   if (!seconds || !cfg?.token || !cfg.chatId) return sleep(20_000);
   let j = null;
   try { j = await telegram("getUpdates", cfg, { offset: (mark.update || 0) + 1, timeout: seconds, allowed_updates: ["message"] }); }
@@ -918,14 +921,14 @@ if (isMain(import.meta)) {
     console.log(opt.send ? await send([card]) : `${card.silent ? `(${stateStrings(state).silent})\n` : ""}${card.text}`);
   } else if (opt.cmd === "watch") await watch(opt);
   else if (opt.cmd === "telegram-setup") {
-    const cfg = JSON.parse(read(TELEGRAM) || "{}");
-    if (!cfg.token) console.log(`no token in ${TELEGRAM}`);
+    const cfg = JSON.parse(read(telegramFile()) || "{}");
+    if (!cfg.token) console.log(`no token in ${telegramFile()}`);
     else {
       const j = await telegram("getUpdates", cfg);
       if (!j.ok) console.log(`telegram: ${j.description}`);
       else {
         const { chatId, lines } = chooseChat(cfg, j.result, typeof opt.chat === "string" ? opt.chat : null);
-        if (chatId != null) fs.writeFileSync(TELEGRAM, JSON.stringify({ ...cfg, chatId }, null, 2));
+        if (chatId != null) fs.writeFileSync(telegramFile(), JSON.stringify({ ...cfg, chatId }, null, 2));
         console.log(lines.join("\n"));
       }
     }

@@ -8,6 +8,8 @@ import path from "node:path";
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+// A CLAUDE_CONFIG_DIR of the user's own would move every file these tests read or write (claudeHome in config.mjs).
+delete process.env.CLAUDE_CONFIG_DIR;
 
 const REPORT = path.join(path.dirname(fileURLToPath(import.meta.url)), "night-report.mjs");
 // A made-up language table, "xx", that a scene copies into its home as the user's own (lang/index.mjs).
@@ -32,7 +34,7 @@ async function bot(answer) {
       const method = req.url.split("/").pop();
       const body = raw ? JSON.parse(raw) : {};
       const n = calls.filter((c) => c.method === method).length;
-      calls.push({ method, body });
+      calls.push({ method, body, url: req.url });
       const [status, json] = answer(method, body, n) || [200, { ok: true, result: [] }];
       if (method === "setMyCommands" || method === "getUpdates") await sleep(200);
       res.writeHead(status, { "content-type": "application/json" });
@@ -45,18 +47,20 @@ async function bot(answer) {
 
 // A throwaway home and state folder, a helper process standing in for the runner, the watcher itself.
 // lang: null writes a run.json from before the language was a setting; lang "xx" puts the made-up table in the home
-// unless table is false.
-async function scene(answer, { chatId = 42, notified, env = {}, token = "T", lang = "en", table = true } = {}, body) {
+// unless table is false. configDir: the user set CLAUDE_CONFIG_DIR, so the night-shift folder sits there instead of in ~/.claude.
+async function scene(answer, { chatId = 42, notified, env = {}, token = "T", lang = "en", table = true, configDir = false } = {}, body) {
   const api = await bot(answer);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ns-watch-"));
   const home = path.join(dir, "home"), state = path.join(dir, "state"), root = path.join(dir, "repo");
-  fs.mkdirSync(path.join(home, ".claude", "night-shift"), { recursive: true });
+  const claude = configDir ? path.join(dir, "claude-config") : path.join(home, ".claude");
+  fs.mkdirSync(path.join(claude, "night-shift"), { recursive: true });
+  fs.mkdirSync(home, { recursive: true });
   fs.mkdirSync(state);
   fs.mkdirSync(root);
-  fs.writeFileSync(path.join(home, ".claude", "night-shift", "telegram.json"), JSON.stringify({ token, chatId }));
+  fs.writeFileSync(path.join(claude, "night-shift", "telegram.json"), JSON.stringify({ token, chatId }));
   if (lang === "xx" && table) {
-    fs.mkdirSync(path.join(home, ".claude", "night-shift", "lang"));
-    fs.copyFileSync(XX, path.join(home, ".claude", "night-shift", "lang", "xx.mjs"));
+    fs.mkdirSync(path.join(claude, "night-shift", "lang"));
+    fs.copyFileSync(XX, path.join(claude, "night-shift", "lang", "xx.mjs"));
   }
   fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ repo: root, ...(lang && { lang }) }));
   fs.writeFileSync(path.join(state, "chain.log"), "");
@@ -68,7 +72,7 @@ async function scene(answer, { chatId = 42, notified, env = {}, token = "T", lan
   try {
     watcher = spawn(process.execPath, [REPORT, "watch", "--state", state, "--pid", String(helper.pid)], {
       stdio: "ignore", windowsHide: true,
-      env: { ...process.env, USERPROFILE: home, HOME: home, NIGHT_SHIFT_TELEGRAM_API: api.url, NIGHT_SHIFT_SEND_RETRY_MS: "100", ...env },
+      env: { ...process.env, USERPROFILE: home, HOME: home, NIGHT_SHIFT_TELEGRAM_API: api.url, NIGHT_SHIFT_SEND_RETRY_MS: "100", ...(configDir ? { CLAUDE_CONFIG_DIR: claude } : {}), ...env },
     });
     watcher.on("exit", (c) => { code = c ?? -1; onExit(code); });
     const chain = (line) => fs.appendFileSync(path.join(state, "chain.log"), stamp(line));
@@ -338,5 +342,15 @@ test("a rules: line from the runner is sent as a card, not silent, in the run's 
     chain("rules: <b>x</b>.md is gone or empty; its rules no longer apply");
     await until(() => api.sends().length >= 1, 10_000, "the card");
     assert.equal(api.sends()[0].body.text, "⚠️ Rules file: &lt;b&gt;x&lt;/b&gt;.md is gone or empty; its rules no longer apply");
+  });
+});
+
+// U16: with CLAUDE_CONFIG_DIR set, telegram.json and the user's language tables are read from that folder.
+test("the watcher reads telegram.json and the language table from CLAUDE_CONFIG_DIR's folder", async () => {
+  await scene(() => undefined, { lang: "xx", configDir: true, token: "CFG" }, async ({ api, chain }) => {
+    chain(RETRY);
+    await until(() => api.sends().length >= 1, 10_000, "the card");
+    assert.ok(api.sends()[0].url.includes("/botCFG/"), "the token from that folder");
+    assert.match(api.sends()[0].body.text, /#02 xx·retry/);
   });
 });
