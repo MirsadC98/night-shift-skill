@@ -2827,3 +2827,77 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
   assert.match(out, /^Questions the chain asked that no wait reported:\nQ1 · 10:12 · Push\?/m);
   assert.doesNotMatch(out, /The chain asks/);
 });
+
+// K2: the one stop (runs.mjs) as the runner meets it. The heal must not put back a pointer that a stop from inside the
+// runner's tree marked finished before its kill; a session here plays that caller, after a real `stop`.
+test("stop asks a live runner to stop after the session in progress, and the heal leaves the pointer a stop marked finished alone", async () => {
+  const { repo, state, env, root, home } = setup();
+  const { pointerFile } = await import("./runs.mjs");
+  const fake = path.join(root, "fake-mark.mjs");
+  fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path"; import { execFileSync } from "node:child_process";
+const st = process.env.NIGHT_SHIFT_STATE, f = process.env.TEST_POINTER; for await (const c of process.stdin);
+fs.writeFileSync(path.join(st, "stop-out.txt"), execFileSync(process.execPath, [process.env.TEST_CHAIN, "stop", "--repo", process.cwd()], { encoding: "utf8", windowsHide: true }));
+fs.writeFileSync(f, JSON.stringify({ ...JSON.parse(fs.readFileSync(f, "utf8")), finished: true, reason: "stopped now by the user" }));
+await new Promise((r) => setTimeout(r, 1500));
+fs.writeFileSync(path.join(st, "after-heal.json"), fs.readFileSync(f, "utf8"));
+fs.writeFileSync(path.join(st, "next-prompt.md"), "more work");
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-1", result: "ok" }));
+`);
+  const e = { ...env, NIGHT_SHIFT_CLAUDE: fake, NIGHT_SHIFT_HEAL_MS: "200", TEST_POINTER: pointerFile(repo, home) };
+  execFileSync(process.execPath, [CHAIN, "start", "--repo", repo, "--state", state, "--prompt", "first"], { env: e, cwd: root, encoding: "utf8" });
+  const { code, out } = await waitFor(repo, e, root).done;
+  assert.equal(code, 0, out);
+  assert.equal(fs.readFileSync(path.join(state, "stop-out.txt"), "utf8"), "the chain stops after the session in progress\n");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(state, "after-heal.json"), "utf8")).finished, true);
+  assert.match(fs.readFileSync(path.join(state, "chain.log"), "utf8"), /chain ends: stop requested/);
+});
+
+// The bot's /stop now against a stand-in chain: the watcher is the runner's child, so it answers before the kill and dies at it.
+test("/stop now in the bot's chat answers, then ends the runner, its session and the watcher, and wait ends with exit 0", async () => {
+  const { repo, state, env, root, home } = setup();
+  const http = await import("node:http");
+  const texts = [];
+  let asked = false, watcher = 0;
+  const server = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => (raw += c));
+    req.on("end", () => {
+      const method = req.url.split("/").pop(), body = raw ? JSON.parse(raw) : {};
+      if (method === "sendMessage") texts.push(body.text);
+      let result = [];
+      // The command comes once the session runs, as the user would send it.
+      if (method === "getUpdates" && body.timeout && !asked && fs.existsSync(path.join(state, "held.txt"))) {
+        asked = true;
+        watcher = Number(fs.readFileSync(path.join(state, "watch.pid"), "utf8"));
+        result = [{ update_id: 7, message: { chat: { id: 42 }, date: Math.floor(Date.now() / 1000), text: "/stop now" } }];
+      }
+      setTimeout(() => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ ok: true, result })); },
+        method === "getUpdates" && !result.length ? 200 : 0);
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  try {
+    fs.mkdirSync(path.join(home, ".claude", "night-shift"), { recursive: true });
+    fs.writeFileSync(path.join(home, ".claude", "night-shift", "telegram.json"), JSON.stringify({ token: "T", chatId: 42 }));
+    const fake = path.join(root, "fake-hold.mjs");
+    fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path";
+const st = process.env.NIGHT_SHIFT_STATE; for await (const c of process.stdin);
+fs.writeFileSync(path.join(st, "held.txt"), String(process.pid));
+await new Promise((r) => setTimeout(r, 60000));
+fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: not killed");
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-1", result: "ok" }));
+`);
+    const e = { ...env, NIGHT_SHIFT_CLAUDE: fake, NIGHT_SHIFT_TELEGRAM_API: `http://127.0.0.1:${server.address().port}` };
+    execFileSync(process.execPath, [CHAIN, "start", "--repo", repo, "--state", state, "--prompt", "first"], { env: e, cwd: root, encoding: "utf8" });
+    const { code, out } = await waitFor(repo, e, root).done;
+    assert.equal(code, 0, out);
+    assert.match(out, /^finished .*: stopped now by the user from Telegram$/m);
+    assert.ok(texts.includes("🛑 repo stops now: the session in progress is killed, and its work stays uncommitted in the tree"), texts.join("\n"));
+    assert.doesNotMatch(texts.join("\n"), /unexpectedly/);
+    const session = Number(fs.readFileSync(path.join(state, "held.txt"), "utf8"));
+    for (let i = 0; i < 50 && (alive(session) || alive(watcher)); i++) await sleep(100);
+    assert.equal(alive(session), false, "the session in progress was killed");
+    assert.equal(alive(watcher), false, "the watcher died with the runner's tree");
+    assert.doesNotMatch(fs.readFileSync(path.join(state, "chain.log"), "utf8"), /chain ends: /);
+  } finally { server.close(); }
+});

@@ -35,6 +35,8 @@ test("the English table names its language and its night-report commit phrase", 
   assert.equal(en.reportCommit, "night report");
   assert.equal(en.cmdStatus, "status");
   assert.equal(en.cmdReport, "report");
+  assert.equal(en.cmdStop, "stop");
+  assert.equal(en.cmdNow, "now");
   assert.ok(shape(en).length > 50, "the walk reached the table's contents");
 });
 
@@ -61,6 +63,8 @@ test("the user's table is found and used, and a key it lacks or gives the wrong 
   assert.equal(T.cli.userWaits([]), "xx·waits: none");
   assert.equal(T.cmdStatus, "xxstatus");
   assert.equal(T.cmdReport, "xxreport");
+  assert.equal(T.cmdStop, "xxstop");
+  assert.equal(T.cmdNow, "xxnow");
   assert.equal(T.reportCommit, "xx·report");
   // what the table leaves out, top-level and nested, is the English text
   assert.equal(T.noProblems, en.noProblems);
@@ -96,26 +100,39 @@ test("a table without a name reads its code as its name, and command names Teleg
   assert.equal(nameless.error, undefined);
   assert.equal(nameless.table.name, "zq");
   assert.equal(nameless.table.reportTitle, "zq·title");
-  const cases = [["zc", "'Status'", "'zcreport'"], ["zd", "'report'", "'zdreport'"], ["ze", "'same'", "'same'"],
-    ["zf", `'${"s".repeat(33)}'`, "'zfreport'"], ["zg", "'zgstatus'", "'status'"], ["zi", "'zi-status'", "'zireport'"]];
-  for (const [code, status, report] of cases) {
-    const r = await loadLang(code, homeWithTable(code, `export default { name: 'Z', cmdStatus: ${status}, cmdReport: ${report} };\n`));
+  // Each name on its own: one Telegram would refuse, another command's English name, or a name an earlier command
+  // took reads English, and the others keep theirs.
+  const cases = [["zc", "'Status'", "'zcreport'", "'zcstop'", ["status", "zcreport", "zcstop"]],
+    ["zd", "'report'", "'zdreport'", "'zdstop'", ["status", "zdreport", "zdstop"]],
+    ["ze", "'same'", "'same'", "'same'", ["same", "report", "stop"]],
+    ["zf", `'${"s".repeat(33)}'`, "'zfreport'", "'zfstop'", ["status", "zfreport", "zfstop"]],
+    ["zg", "'zgstatus'", "'status'", "'report'", ["zgstatus", "report", "stop"]],
+    ["zi", "'zi-status'", "'zireport'", "'zi stop'", ["status", "zireport", "stop"]],
+    ["zj", "'durum'", "'rapor'", "'stop'", ["durum", "rapor", "stop"]]];
+  for (const [code, status, report, stop, want] of cases) {
+    const r = await loadLang(code, homeWithTable(code, `export default { name: 'Z', cmdStatus: ${status}, cmdReport: ${report}, cmdStop: ${stop} };\n`));
     assert.equal(r.error, undefined, code);
-    assert.deepEqual([r.table.cmdStatus, r.table.cmdReport], ["status", "report"], code);
+    assert.deepEqual([r.table.cmdStatus, r.table.cmdReport, r.table.cmdStop], want, code);
   }
   const good = await loadLang("zh", homeWithTable("zh", "export default { name: 'Z', cmdStatus: 'zh_status2', cmdReport: 'zhreport' };\n"));
-  assert.deepEqual([good.table.cmdStatus, good.table.cmdReport], ["zh_status2", "zhreport"]);
+  assert.deepEqual([good.table.cmdStatus, good.table.cmdReport, good.table.cmdStop], ["zh_status2", "zhreport", "stop"]);
+  // The word after /stop that stops at once: one word of up to 32 characters, any letters, else English.
+  for (const [code, word, want] of [["zk", "'şimdi'", "şimdi"], ["zl", "'two words'", "now"], ["zm", "''", "now"], ["zn", `'${"n".repeat(33)}'`, "now"]]) {
+    const r = await loadLang(code, homeWithTable(code, `export default { name: 'Z', cmdNow: ${word} };\n`));
+    assert.equal(r.table.cmdNow, want, code);
+  }
 });
 
 test("a command description Telegram would refuse (not 1 to 256 characters) reads English, each on its own", async () => {
   const long = "d".repeat(257), most = "d".repeat(256);
-  const cases = [["zu", "", "zu report"], ["zv", "   ", "zv report"], ["zw", long, "zw report"], ["zy", "zy status", ""], ["zz", most, "zz report"]];
-  const want = { zu: [en.cmdStatusDesc, "zu report"], zv: [en.cmdStatusDesc, "zv report"], zw: [en.cmdStatusDesc, "zw report"],
-    zy: ["zy status", en.cmdReportDesc], zz: [most, "zz report"] };
-  for (const [code, status, report] of cases) {
-    const r = await loadLang(code, homeWithTable(code, `export default { name: 'Z', cmdStatusDesc: ${JSON.stringify(status)}, cmdReportDesc: ${JSON.stringify(report)} };\n`));
+  const cases = [["zu", "", "zu report", ""], ["zv", "   ", "zv report", "zv stop"], ["zw", long, "zw report", long],
+    ["zy", "zy status", "", "zy stop"], ["zz", most, "zz report", most]];
+  const want = { zu: [en.cmdStatusDesc, "zu report", en.cmdStopDesc], zv: [en.cmdStatusDesc, "zv report", "zv stop"],
+    zw: [en.cmdStatusDesc, "zw report", en.cmdStopDesc], zy: ["zy status", en.cmdReportDesc, "zy stop"], zz: [most, "zz report", most] };
+  for (const [code, status, report, stop] of cases) {
+    const r = await loadLang(code, homeWithTable(code, `export default { name: 'Z', cmdStatusDesc: ${JSON.stringify(status)}, cmdReportDesc: ${JSON.stringify(report)}, cmdStopDesc: ${JSON.stringify(stop)} };\n`));
     assert.equal(r.error, undefined, code);
-    assert.deepEqual([r.table.cmdStatusDesc, r.table.cmdReportDesc], want[code], code);
+    assert.deepEqual([r.table.cmdStatusDesc, r.table.cmdReportDesc, r.table.cmdStopDesc], want[code], code);
   }
 });
 

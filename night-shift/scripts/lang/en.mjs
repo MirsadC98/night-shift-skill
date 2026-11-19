@@ -56,6 +56,14 @@ export default {
     rules: (e) => `⚠️ Rules file: ${e.text}`,
     // an attended run's question, the session's own line from questions.md (Q<n> · time · question · pick · otherwise)
     question: (e) => `❓ ${e.project} asks · ${e.text}`,
+    // the bot's answers to /stop (cmd: the command's name as the user typed it, now: the word that stops at once)
+    stopAfter: (e) => `🛑 ${e.project} stops after the session in progress; /${e.cmd} ${e.now} stops it at once`,
+    stopNow: (e) => `🛑 ${e.project} stops now: the session in progress is killed, and its work stays uncommitted in the tree`,
+    stopFailed: (e) => `⚠️ ${e.project}: the runner outlived the kill; it stops after the session in progress`,
+    stopUnsure: (e) => `⚠️ ${e.project}: could not check what the runner's process is, so nothing was killed; it stops after the session in progress`,
+    stopGone: (e) => `${e.project}: its runner was not running; marked finished`,
+    stopNone: (e) => `${e.project}: no active run`,
+    stopError: (e) => `⚠️ ${e.project}: the stop did not go through (${e.text}); run stop on the PC`,
   },
 
   // problems, in the report and on the cards
@@ -133,6 +141,9 @@ export default {
   // besides /status and /report
   cmdStatus: "status", cmdStatusDesc: "What is running now",
   cmdReport: "report", cmdReportDesc: "The full report",
+  cmdStop: "stop", cmdStopDesc: "Stop after the session in progress (/stop now: at once)",
+  // the word after /stop that stops at once (the English word always does)
+  cmdNow: "now",
   preview: "preview",
   silent: "silent",
 

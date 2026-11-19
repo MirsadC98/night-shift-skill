@@ -43,7 +43,7 @@
 //                               it follows a reload, and a usage-limit wait does not end it; in an attended
 //                               run also on a new question in <state>/questions.md: exit 3 with the question
 //                               and how to answer, while the chain goes on; run it again to wait on)
-//   node night-chain.mjs stop   --repo <dir> [--now]
+//   node night-chain.mjs stop   --repo <dir> [--now]   (/stop and /stop now in the bot's chat do the same)
 //   node night-chain.mjs reload --repo <dir>       (a running chain takes up this code after
 //                                                   the session in progress, watcher included)
 //   node night-chain.mjs run    --state <dir>      (what start schedules)
@@ -62,9 +62,9 @@ import { spawn, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { buildReport, userWaits, stateLang, questionLines } from "./night-report.mjs";
+import { slug, pointerFile, readPointer, writePointer, isRunner, stopRun } from "./runs.mjs";
 import { strings, langOf, loadLang } from "./lang/index.mjs";
 import { mergedConfig, isLangCode, MODES, CONFIG_KEYS, stateDirProblem, tempRoot, isMain, claudeHome } from "./config.mjs";
 import { sessionOutcome, windowSpan, fieldsGone } from "./session-outcome.mjs";
@@ -197,13 +197,6 @@ const ruleStatus = (repo) => Object.values(ruleFiles(repo)).flatMap((file) => {
 });
 const ruleLines = (found) => (found.length ? found : [{ none: true }])
   .map((f) => `  rules:  ${f.none ? "none" : f.error ? `${f.file} ${f.error}` : `${f.file} (${f.bytes} bytes)`}`);
-const slug = (repo) => `${path.basename(repo)}-${crypto.createHash("sha1").update(repo.toLowerCase()).digest("hex").slice(0, 8)}`;
-const pointerFile = (repo) => path.join(claudeHome(), "night-shift", "runs", `${slug(repo)}.json`);
-const readPointer = (repo) => { const t = read(pointerFile(repo)); return t ? JSON.parse(t) : null; };
-const writePointer = (repo, data) => {
-  fs.mkdirSync(path.dirname(pointerFile(repo)), { recursive: true });
-  fs.writeFileSync(pointerFile(repo), JSON.stringify(data, null, 2));
-};
 
 function findClaude() {
   const candidates = [
@@ -252,18 +245,6 @@ export function cutOffSession(state) {
 // A PowerShell single-quoted string. PowerShell ends one at ' and at the typographic quotes
 // ‘ ’ ‚ ‛ alike, so each is doubled: a state folder or a repository named with one must stay text.
 export const psQuote = (s) => `'${String(s).replace(/['‘’‚‛]/g, "$&$&")}'`;
-
-// The command line of a process: "" when it is gone, null when it could not be asked.
-const commandLine = (pid) => {
-  try {
-    return execFileSync("powershell", ["-NoProfile", "-NonInteractive", "-Command",
-      `(Get-CimInstance Win32_Process -Filter "ProcessId=${Number(pid)}").CommandLine`], { encoding: "utf8", windowsHide: true });
-  } catch { return null; }
-};
-
-// A live pid may belong to another program once the runner died without an end line (Windows
-// reuses numbers): a runner is a live process whose command line names this file. Not knowing counts as one.
-const isRunner = (pid) => { if (!alive(pid)) return false; const line = commandLine(pid); return line === null || /night-chain\.mjs/i.test(line); };
 
 // Starts `run` for this state through the project's scheduled task and returns the task's name.
 // No trigger, so only start (or a runner handing over) runs it and a finished chain never comes
@@ -515,11 +496,14 @@ async function runChain(opt) {
   }
   const pointer = { ...(readPointer(repo) || {}), pid: process.pid, state, finished: false, startedAt: now(), reloadable: true };
   writePointer(repo, pointer);
-  // A runner handing over may mark the pointer finished after this one wrote it; put it back.
+  // A runner handing over may mark the pointer finished after this one wrote it; put it back. Not once a stop was asked:
+  // a stop from inside this runner's tree (the bot's /stop now, runs.mjs) marks it finished before its kill, and that
+  // mark must stand; no hand-over follows a stop request. NIGHT_SHIFT_HEAL_MS: a shorter tick for night-chain.test.mjs.
   const heal = setInterval(() => {
+    if (fs.existsSync(stopFile)) return;
     const p = readPointer(repo);
     if (!p || p.pid !== process.pid || p.finished) writePointer(repo, pointer);
-  }, 30_000);
+  }, Number(process.env.NIGHT_SHIFT_HEAL_MS) || 30_000);
 
   // Keep Windows awake while this process lives; the helper exits with it.
   const awake = spawn("powershell", ["-NoProfile", "-NonInteractive", "-Command",
@@ -1133,7 +1117,7 @@ async function waitChain(opt) {
       next = handover
         // A reload starts the next runner before this one exits; it may not have written the pointer yet.
         ? await pointerChange(repo, runner(pid), HANDOVER_MS)
-        // stop --now kills the runner first and marks the pointer finished after.
+        // stop --now marks the pointer finished before and after it kills the runner (a copy from before 2026-11-19 only after).
         : await pointerChange(repo, (x) => x.finished || runner(pid)(x), 5_000);
       if (!next || !runner(pid)(next)) {
         if (next?.finished) return over();
@@ -1145,26 +1129,19 @@ async function waitChain(opt) {
   }
 }
 
-function stop(opt) {
+// The one stop is runs.mjs's, shared with the bot's /stop; these are the CLI's words for what it found.
+async function stop(opt) {
   const repo = repoRoot(opt.repo || process.cwd());
-  const ptr = readPointer(repo);
-  if (!ptr || ptr.finished) return console.log("no active run");
-  fs.writeFileSync(path.join(ptr.state, "STOP-REQUEST"), now());
-  if (!isRunner(ptr.pid)) {
-    const reason = ptr.pid ? "its runner was already gone" : "its runner never started";
-    writePointer(repo, { ...ptr, finished: true, finishedAt: now(), reason });
-    return console.log(`${ptr.pid ? "the runner was already gone" : reason}; marked finished`);
-  }
-  if (opt.now) {
-    // A runner that died without an end line leaves its pid in the pointer, and Windows gives
-    // the number to another program: only a process that still is a runner is killed.
-    const line = commandLine(ptr.pid);
-    // Not knowing is no reason to kill, nor to call a live chain finished: STOP-REQUEST still ends it.
-    if (line === null) return console.log(`could not check what pid ${ptr.pid} is, so nothing was killed; the chain stops after the session in progress`);
-    try { execFileSync("taskkill", ["/T", "/F", "/PID", String(ptr.pid)], { stdio: "ignore", windowsHide: true }); } catch {}
-    writePointer(repo, { ...ptr, finished: true, finishedAt: now(), reason: "stopped now by the user" });
-    console.log("stopped now; the session in progress was killed (check git status)");
-  } else console.log("the chain stops after the session in progress");
+  const { outcome, pid } = await stopRun(repo, { now: Boolean(opt.now) });
+  console.log({
+    none: "no active run",
+    never: "its runner never started; marked finished",
+    gone: "the runner was already gone; marked finished",
+    unsure: `could not check what pid ${pid} is, so nothing was killed; the chain stops after the session in progress`,
+    failed: `could not kill pid ${pid}; the chain stops after the session in progress`,
+    now: "stopped now; the session in progress was killed (check git status)",
+    after: "the chain stops after the session in progress",
+  }[outcome]);
 }
 
 function reload(opt) {

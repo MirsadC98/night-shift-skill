@@ -8,6 +8,7 @@ import path from "node:path";
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { pointerFile } from "./runs.mjs";
 // A CLAUDE_CONFIG_DIR of the user's own would move every file these tests read or write (claudeHome in config.mjs).
 delete process.env.CLAUDE_CONFIG_DIR;
 
@@ -15,6 +16,7 @@ const REPORT = path.join(path.dirname(fileURLToPath(import.meta.url)), "night-re
 // A made-up language table, "xx", that a scene copies into its home as the user's own (lang/index.mjs).
 const XX = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "lang-xx.mjs");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const until = async (pred, ms, what) => {
   const end = Date.now() + ms;
   while (Date.now() < end) { if (pred()) return; await sleep(50); }
@@ -48,7 +50,9 @@ async function bot(answer) {
 // A throwaway home and state folder, a helper process standing in for the runner, the watcher itself.
 // lang: null writes a run.json from before the language was a setting; lang "xx" puts the made-up table in the home
 // unless table is false. configDir: the user set CLAUDE_CONFIG_DIR, so the night-shift folder sits there instead of in ~/.claude.
-async function scene(answer, { chatId = 42, notified, env = {}, token = "T", lang = "en", table = true, configDir = false } = {}, body) {
+// runner: the helper looks like a runner (its command line names a night-chain.mjs) and the repository's pointer names it
+// (a string is the pointer's own text).
+async function scene(answer, { chatId = 42, notified, env = {}, token = "T", lang = "en", table = true, configDir = false, runner = false } = {}, body) {
   const api = await bot(answer);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ns-watch-"));
   const home = path.join(dir, "home"), state = path.join(dir, "state"), root = path.join(dir, "repo");
@@ -67,7 +71,15 @@ async function scene(answer, { chatId = 42, notified, env = {}, token = "T", lan
   fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ repo: root, ...(lang && { lang }) }));
   fs.writeFileSync(path.join(state, "chain.log"), "");
   if (notified !== undefined) fs.writeFileSync(path.join(state, "notified.json"), notified);
-  const helper = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore", windowsHide: true });
+  let helper;
+  if (runner) {
+    const file = path.join(dir, "bin", "night-chain.mjs");
+    fs.mkdirSync(path.dirname(file));
+    fs.writeFileSync(file, "setTimeout(() => {}, 60000);\n");
+    helper = spawn(process.execPath, [file], { stdio: "ignore", windowsHide: true });
+    fs.mkdirSync(path.dirname(pointerFile(root, home)), { recursive: true });
+    fs.writeFileSync(pointerFile(root, home), typeof runner === "string" ? runner : JSON.stringify({ pid: helper.pid, state, finished: false, startedAt: "test" }));
+  } else helper = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore", windowsHide: true });
   let watcher, code;
   let onExit;
   const exited = new Promise((r) => { onExit = r; });
@@ -78,7 +90,7 @@ async function scene(answer, { chatId = 42, notified, env = {}, token = "T", lan
     });
     watcher.on("exit", (c) => { code = c ?? -1; onExit(code); });
     const chain = (line) => fs.appendFileSync(path.join(state, "chain.log"), stamp(line));
-    await body({ api, state, home, chain, exited, watcher, helper, ended: () => code !== undefined });
+    await body({ api, state, home, repo: root, chain, exited, watcher, helper, ended: () => code !== undefined });
   } finally {
     watcher?.kill();
     helper.kill();
@@ -174,8 +186,8 @@ test("/report and the table's own name both give the report, in the run's langua
   }
 });
 
-test("the bot's menu lists the command pair of the run's language", async () => {
-  for (const [lang, names] of [["xx", ["xxstatus", "xxreport"]], ["en", ["status", "report"]]]) {
+test("the bot's menu lists the commands of the run's language", async () => {
+  for (const [lang, names] of [["xx", ["xxstatus", "xxreport", "xxstop"]], ["en", ["status", "report", "stop"]]]) {
     await scene(() => undefined, { lang }, async ({ api }) => {
       await until(() => api.calls.some((c) => c.method === "setMyCommands"), 10_000, "setMyCommands");
       assert.deepEqual(api.calls.find((c) => c.method === "setMyCommands").body.commands.map((c) => c.command), names);
@@ -188,7 +200,7 @@ test("a watcher whose language table is gone watches in English and says so once
     chain(RETRY);
     await until(() => api.sends().length >= 1, 10_000, "the retry card");
     assert.match(api.sends()[0].body.text, /#02 left no continuation prompt, retrying/);
-    assert.deepEqual(api.calls.find((c) => c.method === "setMyCommands").body.commands.map((c) => c.command), ["status", "report"]);
+    assert.deepEqual(api.calls.find((c) => c.method === "setMyCommands").body.commands.map((c) => c.command), ["status", "report", "stop"]);
     const lines = fs.readFileSync(path.join(state, "watch.log"), "utf8").split("\n").filter((l) => /language table/.test(l));
     assert.equal(lines.length, 1);
     assert.match(lines[0], /\] language table: no language table at .*xx\.mjs; what the user reads is in English$/);
@@ -438,5 +450,84 @@ test("an unattended run's watcher sends no question", async () => {
     await exited;
     assert.equal(api.sends().length, 1);
     assert.doesNotMatch(api.sends()[0].body.text, /❓/);
+  });
+});
+
+// /stop: the one stop of runs.mjs, from the stored chat. The scene's helper stands in for the runner.
+const pointer = (repo, home) => JSON.parse(fs.readFileSync(pointerFile(repo, home), "utf8"));
+const after = (state) => fs.existsSync(path.join(state, "STOP-REQUEST"));
+
+test("/stop from the stored chat asks the runner to stop after the session in progress and says so", async () => {
+  await scene(asking("/stop"), { runner: true }, async ({ api, state, home, repo, helper }) => {
+    await until(() => api.sends().length >= 1, 10_000, "the /stop answer");
+    assert.equal(api.sends()[0].body.text, "🛑 repo stops after the session in progress; /stop now stops it at once");
+    assert.ok(after(state));
+    assert.ok(alive(helper.pid));
+    assert.equal(pointer(repo, home).finished, false);
+    assert.match(fs.readFileSync(path.join(state, "watch.log"), "utf8"), /\/stop: after, sent, \d+ s after the message/);
+  });
+  // No run of this repository is active: nothing is written, and the answer says so.
+  await scene(asking("/stop now"), {}, async ({ api, state }) => {
+    await until(() => api.sends().length >= 1, 10_000, "the /stop now answer");
+    assert.equal(api.sends()[0].body.text, "repo: no active run");
+    assert.equal(after(state), false);
+  });
+});
+
+test("a /stop from another chat, or from before the watcher's minute of grace, stops nothing; one the watcher acts on is confirmed first", async () => {
+  const at = Math.floor(Date.now() / 1000);
+  const updates = { ok: true, result: [
+    { update_id: 1, message: { chat: { id: 7 }, date: at, text: "/stop now" } },
+    { update_id: 2, message: { chat: { id: 42 }, date: at - 120, text: "/stop now" } },
+    { update_id: 3, message: { chat: { id: 42 }, date: at, text: "/stop" } },
+  ] };
+  await scene((m, b, n) => (m === "getUpdates" && n === 0 ? [200, updates] : m === "sendMessage" ? [200, { ok: true }] : undefined), { runner: true }, async ({ api, state, helper }) => {
+    await until(() => api.sends().length >= 1, 10_000, "the /stop answer");
+    await until(() => api.calls.filter((c) => c.method === "getUpdates").length >= 3, 10_000, "the poll after the commands");
+    await sleep(300);
+    assert.equal(api.sends().length, 1);
+    assert.match(api.sends()[0].body.text, /stops after the session in progress/);
+    assert.ok(alive(helper.pid), "neither /stop now was taken");
+    // The update was confirmed (the next offset, no wait) before the answer went out.
+    const order = api.calls.map((c) => (c.method === "getUpdates" ? `poll ${c.body.offset} ${c.body.timeout}` : c.method)).filter((c) => c !== "setMyCommands");
+    assert.deepEqual(order.slice(0, 3), ["poll 1 20", "poll 4 0", "sendMessage"]);
+    assert.ok(after(state));
+  });
+});
+
+test("/stop now answers, then kills the runner and marks the pointer; a watcher outside its tree then ends without a died card", async () => {
+  await scene(asking("/stop now"), { runner: true }, async ({ api, state, home, repo, helper, exited }) => {
+    const code = await Promise.race([exited, sleep(15_000).then(() => "still running")]);
+    assert.notEqual(code, "still running");
+    assert.deepEqual(api.sends().map((s) => s.body.text), ["🛑 repo stops now: the session in progress is killed, and its work stays uncommitted in the tree"]);
+    assert.equal(alive(helper.pid), false);
+    const p = pointer(repo, home);
+    assert.equal(p.finished, true);
+    assert.equal(p.reason, "stopped now by the user from Telegram");
+    assert.equal(fs.existsSync(path.join(state, "watch.pid")), false);
+  });
+});
+
+test("a stop that throws (a pointer that is no JSON) still gets an answer, and the watcher goes on", async () => {
+  await scene(asking("/stop now"), { runner: "{" }, async ({ api, state, helper, ended }) => {
+    await until(() => api.sends().length >= 1, 10_000, "the /stop now answer");
+    assert.match(api.sends()[0].body.text, /^⚠️ repo: the stop did not go through \(.+\); run stop on the PC$/);
+    const log = () => (fs.existsSync(path.join(state, "watch.log")) ? fs.readFileSync(path.join(state, "watch.log"), "utf8") : "");
+    await until(() => /\/stop now: failed \(.+\), sent, \d+ s after the message/.test(log()), 5_000, "the watch.log line");
+    assert.ok(alive(helper.pid));
+    assert.equal(ended(), false);
+  });
+});
+
+test("the table's own names answer /stop and /stop now, in the run's language", async () => {
+  await scene(asking("/xxstop"), { runner: true, lang: "xx" }, async ({ api, state }) => {
+    await until(() => api.sends().length >= 1, 10_000, "the /xxstop answer");
+    assert.equal(api.sends()[0].body.text, "🛑 xx·stops · repo · /xxstop xxnow");
+    assert.ok(after(state));
+  });
+  await scene(asking("/stop XXNOW"), { runner: true, lang: "xx" }, async ({ api, helper, exited }) => {
+    await Promise.race([exited, sleep(15_000)]);
+    assert.deepEqual(api.sends().map((s) => s.body.text), ["🛑 xx·stops now · repo"]);
+    assert.equal(alive(helper.pid), false);
   });
 });

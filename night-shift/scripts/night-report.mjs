@@ -13,9 +13,10 @@
 // session ends, a line when the chain waits for a usage limit, resumes or
 // retries a session, or a session goes quiet for 30 minutes, and a summary
 // when the chain ends or its runner dies. In the bot's chat, /status answers with what
-// runs now and /report with the full report that `show` prints; the cards and the report
-// are in the run's language (run.json "lang", lang/index.mjs), whose table may name the two
-// commands in that language too.
+// runs now, /report with the full report that `show` prints, and /stop stops the chain
+// after the session in progress (/stop now at once, as `night-chain.mjs stop --now`);
+// the cards and the report are in the run's language (run.json "lang", lang/index.mjs),
+// whose table may name the commands in that language too.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -25,6 +26,7 @@ import { sessionCard, eventLine, chainCard, statusCard, reportCard, reportSectio
 import { sessionPlan, resolveMode, isPremium, modelName as familyName } from "./effort.mjs";
 import { strings, langOf, loadLang } from "./lang/index.mjs";
 import { isMain, claudeHome } from "./config.mjs";
+import { stopRun } from "./runs.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 // A function: the runner sets CLAUDE_CONFIG_DIR from run.json after this module has loaded (claudeHome).
@@ -812,7 +814,8 @@ async function watch(opt) {
   const cfg = readJson(telegramFile());
   if (cfg.token && !opt.dry) {
     await telegram("setMyCommands", cfg, { commands: [
-      { command: T.cmdStatus, description: T.cmdStatusDesc }, { command: T.cmdReport, description: T.cmdReportDesc }] }).catch(() => {});
+      { command: T.cmdStatus, description: T.cmdStatusDesc }, { command: T.cmdReport, description: T.cmdReportDesc },
+      { command: T.cmdStop, description: T.cmdStopDesc }] }).catch(() => {});
   }
   const project = path.basename(readJson(path.join(state, "run.json")).repo || state);
   if (opt.announce) await say(eventLine("start", { project }, T));
@@ -905,7 +908,8 @@ async function watch(opt) {
         await say(eventLine("died", {}, T));
         return fs.rmSync(lock, { force: true });
       }
-      await commands(state, pid, mark, save, started, opt.dry ? 0 : 20, T);
+      // A /stop now this watcher outlived (it is not the runner's child): its answer was the last word, no died card.
+      if (await commands(state, pid, mark, save, started, opt.dry ? 0 : 20, T) === "stopped") return fs.rmSync(lock, { force: true });
     } catch (e) {
       watchLog(state, `watch loop: ${e.message}`);
       await sleep(Number(process.env.NIGHT_SHIFT_WATCH_RETRY_MS) || 5_000); // the env variable is for the tests: a poison line takes three of these
@@ -913,7 +917,35 @@ async function watch(opt) {
   }
 }
 
-// /status and /report from the user's own chat, read by long polling in place of the
+// What the bot answers for each outcome of runs.mjs's stopRun.
+const STOP_LINE = { after: "stopAfter", now: "stopNow", failed: "stopFailed", unsure: "stopUnsure", gone: "stopGone", never: "stopGone", none: "stopNone" };
+
+// /stop and /stop now: the one stop of runs.mjs, for this watcher's own run. The answer to /stop now goes out before the
+// kill, since this watcher is the runner's child and dies at it; "stopped" tells the loop the chain is gone.
+async function stopCommand(state, cmd, rest, delay, T) {
+  const run = readJson(path.join(state, "run.json"));
+  const project = path.basename(run.repo || state);
+  const word = rest.toLowerCase();
+  const now = word === "now" || word === T.cmdNow.toLowerCase();
+  const answer = async (outcome) => {
+    const sent = await send([eventLine(STOP_LINE[outcome], { project, cmd, now: T.cmdNow }, T)]);
+    watchLog(state, `/${cmd}${now ? " now" : ""}: ${outcome}, ${sent}, ${delay()} s after the message`);
+  };
+  let told = false, r;
+  try {
+    r = await stopRun(run.repo, { now, state, via: "from Telegram", before: async (o) => { told = true; await answer(o); } });
+  } catch (err) {
+    // A pointer that is no JSON, a state folder that cannot be written: the update is confirmed, so silence would lose it.
+    const sent = await send([eventLine("stopError", { project, text: err.message }, T)]);
+    watchLog(state, `/${cmd}${now ? " now" : ""}: failed (${err.message}), ${sent}, ${delay()} s after the message`);
+    return null;
+  }
+  // The answer before the kill said "now"; a runner that outlived it is told apart.
+  if (!told || r.outcome !== "now") await answer(r.outcome);
+  return r.outcome === "now" ? "stopped" : null;
+}
+
+// /status, /report and /stop from the user's own chat, read by long polling in place of the
 // loop's wait. Two runs watching the same bot take turns (Telegram answers 409).
 async function commands(state, pid, mark, save, started, seconds, T = strings()) {
   const cfg = readJson(telegramFile(), null);
@@ -930,11 +962,21 @@ async function commands(state, pid, mark, save, started, seconds, T = strings())
     // telegram.json may hold the id as text; String() on both keeps it matching either way.
     if (String(msg?.chat?.id) !== String(cfg.chatId) || msg.date * 1000 < started - 60_000) continue;
     const cmd = /^\/(\w+)/.exec(msg.text || "")?.[1];
+    const rest = (msg.text || "").replace(/^\/\w+(?:@\w+)?/, "").trim();
+    const delay = () => Math.round((Date.now() - msg.date * 1000) / 1000);
     // The English name always answers; the run's table may add a name in its own language.
+    if (cmd === "stop" || cmd === T.cmdStop) {
+      // Telegram confirms an update only with the next poll: one this watcher acts on is confirmed first, so a /stop now
+      // whose kill takes this watcher with it is not read again by the next chain's watcher, which starts with no offset.
+      const ok = await telegram("getUpdates", cfg, { offset: u.update_id + 1, timeout: 0, allowed_updates: ["message"] }).catch((e) => ({ description: e.message }));
+      if (!ok?.ok) watchLog(state, `getUpdates (confirming /${cmd}): ${ok?.description}`);
+      if (await stopCommand(state, cmd, rest, delay, T) === "stopped") return "stopped";
+      continue;
+    }
     const reply = cmd === "status" || cmd === T.cmdStatus ? statusMessage(state, pid) : cmd === "report" || cmd === T.cmdReport ? reportMessage(state, pid) : null;
     if (!reply) continue;
     const outcome = await send([reply]);
-    watchLog(state, `/${cmd}: ${outcome}, ${Math.round((Date.now() - msg.date * 1000) / 1000)} s after the message`);
+    watchLog(state, `/${cmd}: ${outcome}, ${delay()} s after the message`);
   }
 }
 

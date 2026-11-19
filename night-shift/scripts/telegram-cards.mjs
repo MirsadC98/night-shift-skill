@@ -162,7 +162,8 @@ const escCut = (s, max = 3500) => {
   return out;
 };
 export function eventLine(kind, d = {}, T = strings()) {
-  const e = { ...d, project: esc(d.project), until: esc(d.until), progress: d.progress ? esc(d.progress) : "", step: esc(d.step || "?"), got: esc(d.got), want: esc(d.want), text: escCut(d.text) };
+  const e = { ...d, project: esc(d.project), until: esc(d.until), progress: d.progress ? esc(d.progress) : "", step: esc(d.step || "?"), got: esc(d.got), want: esc(d.want), text: escCut(d.text),
+    cmd: esc(d.cmd), now: esc(d.now) };
   return { text: T.ev[kind](e), silent: SILENT[kind] };
 }
 

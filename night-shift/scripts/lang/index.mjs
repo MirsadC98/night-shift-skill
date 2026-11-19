@@ -38,13 +38,19 @@ export async function loadLang(code, home = os.homedir()) {
   const table = overEnglish(mod.default);
   // The session header names the language; without a name of its own the code says it better than "English".
   if (typeof mod.default.name !== "string" || !mod.default.name.trim()) table.name = code;
-  // Telegram takes 1 to 32 lowercase letters, digits or _ for a command, and each name must answer one thing.
+  // Telegram takes 1 to 32 lowercase letters, digits or _ for a command, and each name must answer one thing. Each name
+  // is checked on its own: one Telegram would refuse, another command's English name, or a name an earlier command took
+  // reads English, and the others keep theirs.
   const cmd = (c) => /^[a-z0-9_]{1,32}$/.test(c);
-  const names = [table.cmdStatus, table.cmdReport];
-  if (!names.every(cmd) || names[0] === names[1] || names[0] === en.cmdReport || names[1] === en.cmdStatus)
-    Object.assign(table, { cmdStatus: en.cmdStatus, cmdReport: en.cmdReport });
+  const keys = ["cmdStatus", "cmdReport", "cmdStop"], taken = [];
+  for (const k of keys) {
+    if (!cmd(table[k]) || keys.some((o) => o !== k && en[o] === table[k]) || taken.includes(table[k])) table[k] = en[k];
+    taken.push(table[k]);
+  }
+  // The word after /stop that stops at once: one word as the user types it, any letters.
+  if (!/^\S{1,32}$/.test(table.cmdNow)) table.cmdNow = en.cmdNow;
   // A description takes 1 to 256 characters; one it refuses fails the whole menu, so it reads English, each on its own.
-  for (const k of ["cmdStatusDesc", "cmdReportDesc"]) if (!table[k].trim() || table[k].length > 256) table[k] = en[k];
+  for (const k of ["cmdStatusDesc", "cmdReportDesc", "cmdStopDesc"]) if (!table[k].trim() || table[k].length > 256) table[k] = en[k];
   loaded.set(code, table);
   return { table, file };
 }

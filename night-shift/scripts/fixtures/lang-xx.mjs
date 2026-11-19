@@ -12,6 +12,8 @@ export default {
   ev: {
     start: (e) => `🌙 xx·start · ${e.project}`,
     retry: (e) => `🔁 #${e.nn} xx·retry`,
+    stopAfter: (e) => `🛑 xx·stops · ${e.project} · /${e.cmd} ${e.now}`,
+    stopNow: (e) => `🛑 xx·stops now · ${e.project}`,
   },
   note: {
     // a table older than the model's name in the notes: a string where English now has a function
@@ -22,6 +24,7 @@ export default {
   ended: (what) => `xx·ended: ${what}`,
   cmdStatus: "xxstatus", cmdStatusDesc: "xx·status",
   cmdReport: "xxreport", cmdReportDesc: "xx·report",
+  cmdStop: "xxstop", cmdStopDesc: "xx·stop", cmdNow: "xxnow",
   cli: {
     userWaits: (lines) => (lines.length ? `xx·waits:\n${lines.join("\n")}` : "xx·waits: none"),
     reportLine: (report, cmd) => `xx·report: ${report} · ${cmd}`,
