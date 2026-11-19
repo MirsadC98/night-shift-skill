@@ -2682,3 +2682,67 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
   assert.match(log, /chain starts in .* \(runner reloaded\), .*from session 2/);
   assert.equal(JSON.parse(fs.readFileSync(path.join(state, "seen-2.json"), "utf8")).crossSessionInbound, "refuse");
 });
+
+// ---------------------------------------------------------------- C3: attended runs
+// start --attended (config "attended"): the user is at hand but not watching. A new session's header says so and carries
+// references/attended.md after its mode's rules; an unattended header is as it was.
+const attendedText = () => fs.readFileSync(path.join(path.dirname(path.dirname(CHAIN)), "references", "attended.md"), "utf8").replace(/\r\n/g, "\n").trim();
+const attendedOf = (c) => JSON.parse(fs.readFileSync(path.join(c.state, "run.json"), "utf8")).attended;
+
+test("start --attended keeps attended in run.json, the flag over the config, and refuses any other value", () => {
+  const c = pointerCase();
+  const start = (extra) => c.run("start", ["--state", c.state, "--prompt", "x", "--allow-dirty", ...extra]);
+  assert.match(start(["--attended"]).stderr, /launch refused \(test\)/);
+  assert.equal(attendedOf(c), true);
+  start([]);
+  assert.equal(attendedOf(c), false);
+  start(["--attended", "true"]);
+  assert.equal(attendedOf(c), true);
+  fs.mkdirSync(path.join(c.repo, ".claude"), { recursive: true });
+  fs.writeFileSync(path.join(c.repo, ".claude", "night-shift.json"), JSON.stringify({ attended: true }));
+  start([]);
+  assert.equal(attendedOf(c), true);
+  start(["--attended", "false"]);
+  assert.equal(attendedOf(c), false);
+  // A refusal comes before anything is written: the last start's prompt and run.json stay.
+  const kept = () => [fs.readFileSync(path.join(c.state, "next-prompt.md"), "utf8"), fs.readFileSync(path.join(c.state, "run.json"), "utf8")];
+  const before = kept();
+  for (const v of ["yes", "1"]) {
+    const r = c.run("start", ["--state", c.state, "--prompt", "a new prompt", "--allow-dirty", "--attended", v]);
+    assert.match(r.stderr, new RegExp(`--attended takes true or false \\(got ${v}\\)`), v);
+    assert.doesNotMatch(r.stderr, /launch refused/, v);
+    assert.deepEqual(kept(), before, v);
+  }
+  fs.writeFileSync(path.join(c.repo, ".claude", "night-shift.json"), JSON.stringify({ attended: "yes" }));
+  assert.match(start([]).stderr, /"attended" must be true or false/);
+});
+
+test("an attended run's header says the user is at hand and carries attended.md; AskUserQuestion stays off", async () => {
+  const { repo, state, env, root } = setup();
+  const fake = path.join(root, "fake-attended.mjs");
+  fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path";
+const st = process.env.NIGHT_SHIFT_STATE; let input = "";
+for await (const c of process.stdin) input += c;
+fs.writeFileSync(path.join(st, "seen.json"), JSON.stringify({ input, args: process.argv.slice(2) }));
+fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done");
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-1", result: "ok" }));
+`);
+  const e = { ...env, NIGHT_SHIFT_CLAUDE: fake };
+  const out = execFileSync(process.execPath, [CHAIN, "start", "--repo", repo, "--state", state, "--prompt", "first", "--attended"], { env: e, cwd: root, encoding: "utf8" });
+  const done = await waitFor(repo, e, root).done;
+  assert.equal(done.code, 0, done.out);
+  assert.match(out, /^ {2}attended: .*questions\.md/m);
+  const { input, args } = JSON.parse(fs.readFileSync(path.join(state, "seen.json"), "utf8"));
+  const head = input.slice(0, input.indexOf("\n---\n"));
+  assert.match(head, /^The user is at hand until the chain ends but not watching: no session ever waits for them, and AskUserQuestion stays off\.$/m);
+  assert.doesNotMatch(head, /cannot answer any question/);
+  assert.ok(head.includes(`Mode: opus.\n${modeText("opus")}\n${attendedText()}\nSkill folder: `), head);
+  assert.match(args[args.indexOf("--disallowedTools") + 1], /\bAskUserQuestion\b/);
+});
+
+test("an unattended run's header is as it was: the user is away, and no attended rules", async () => {
+  const one = await headerOf("en");
+  assert.match(one.input, /^The user is away until the chain ends and cannot answer any question\.$/m);
+  assert.ok(one.input.includes(`Mode: opus.\n${modeText("opus")}\nSkill folder: `));
+  assert.ok(!one.input.includes("**Attended run.**"));
+});

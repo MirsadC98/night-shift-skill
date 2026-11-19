@@ -17,9 +17,12 @@ const readmePath = path.join(root, "..", "README.md");
 // U24 (2026-11-19): the planning prompt start --goal wraps a goal in.
 const goalPath = path.join(root, "references", "goal.md");
 const goal = fs.existsSync(goalPath) ? fs.readFileSync(goalPath, "utf8").replace(/\r\n/g, "\n") : "";
+// C3 (2026-11-19): an attended run's rules, which the runner puts into such a run's new session's header.
+const attendedPath = path.join(root, "references", "attended.md");
+const attended = fs.existsSync(attendedPath) ? fs.readFileSync(attendedPath, "utf8").replace(/\r\n/g, "\n") : "";
 
 test("the skill's texts carry nothing of one person's setup", () => {
-  for (const t of [skill, interactive, goal, ...Object.values(modeText)]) {
+  for (const t of [skill, interactive, goal, attended, ...Object.values(modeText)]) {
     assert.doesNotMatch(t, /[^\P{L}a-zA-Z]/u);
     assert.doesNotMatch(t, /\bRun \d/);
     assert.doesNotMatch(t, /~\/\.claude\/CLAUDE\.md/);
@@ -115,4 +118,25 @@ test("SKILL.md does not grow past its budget", () => {
 test("SKILL.md names the prompt size the runner flags", async () => {
   const { PROMPT_WARN_BYTES } = await import("./night-chain.mjs");
   assert.ok(skill.includes(`the runner reports one over ${PROMPT_WARN_BYTES / 1000} KB`), `SKILL.md: over ${PROMPT_WARN_BYTES / 1000} KB`);
+});
+
+// C3: an attended run's rules: a question goes out at once in one line of questions.md, a hard stop too, the piece that
+// depends on it waits, and answers come through the inbox; the guard and SKILL.md stay as they are.
+test("attended.md asks at once in questions.md, hard stops included, defers what depends on a question and reads answers from the inbox", () => {
+  assert.match(attended, /^\*\*Attended run\.\*\* /);
+  assert.ok(attended.includes("`$NIGHT_SHIFT_STATE/questions.md`"));
+  assert.ok(attended.includes("`Q<n> · <HH:MM> · <question> · <your pick and why> · <what changes if they pick otherwise>`"));
+  assert.match(attended, /hard stop/i);
+  assert.match(attended, /never do it yourself/);
+  assert.match(attended, /behind the other approved work/);
+  assert.ok(attended.includes("`A<n>: <answer>`") && attended.includes("`$NIGHT_SHIFT_STATE/inbox.md`"));
+  assert.match(attended, /At step 3, move the inbox first, then read it again/);
+  assert.doesNotMatch(skill, /questions\.md|Attended run/, "SKILL.md holds none of it");
+});
+test("the help, interactive.md and the README name --attended", { skip: !fs.existsSync(readmePath) && "no README beside this copy" }, () => {
+  const help = fs.readFileSync(path.join(root, "scripts", "night-chain.mjs"), "utf8");
+  for (const [name, t] of [["night-chain.mjs", help], ["interactive.md", interactive], ["README.md", fs.readFileSync(readmePath, "utf8")]]) {
+    assert.ok(t.includes("--attended"), `${name}: --attended`);
+  }
+  assert.match(fs.readFileSync(readmePath, "utf8"), /^- `attended`: /m);
 });

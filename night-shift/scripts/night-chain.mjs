@@ -8,10 +8,13 @@
 //                               [--until HH:MM] [--max-sessions <n>] [--session-hours 4] [--model <m>] [--allow-dirty]
 //                               [--effort xhigh] [--fable-ceiling 0.6] [--fable-sessions 2]
 //                               [--max-wait-hours 6] [--weekly-ceiling <share>] [--max-usd <dollars>]
-//                               [--mode opus|fable|mythos]
+//                               [--mode opus|fable|mythos] [--attended [true|false]]
 //                               [--lang <code>] [--state <dir>] [--window]
 //   (a goal needs no roadmap: the runner wraps it in references/goal.md's planning prompt, and session 1 writes a
 //    roadmap for it, approves it and hands its first piece on; a goal starts fresh as a prompt does)
+//   (--attended, "attended": true: the user is at hand but not watching. No session waits for them; each
+//    writes a question that needs them to <state>/questions.md at once and goes on, as references/attended.md
+//    says; --attended false turns a config's true off for one start)
 //   (without --until and --max-sessions the chain goes on until a session writes STOP,
 //    two handovers fail in a row, or stop is called; a usage limit pauses it, and the
 //    session it cut off is resumed with --resume once the limit resets. start without
@@ -79,6 +82,9 @@ const modeRules = (mode) => (mode ? read(path.join(SKILL_DIR, "references", `mod
 // prompt, each line quoted ("> "), so that a heading or a MODEL: line in it stays the user's text and never the prompt's
 // shape or a directive; session 1 plans the job and hands its first piece to session 2.
 const GOAL_PROMPT = path.join(SKILL_DIR, "references", "goal.md");
+// C3 (2026-11-19): an attended run's rules (the user at hand, not watching), in a new session's header after its mode's.
+const ATTENDED = path.join(SKILL_DIR, "references", "attended.md");
+const attendedRules = (run) => (run.attended ? read(ATTENDED).replace(/\r\n/g, "\n").trim() : "");
 const goalPrompt = (goal, template) => template.replace(/\r\n/g, "\n").replace("{{goal}}",
   () => goal.replace(/\r\n?/g, "\n").trim().split("\n").map((l) => (l.trim() ? `> ${l}` : ">")).join("\n"));
 const GUARD = path.join(path.dirname(SELF), "guard.mjs");
@@ -342,6 +348,11 @@ async function start(opt) {
     if (!template.includes("{{goal}}")) fail(`${GOAL_PROMPT} is missing or has no {{goal}} line; copy the skill folder again`);
     planning = goalPrompt(goal, template);
   }
+  // C3: --attended alone or "true" turns it on, "false" turns a config's true off for this start; nothing else is guessed.
+  const attArg = opt.attended;
+  if (attArg !== undefined && ![true, "true", "false"].includes(attArg)) fail(`--attended takes true or false (got ${attArg})`);
+  const attended = attArg !== undefined ? attArg !== "false" : cfg.attended === true;
+  if (attended && !read(ATTENDED).trim()) fail(`${ATTENDED} is missing; copy the skill folder again`);
   // A language is never guessed from "PT" or "pt-BR": a night in English that was asked for in another language is worse than a refusal.
   if (opt.lang !== undefined && !isLangCode(opt.lang)) fail(`--lang must be a language code in lowercase, such as en or pt-br (got ${opt.lang === true ? "no value" : opt.lang})`);
   if (opt.mode !== undefined && !MODES.includes(opt.mode)) fail(`--mode must be one of ${MODES.join(", ")} (got ${opt.mode === true ? "no value" : opt.mode})`);
@@ -428,6 +439,8 @@ async function start(opt) {
     maxUsd: opt["max-usd"] !== undefined ? num(opt["max-usd"]) : cfg.maxUsd ?? null,
     // "none", "inherit" or the list of servers the guard lets through (the guard reads the same file).
     mcp: cfg.mcp ?? "none",
+    // C3: the user is at hand but not watching (references/attended.md); a run.json without it is unattended.
+    attended,
     lang,
     claude: findClaude(),
     report: cfg.report || "NIGHT_RUNS.md",
@@ -453,6 +466,7 @@ async function start(opt) {
   if (cut) console.log(`  resumes session ${cut.nn} (${cut.sessionId}), which the last runner left unfinished`);
   console.log(`  state:  ${state}`);
   if (planning) console.log("  goal:   the first session plans it into a roadmap (references/goal.md); the work starts in the session after it");
+  if (run.attended) console.log(`  attended: no session waits for you; each writes a question that needs you to ${path.join(state, "questions.md")} at once and goes on (references/attended.md)`);
   console.log(modelLine(run));
   console.log(`  until:  ${run.until ? `${run.until} (no new session after that)` : "the work is done (STOP)"}${run.maxSessions ? `, at most ${run.maxSessions} sessions, the last of them session ${String(run.lastSession).padStart(2, "0")}` : ""}`);
   for (const l of ruleLines(ruleStatus(repo))) console.log(l);
@@ -894,11 +908,13 @@ function runSession(run, session, plan, nn, resume, rules = "", mcp = ["--strict
     ...(rules ? ["", rules] : []),
   ].join("\n") : [
     `Night shift (night-shift), session ${session}${lastSessionOf(run) ? `/${lastSessionOf(run)}` : ""}, ${now()}.`,
-    `The user is away ${run.until ? `until ${run.until}` : "until the chain ends"} and cannot answer any question.`,
+    run.attended
+      ? `The user is at hand ${run.until ? `until ${run.until}` : "until the chain ends"} but not watching: no session ever waits for them, and AskUserQuestion stays off.`
+      : `The user is away ${run.until ? `until ${run.until}` : "until the chain ends"} and cannot answer any question.`,
     `First invoke the night-shift skill and follow its "Inside a night session" part.`,
     `The user reads ${strings(langOf(run)).name}: write the night report's own text and its Waits-for-you items in that language, and keep the report's fixed words as the skill gives them.`,
     `Mode: ${run.mode}.`,
-    ...[modeRules(run.mode)].filter(Boolean),
+    ...[modeRules(run.mode), attendedRules(run)].filter(Boolean),
     `Skill folder: ${SKILL_DIR}. Continuation file: ${path.join(run.state, "next-prompt.md")}. Night report: ${run.report}.`,
     // Opus mode: a Fable or Mythos session is for its one piece, and a refused one is told why. Fable or
     // mythos mode: the stand-in is told the main model cannot run it and why.

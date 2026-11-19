@@ -127,6 +127,10 @@ test("the weekly ceiling is a run-wide key: one allowance serves every project",
 test("the dollar cap is a run-wide key too: one bill serves every project", () => {
   assert.deepEqual(readGlobalConfig(tmpHome({ maxUsd: 20 })), { config: { maxUsd: 20 }, errors: [] });
 });
+test("attended is a run-wide key, true or false: the user is at hand or not, whatever the project", () => {
+  assert.deepEqual(readGlobalConfig(tmpHome({ attended: true })), { config: { attended: true }, errors: [] });
+  assert.deepEqual(readGlobalConfig(tmpHome({ attended: "yes" })).errors, ['"attended" must be true or false']);
+});
 test("a missing global file is no error", () => assert.deepEqual(readGlobalConfig(emptyHome()), { config: {}, errors: [] }));
 test("the project file wins over the global one, key by key", () => {
   const home = tmpHome({ lang: "xx", effort: "high" }), repo = repoWith({ effort: "max" });
