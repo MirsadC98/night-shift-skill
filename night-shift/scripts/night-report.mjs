@@ -160,6 +160,13 @@ function addUntracked(row, mu) {
 }
 const untrackedRow = (model, mu) => addUntracked({ kind: "ana", model, agents: 0, usage: blank(), cost: 0, untracked: true }, mu);
 
+// T9: a session's start, the context its first main-thread call read (input, cache read and cache write): what the
+// header, the prompt, the skills and the tools cost before any work. null when the session made no call.
+function startTokens(entries) {
+  const u = entries.find((j) => j.type === "assistant" && !j.parent_tool_use_id && !j.isSidechain && j.message?.usage && j.message.model !== "<synthetic>")?.message.usage;
+  return u ? (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0) : null;
+}
+
 function parseSession(state, nn) {
   const file = path.join(state, `session-${nn}.jsonl`);
   const entries = jsonl(file);
@@ -207,6 +214,7 @@ function parseSession(state, nn) {
   const last = tools.at(-1);
   return {
     nn, rows, result, workflows: agents.workflows,
+    startCtx: startTokens(mainEntries),
     // The effort each main-thread call really ran at (settings can drift: 2026-10-30, xhigh → high).
     efforts: [...new Set(mainEntries.filter((j) => j.type === "assistant" && !j.isSidechain && j.perTurnEffort).map((j) => j.perTurnEffort))],
     limits: entries.filter((j) => j.type === "rate_limit_event").map((j) => j.rate_limit_info).filter(Boolean),
@@ -454,7 +462,8 @@ export function buildReport(state, { headline = "", focus = null, pid = null } =
 
   const shown = focus === "all" ? parsed : parsed.filter((s) => s.nn === (focus || parsed.at(-1)?.nn));
   for (const s of shown) {
-    const other = [T.compactions(s.compactions), T.thinking(tokens(s.rows.reduce((a, r) => a + r.usage.thinking, 0))), T.toolErrors(s.toolErrors)];
+    const other = [...(s.startCtx != null ? [T.startTokens(tokens(s.startCtx))] : []),
+      T.compactions(s.compactions), T.thinking(tokens(s.rows.reduce((a, r) => a + r.usage.thinking, 0))), T.toolErrors(s.toolErrors)];
     if (s.workflows.length) other.push(T.workflows(s.workflows.join(", ")));
     if (!s.result && s.rows.some((r) => r.kind !== "ana")) other.push(T.agentLater);
     out.push(`<b>${T.tokenHead} · #${s.nn}</b>\n<pre>${esc(rowLines([...s.rows]))}\n${T.otherLabel}: ${esc(other.join(" · "))}\n${T.totalLabel} ${sessionCost(s)}\n${T.limitLabel} ${limitSpan([s])}</pre>`);
@@ -472,7 +481,10 @@ export function buildReport(state, { headline = "", focus = null, pid = null } =
       t.untracked &&= Boolean(r.untracked);
     }
     const sum = Object.values(total).reduce((a, r) => a + r.cost, 0);
-    out.push(`<b>${T.nightTotal(parsed.length)}</b>\n<pre>${esc(rowLines(Object.values(total)))}\n${T.totalLabel} ${parsed.some((s) => !s.result) ? "≈" : ""}${usd(sum)}\n${T.limitLabel} ${limitSpan(parsed)}</pre>`);
+    // The mean start of the jobs that made a call: what a lean header saves, job by job.
+    const starts = parsed.map((s) => s.startCtx).filter((n) => n != null);
+    const mean = starts.length ? `\n${T.meanStart(tokens(Math.round(starts.reduce((a, n) => a + n, 0) / starts.length)), starts.length)}` : "";
+    out.push(`<b>${T.nightTotal(parsed.length)}</b>\n<pre>${esc(rowLines(Object.values(total)))}${esc(mean)}\n${T.totalLabel} ${parsed.some((s) => !s.result) ? "≈" : ""}${usd(sum)}\n${T.limitLabel} ${limitSpan(parsed)}</pre>`);
   }
 
   const timeline = [];

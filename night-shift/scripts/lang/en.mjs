@@ -103,6 +103,9 @@ export default {
   tokenHead: "Tokens",
   kinds: { ana: "main", alt: "sub", wf: "wf" },
   costWhenDone: "when the job ends",
+  // the context a job's first call read, and the mean of the jobs that made one
+  startTokens: (t) => `start ${t}`,
+  meanStart: (t, n) => `mean start ${t} over ${n} job${s(n)}`,
   compactions: (n) => `compactions ${n}`,
   thinking: (t) => `thinking ${t}`,
   toolErrors: (n) => `tool errors ${n}`,

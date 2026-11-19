@@ -56,6 +56,32 @@ test("a guard denial is counted only when the hook refused a call, and its reaso
   assert.ok(reason.length <= 160 && reason.endsWith("…"), reason);
 });
 
+// T9: a session's start is the context its first main-thread call read: the header, the prompt and the tools, before any work.
+const call = (model, usage, extra = {}) => line({ type: "assistant", ...extra, message: { model, role: "assistant", content: [], usage: { output_tokens: 1, ...usage } } });
+test("each job's Tokens part shows its start, the first main-thread call's context, and the night total the mean", () => {
+  const first = { input_tokens: 3, cache_read_input_tokens: 20_000, cache_creation_input_tokens: 13_000 };
+  const state = finished([
+    call("<synthetic>", { input_tokens: 0 }),
+    call("claude-sonnet-5-5", { input_tokens: 90_000 }, { parent_tool_use_id: "toolu_fixture_a" }),
+    call("claude-haiku-4-5", { input_tokens: 70_000 }, { isSidechain: true }),
+    call("claude-opus-5-5", first),
+    call("claude-opus-5-5", { input_tokens: 1, cache_read_input_tokens: 80_000 }),
+    success({ "claude-opus-5-5": used(10, 7, 1.2) }, 1.2),
+  ]);
+  const plain = buildReport(state, { focus: "all", pid: 0 }).plain;
+  assert.match(plain, /^other: start 33k · compactions 0 · /m);
+  assert.match(plain, /^mean start 33k over 1 job$/m);
+  // A second job: the mean is over the jobs that made a call; one without a call shows no start.
+  fs.appendFileSync(path.join(state, "chain.log"), ["[2026-11-19 04:20:00] session 02 starts: two", "[2026-11-19 04:30:00] session 02 ends: ok",
+    "[2026-11-19 04:31:00] session 03 starts: three", "[2026-11-19 04:32:00] session 03 ends: ok", ""].join("\n"));
+  fs.writeFileSync(path.join(state, "session-02.jsonl"), [call("claude-opus-5-5", { input_tokens: 1, cache_read_input_tokens: 40_998 }), success({}, 0.5), ""].join("\n"));
+  fs.writeFileSync(path.join(state, "session-03.jsonl"), [success({}, 0), ""].join("\n"));
+  const two = buildReport(state, { focus: "all", pid: 0 }).plain;
+  assert.match(two, /^other: start 41k · /m);
+  assert.match(two, /^mean start 37k over 2 jobs$/m);
+  assert.equal((two.match(/^other: start /gm) || []).length, 2, "job 03 made no call");
+});
+
 test("a session that only reads or greps the guard's source shows no denial", () => {
   const readOnly = guardText.filter((l) => !/hook error: night-shift guard/.test(l));
   const state = finished([...readOnly, ...failedRead, success({ "claude-opus-5-5": used(10, 7, 1.2) }, 1.2)]);
