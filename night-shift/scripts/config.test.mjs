@@ -34,7 +34,7 @@ test("a missing file is an empty config; a valid one is returned as written", ()
   assert.deepEqual(readProjectConfig(repoWith()), { config: {}, errors: [] });
   const cfg = {
     stateDir: "C:/temp/x-night-{date}", report: "docs/N.md", lessons: "docs/NOTES.md", model: "opus", effort: "xhigh",
-    fableCeiling: 0.6, fableSessions: 2, maxWaitHours: 6, mcp: ["github"],
+    fableCeiling: 0.6, fableSessions: 2, maxWaitHours: 6, weeklyCeiling: 0.8, mcp: ["github"],
     deny: [{ pattern: "deploy\\.ps1", reason: "no deploys", flags: "i" }, { pattern: "x" }],
     _note: "a comment", $schema: "ignored",
   };
@@ -68,7 +68,10 @@ test("a misspelt key and a wrong type are named", () => {
   assert.equal(n({ maxWaitHours: 0 }), 1);
   assert.equal(n({ deny: { pattern: "x" } }), 1);
   assert.equal(n({ deny: [{ reason: "no pattern" }] }), 1);
-  assert.equal(n({ fableCeiling: 100, fableSessions: 0, maxWaitHours: 0.5 }), 0);
+  assert.equal(n({ weeklyCeiling: 0 }), 1);
+  assert.equal(n({ weeklyCeiling: 101 }), 1);
+  assert.equal(n({ weeklyCeiling: "80" }), 1);
+  assert.equal(n({ fableCeiling: 100, fableSessions: 0, maxWaitHours: 0.5, weeklyCeiling: 80 }), 0);
 });
 
 test("a state folder may not be a drive, the home folder, the repository, temp itself, .git or ~/.claude", () => {
@@ -114,6 +117,9 @@ test("the global file holds only run-wide keys", () => {
   const { config, errors } = readGlobalConfig(home);
   assert.deepEqual(config, { lang: "xx" });
   assert.deepEqual(errors, ['"stateDir" belongs in a project\x27s .claude/night-shift.json', 'unknown key "nope"']);
+});
+test("the weekly ceiling is a run-wide key: one allowance serves every project", () => {
+  assert.deepEqual(readGlobalConfig(tmpHome({ weeklyCeiling: 0.8 })), { config: { weeklyCeiling: 0.8 }, errors: [] });
 });
 test("a missing global file is no error", () => assert.deepEqual(readGlobalConfig(emptyHome()), { config: {}, errors: [] }));
 test("the project file wins over the global one, key by key", () => {

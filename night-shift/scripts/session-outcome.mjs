@@ -24,6 +24,9 @@
 
 const FABLE_REFUSALS = new Set(["model_requires_usage_credits", "model_substitution_disabled", "consent_unanswered", "no_allowed_fallback"]);
 const FABLE_WINDOW = "seven_day_overage_included";
+// The windows of a rate_limit_event the runner and the report read, and the stream fields that carry them (U14).
+const WINDOWS = ["five_hour", "seven_day", FABLE_WINDOW];
+export const STREAM_FIELDS = ["rate_limit_event", ...WINDOWS.map((k) => `unifiedWindows.${k}`)];
 
 const LIMIT_TEXT = /^\s*(?:Claude AI usage limit reached|You(?:'|’)ve hit your [\w -]{1,30}limit)/i;
 const LOOSE = /usage limit|limit reached|rate.?limit|hit your [\w-]+ limit/i;
@@ -34,7 +37,8 @@ export function sessionOutcome(stream, errText = "", code = null, { timedOut = f
   // the result that follows it, not to a later part of the conversation.
   let res = null, cost = 0, pending = null, rejected = null, lastRejected = null, sessionId = null, model = null, switchedTo = null;
   let first = null, last = null, modelTurn = false;
-  const mainModels = new Set();
+  const latest = {};
+  const mainModels = new Set(), fields = new Set();
   for (const line of String(stream).trim().split("\n")) {
     let j;
     try { j = JSON.parse(line); } catch { continue; }
@@ -47,6 +51,9 @@ export function sessionOutcome(stream, errText = "", code = null, { timedOut = f
       if (j.rate_limit_info?.status === "rejected") pending = lastRejected = j.rate_limit_info;
       else if (j.rate_limit_info) lastRejected = null;
       const w = j.rate_limit_info?.unifiedWindows;
+      fields.add("rate_limit_event");
+      // A window is read only with its share: one whose utilization was renamed is as gone as the window.
+      for (const k of WINDOWS) if (typeof w?.[k]?.utilization === "number") { fields.add(`unifiedWindows.${k}`); latest[k] = w[k]; }
       if (w) { first ||= w; last = w; }
     } else if (j.type === "system" && j.subtype === "init") model = j.model || model;
     else if (j.type === "system" && /^Switched to /.test(String(j.content ?? ""))) switchedTo = /^Switched to (.+?)(?:,| for this session| ·)/.exec(j.content)?.[1] || "another model";
@@ -99,13 +106,33 @@ export function sessionOutcome(stream, errText = "", code = null, { timedOut = f
     model,
     mainModels: [...mainModels],
     switchedTo,
-    // The limit windows of the session's first and last rate_limit_event (the whole account's).
-    windows: { first, last },
+    // The limit windows of the session's first and last rate_limit_event (the whole account's), and each window's
+    // latest reading, which an event without that window (another model's call) does not drop.
+    windows: { first, last, latest },
     timedOut,
+    // The known stream fields this stream carried (STREAM_FIELDS' order), for fieldsGone.
+    fields: STREAM_FIELDS.filter((f) => fields.has(f)),
     summary: (res
       ? `${res.subtype}${res.is_error ? " (error)" : ""}, ${res.num_turns} turns, $${cost.toFixed(2)}`
       : timedOut ? "" : `exit ${code}, no result line`) + (timedOut ? `${res ? "; " : ""}killed${hours != null ? ` after ${hours} h` : ""} (--session-hours)` : ""),
   };
+}
+
+// U14: the fields above are the CLI's undocumented ones, and a rename would blind the limit lines, the Fable gate and
+// --weekly-ceiling in silence. A known field earlier sessions of the chain had and a session with turns lacks is gone,
+// told once per chain (memo, kept in the state folder); a session without a turn made no call and says nothing.
+// Fable's window comes only with Fable or Mythos calls (premium). With a weekly ceiling, a seven-day window that never
+// came is told once too (ceilingBlind): such an account's ceiling has nothing to read.
+export function fieldsGone({ fields = [], turns = false, premium = false } = {}, memo = {}, { ceiling = null } = {}) {
+  const seen = Array.isArray(memo?.seen) ? memo.seen : [], told = Array.isArray(memo?.told) ? memo.told : [];
+  if (!turns) return { gone: [], ceilingBlind: false, memo: { seen, told } };
+  const expected = STREAM_FIELDS.filter((f) => premium || f !== `unifiedWindows.${FABLE_WINDOW}`);
+  let gone = expected.filter((f) => seen.includes(f) && !fields.includes(f) && !told.includes(f));
+  // The whole event gone is one line, not one per window.
+  if (!fields.includes("rate_limit_event") && seen.includes("rate_limit_event")) gone = gone.filter((f) => f === "rate_limit_event");
+  const week = "unifiedWindows.seven_day";
+  const ceilingBlind = Boolean(ceiling) && !fields.includes(week) && !seen.includes(week) && !told.includes("ceiling");
+  return { gone, ceilingBlind, memo: { seen: [...new Set([...seen, ...fields])], told: [...told, ...gone, ...(ceilingBlind ? ["ceiling"] : [])] } };
 }
 
 // "5h 39%→41% · 7d 32%→33% · fable 13%→17%": a session's limit ratios at its first and last event.

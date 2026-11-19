@@ -345,6 +345,9 @@ function runnerNote(text, T, main = null) {
   if ((m = /^session \d+ was to run on (\w+), but (.*)$/.exec(text))) return T.note.fableNot(m[2], m[1]);
   if ((m = /^session \d+: this account cannot run (\w+) \(.*\); MODEL: (\w+) runs on Opus at max for the rest of this chain$/.exec(text))) return T.note.cannotRun(m[1], m[2]);
   if ((m = /^session \d+ wrote a next-prompt\.md of (\d+) KB/.exec(text))) return T.note.bigPrompt(m[1]);
+  // U14 (2026-11-19 on): a known stream field stopped arriving, or the weekly ceiling's window never came.
+  if ((m = /^session \d+: its stream had no (\S+), which earlier sessions' streams had/.exec(text))) return T.note.fieldGone(m[1]);
+  if (/^session \d+: its stream had no unifiedWindows\.seven_day, which --weekly-ceiling reads/.test(text)) return T.note.ceilingBlind;
   if ((m = /^session \d+: MODEL: (\S+) is not a model/.exec(text))) return main && !onStandIn(text) ? T.note.badModelFable(m[1], familyName(main)) : T.note.badModel(m[1]);
   if ((m = /^session \d+: MODEL: (\S+) is the same model as (\w+), this run's main model/.exec(text))) return T.note.sameModel(m[1], m[2], onStandIn(text) ? familyName("opus") : m[2]);
   return null;

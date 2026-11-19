@@ -490,6 +490,11 @@ for (const [k, v] of Object.entries(step.rules || {})) {
 }
 if (step.fable != null) console.log(JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "allowed",
   unifiedWindows: { five_hour: { utilization: 0.4 }, seven_day: { utilization: 0.3 }, seven_day_overage_included: { utilization: step.fable, resetsAt: step.resets } } } }));
+// step.week: a limit event whose seven-day window is at that share, resetting at step.weekResets (epoch s).
+if (step.week != null) console.log(JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "allowed",
+  unifiedWindows: { five_hour: { utilization: 0.4 }, seven_day: { utilization: step.week, resetsAt: step.weekResets ?? null } } } }));
+// step.lines: stream lines written as they are.
+for (const l of step.lines || []) console.log(l);
 // step.model: one main-conversation turn on that model, at step.effort, as the CLI reports a turn.
 if (step.model) console.log(JSON.stringify({ type: "assistant", perTurnEffort: step.effort, message: { model: step.model, usage: { input_tokens: 1, output_tokens: 1 }, content: [] } }));
 if (step.next != null) fs.writeFileSync(path.join(st, "next-prompt.md"), step.next);
@@ -2165,7 +2170,7 @@ const startPrints = async (setupRules) => {
   const { repo, state, env, root, home } = setup();
   // An untracked rules file would make the tree dirty, which start refuses.
   fs.appendFileSync(path.join(repo, ".git", "info", "exclude"), "/.claude/\n");
-  setupRules({ repo, home });
+  setupRules({ repo, home, state });
   const e = { ...env, NIGHT_SHIFT_CLAUDE: path.join(root, "fake-claude.mjs") };
   const out = startChain(repo, state, e, root);
   const done = await waitFor(repo, e, root).done;
@@ -2215,15 +2220,17 @@ test("start refuses an --until, --max-sessions or --session-hours of the wrong s
   assert.equal(startRun(["--max-sessions", "03"]).run.maxSessions, 3, "a leading zero, as before");
 });
 
-test("start refuses an --effort, --fable-ceiling or --fable-sessions its config key would refuse, even with a good one in the config", () => {
+test("start refuses an --effort, --fable-ceiling, --fable-sessions or --weekly-ceiling its config key would refuse, even with a good one in the config", () => {
   for (const [extra, re] of [
     [["--effort", "turbo"], /--effort must be one of low, medium, high, xhigh, max \(got turbo\)/], [["--effort"], /--effort must be one of .*no value/],
     [["--fable-ceiling", "abc"], /--fable-ceiling must be a number above 0 and at most 100/], [["--fable-ceiling"], /--fable-ceiling .*no value/],
     [["--fable-ceiling", "0"], /--fable-ceiling must be/], [["--fable-ceiling", "101"], /--fable-ceiling must be/], [["--fable-ceiling", "-0.5"], /--fable-ceiling must be/],
     [["--fable-sessions", "two"], /--fable-sessions must be a whole number, 0 or more/], [["--fable-sessions", "1.5"], /--fable-sessions must be/],
     [["--fable-sessions", "-1"], /--fable-sessions must be/],
+    [["--weekly-ceiling", "most"], /--weekly-ceiling must be a number above 0 and at most 100 \(got most\)/], [["--weekly-ceiling"], /--weekly-ceiling .*no value/],
+    [["--weekly-ceiling", "0"], /--weekly-ceiling must be/], [["--weekly-ceiling", "101"], /--weekly-ceiling must be/],
   ]) {
-    const r = startRun(extra, { effort: "high", fableCeiling: 0.5, fableSessions: 1 });
+    const r = startRun(extra, { effort: "high", fableCeiling: 0.5, fableSessions: 1, weeklyCeiling: 0.8 });
     assert.equal(r.status, 1, extra.join(" "));
     assert.match(r.stderr, re, extra.join(" "));
     assert.doesNotMatch(r.stderr, /launch refused/, extra.join(" "));
@@ -2233,6 +2240,121 @@ test("start refuses an --effort, --fable-ceiling or --fable-sessions its config 
   const cfg = startRun([], { effort: "high", fableCeiling: 0.5, fableSessions: 1 }).run;
   assert.deepEqual([cfg.effort, cfg.fableCeiling, cfg.fableSessions], ["high", 0.5, 1]);
   assert.equal(startRun(["--fable-ceiling", "0.25"]).run.fableCeiling, 0.25);
+  // The weekly ceiling: none unless asked for, the flag over the config, a percentage read as its ratio.
+  assert.equal(startRun([]).run.weeklyCeiling, null);
+  assert.equal(startRun([], { weeklyCeiling: 0.7 }).run.weeklyCeiling, 0.7);
+  assert.equal(startRun(["--weekly-ceiling", "85"], { weeklyCeiling: 0.7 }).run.weeklyCeiling, 0.85);
+});
+
+// T4, U14: limits.json keeps the seven-day window's last reading for a later start in the same folder while the window has
+// not reset, and the stream fields the chain has seen; which lost field was told goes, so each chain tells it once.
+test("start keeps the seven-day window's reading until it resets, and the stream fields seen, but not what was told", () => {
+  const ahead = Math.floor(Date.now() / 1000) + 86_400, past = Math.floor(Date.now() / 1000) - 60;
+  const seen = ["rate_limit_event", "unifiedWindows.seven_day"];
+  const limitsAfter = (before) => {
+    const c = pointerCase();
+    fs.writeFileSync(path.join(c.state, "limits.json"), typeof before === "string" ? before : JSON.stringify(before));
+    assert.match(c.run("start", ["--state", c.state, "--prompt", "x", "--allow-dirty"]).stderr, /launch refused \(test\)/);
+    return JSON.parse(fs.readFileSync(path.join(c.state, "limits.json"), "utf8"));
+  };
+  const week = { ratio: 0.86, resetsAt: ahead, at: 1 };
+  assert.deepEqual(limitsAfter({ week, seen, told: ["unifiedWindows.seven_day"] }), { week, seen, told: [] });
+  assert.deepEqual(limitsAfter({ week: { ...week, resetsAt: past }, seen, told: ["ceiling"] }), { seen, told: [] });
+  assert.deepEqual(limitsAfter({ week: { ratio: 0.86, resetsAt: null, at: 1 } }), { seen: [], told: [] }, "a reading that names no reset is not kept");
+  assert.deepEqual(limitsAfter("{ broken"), { seen: [], told: [] });
+});
+
+test("start prints the weekly ceiling, and the kept reading that already stops the chain", async () => {
+  const ahead = Math.floor(Date.now() / 1000) + 86_400;
+  const cfg = (repo, v) => { fs.mkdirSync(path.join(repo, ".claude"), { recursive: true }); fs.writeFileSync(path.join(repo, ".claude", "night-shift.json"), JSON.stringify({ weeklyCeiling: v })); };
+  const plain = await startPrints(({ repo }) => cfg(repo, 0.8));
+  assert.match(plain, /^ {2}ceiling: no new session once the seven-day window is at or over 80%$/m);
+  assert.match(plain, /^ {2}until: .*\n(?: {2}rules: .*\n)* {2}ceiling: /m, "after the until and rules lines");
+  const over = await startPrints(({ repo, state }) => {
+    cfg(repo, 80);
+    fs.writeFileSync(path.join(state, "limits.json"), JSON.stringify({ week: { ratio: 0.86, resetsAt: ahead, at: Date.now() } }));
+  });
+  assert.match(over, /^ {2}ceiling: no new session once the seven-day window is at or over 80%; it was at 86% at \d{4}-\d\d-\d\d \d\d:\d\d, so none starts before it resets \d{4}-\d\d-\d\d \d\d:\d\d$/m);
+  assert.doesNotMatch(await startPrints(() => {}), /^ {2}ceiling:/m);
+});
+
+// T4: --weekly-ceiling ends the chain before a new session once the seven-day window's last reading is at or over it.
+test("--weekly-ceiling: no new session once the seven-day window is at or over it; next-prompt.md and the reading stay", async () => {
+  const resets = Math.floor(Date.now() / 1000) + 3 * 86_400;
+  const opus = "claude-opus-5-5";
+  const r = await fableRun("first", { 1: { week: 0.85, weekResets: resets, model: opus, next: "second" } }, { weeklyCeiling: 0.8 });
+  assert.match(r.log, /session 01 limits: 5h 40%→40% · 7d 85%→85%/);
+  assert.match(r.log, /chain ends: the seven-day window is at 85%, at or over the 80% weekly ceiling \(--weekly-ceiling\) until it resets \d{4}-\d\d-\d\d \d\d:\d\d; next-prompt\.md stays for a start with --state$/m);
+  assert.doesNotMatch(r.log, /session 02 starts/);
+  assert.equal(fs.readFileSync(path.join(r.state, "next-prompt.md"), "utf8"), "second");
+  const limits = JSON.parse(fs.readFileSync(path.join(r.state, "limits.json"), "utf8"));
+  assert.deepEqual([limits.week.ratio, limits.week.resetsAt, typeof limits.week.at], [0.85, resets, "number"]);
+  // Under the ceiling, or with none, the chain goes on; a later reading over it ends the chain before the next session.
+  const under = await fableRun("first", { 1: { week: 0.79, weekResets: resets, model: opus, next: "second" }, 2: { week: 0.8, weekResets: resets, model: opus, next: "third" } }, { weeklyCeiling: 0.8 });
+  assert.match(under.log, /session 02 starts: second/);
+  assert.match(under.log, /chain ends: the seven-day window is at 80%, at or over the 80% weekly ceiling/);
+  const none = await fableRun("first", { 1: { week: 0.95, weekResets: resets, model: opus, next: "second" }, 2: { next: "STOP: done" } });
+  assert.match(none.log, /session 02 starts: second/);
+  assert.match(none.log, /chain ends: STOP: done/);
+});
+
+test("--weekly-ceiling: a reading an earlier start kept stops the first session, a reset one does not, and a cut-off session still resumes", async () => {
+  const ahead = Math.floor(Date.now() / 1000) + 86_400, past = Math.floor(Date.now() / 1000) - 60;
+  const keep = (week, resume) => (state) => {
+    fs.writeFileSync(path.join(state, "limits.json"), JSON.stringify({ week: { ratio: 0.9, at: Date.now(), ...week } }));
+    if (resume) fs.writeFileSync(path.join(state, "resume.json"), JSON.stringify({ nn: "01", sessionId: "00000000-0000-4000-8000-000000000001", why: "limit" }));
+  };
+  const kept = await fableRun("first", { 1: { next: "STOP: done" } }, { weeklyCeiling: 0.8 }, keep({ resetsAt: ahead }));
+  assert.doesNotMatch(kept.log, /session 01 (starts|resumes)/);
+  assert.match(kept.log, /chain ends: the seven-day window is at 90%, at or over the 80% weekly ceiling/);
+  const reset = await fableRun("first", { 1: { next: "STOP: done" } }, { weeklyCeiling: 0.8 }, keep({ resetsAt: past }));
+  assert.match(reset.log, /session 01 starts: first/);
+  assert.match(reset.log, /chain ends: STOP: done/);
+  // A session a limit cut off may hold uncommitted work: it goes on, and the ceiling stops the session after it.
+  const resumed = await fableRun("first", { 1: { next: "second" } }, { weeklyCeiling: 0.8 }, keep({ resetsAt: ahead }, true));
+  assert.match(resumed.log, /session 01 resumes 00000000-0000-4000-8000-000000000001 after the usage limit/);
+  assert.match(resumed.log, /chain ends: the seven-day window is at 90%/);
+  assert.doesNotMatch(resumed.log, /session 02 starts/);
+  // A limit that cuts a session off after its handover: over the ceiling, the chain ends at once instead of waiting
+  // for the reset to end it then (no reset given: the wait would be 30 minutes, past the test's 90 s).
+  const cut = await fableRun("first", { 1: { week: 0.9, weekResets: ahead, model: "claude-opus-5-5", next: "second", refuse: "usage_limit_reached" } }, { weeklyCeiling: 0.8 });
+  assert.doesNotMatch(cut.log, /usage limit: waiting/);
+  assert.match(cut.log, /chain ends: the seven-day window is at 90%, at or over the 80% weekly ceiling/);
+  assert.equal(fs.readFileSync(path.join(cut.state, "next-prompt.md"), "utf8"), "second");
+  // The seven-day reading is the latest event that carried it, not only the last event.
+  const later = JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "allowed", unifiedWindows: { five_hour: { utilization: 0.5 } } } });
+  const partial = await fableRun("first", { 1: { fable: 0.65, resets: ahead, week: 0.9, weekResets: ahead, lines: [later], model: "claude-opus-5-5", next: "second" } }, { weeklyCeiling: 0.8 });
+  assert.match(partial.log, /chain ends: the seven-day window is at 90%/);
+  assert.equal(partial.fable().ratio, 0.65, "so is Fable's share");
+  // A share given as a percentage reads as its ratio.
+  const percent = await fableRun("first", { 1: { next: "STOP: done" } }, { weeklyCeiling: 0.8 }, keep({ ratio: 81, resetsAt: ahead }));
+  assert.match(percent.log, /chain ends: the seven-day window is at 81%/);
+});
+
+// U14: a known stream field that stops arriving is told once per chain, before the session's end line, so its card has it.
+test("a stream field earlier sessions had and a later one lacks is told once, on its card too; a session without a turn says nothing", async () => {
+  const { buildReport } = await import("./night-report.mjs");
+  const opus = "claude-opus-5-5", resets = Math.floor(Date.now() / 1000) + 86_400;
+  const renamed = JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "allowed", unifiedWindows: { five_hour: { utilization: 0.4 }, weekly: { utilization: 0.5 } } } });
+  const r = await fableRun("first", {
+    1: { week: 0.5, weekResets: resets, model: opus, next: "second" },
+    2: { lines: [renamed], model: opus, next: "third" },
+    3: { lines: [renamed], model: opus, next: "fourth" },
+    4: { next: "STOP: done" },
+  }, { weeklyCeiling: 0.8 });
+  const told = r.log.split("\n").filter((l) => /its stream had no/.test(l));
+  assert.equal(told.length, 1, r.log);
+  assert.match(told[0], /\] session 02: its stream had no unifiedWindows\.seven_day, which earlier sessions' streams had \(the CLI may have renamed it\); --weekly-ceiling and the limits line's 7d have nothing to read$/);
+  assert.ok(r.log.indexOf(told[0]) < r.log.indexOf("session 02 ends:"), "before the end line, which the card is made at");
+  assert.match(buildReport(r.state, { focus: "all", pid: 0 }).plain, /^⚠️ #02 stream field unifiedWindows\.seven_day stopped arriving \(the CLI may have renamed it\); chain\.log says what it blinds$/m);
+  // A ceiling whose window never came is told once too; without a ceiling that says nothing.
+  const blind = await fableRun("first", { 1: { lines: [renamed], model: opus, next: "second" }, 2: { lines: [renamed], model: opus, next: "STOP: done" } }, { weeklyCeiling: 0.8 });
+  const blindLines = blind.log.split("\n").filter((l) => /its stream had no/.test(l));
+  assert.equal(blindLines.length, 1, blind.log);
+  assert.match(blindLines[0], /\] session 01: its stream had no unifiedWindows\.seven_day, which --weekly-ceiling reads; until a session's stream has it, the ceiling stops no session$/);
+  assert.match(buildReport(blind.state, { focus: "all", pid: 0 }).plain, /^⚠️ #01 the CLI's stream has no seven-day window, so the weekly ceiling stops no session$/m);
+  const open = await fableRun("first", { 1: { lines: [renamed], model: opus, next: "STOP: done" } });
+  assert.doesNotMatch(open.log, /its stream had no/);
 });
 
 // P7: --max-sessions counts the sessions this start runs, in an earlier run's folder too; run.json keeps the count and the last number.

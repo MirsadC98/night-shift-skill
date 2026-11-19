@@ -7,8 +7,8 @@
 //   node night-chain.mjs start  --repo <dir> (--prompt-file <f> | --prompt <text>) [--until HH:MM]
 //                               [--max-sessions <n>] [--session-hours 4] [--model <m>] [--allow-dirty]
 //                               [--effort xhigh] [--fable-ceiling 0.6] [--fable-sessions 2]
-//                               [--max-wait-hours 6] [--mode opus|fable|mythos] [--lang <code>]
-//                               [--state <dir>] [--window]
+//                               [--max-wait-hours 6] [--weekly-ceiling <share>] [--mode opus|fable|mythos]
+//                               [--lang <code>] [--state <dir>] [--window]
 //   (without --until and --max-sessions the chain goes on until a session writes STOP,
 //    two handovers fail in a row, or stop is called; a usage limit pauses it, and the
 //    session it cut off is resumed with --resume once the limit resets. start without
@@ -26,7 +26,9 @@
 //    again from its prompt on Opus at max, and so does every such prompt until the allowance resets.
 //    A Mythos or Fable session the account cannot run hands its piece to Opus at max the same way.
 //    --mode fable or --mode mythos ("mode") makes that model every session's model at high, and Opus
-//    at xhigh (never max) stands in while its allowance is at or over the ceiling or used up)
+//    at xhigh (never max) stands in while its allowance is at or over the ceiling or used up.
+//    --weekly-ceiling ("weeklyCeiling", default none) starts no new session once the seven-day window
+//    is at or over that share, and ends the chain with next-prompt.md kept for a start with --state)
 //   node night-chain.mjs status --repo <dir>
 //   node night-chain.mjs wait   --repo <dir> [--state <dir>]  (returns once the chain is over: exit 0
 //                               with status's first lines and what waits for the user, 2 if it died;
@@ -55,7 +57,7 @@ import { fileURLToPath } from "node:url";
 import { buildReport, userWaits, stateLang } from "./night-report.mjs";
 import { strings, langOf, loadLang } from "./lang/index.mjs";
 import { mergedConfig, isLangCode, MODES, CONFIG_KEYS, stateDirProblem, tempRoot, isMain, claudeHome } from "./config.mjs";
-import { sessionOutcome, windowSpan } from "./session-outcome.mjs";
+import { sessionOutcome, windowSpan, fieldsGone } from "./session-outcome.mjs";
 import { listedServers, mcpArgs, claudeJson, mcpConfigArg, MCP_ARG_MAX } from "./mcp.mjs";
 import { ruleFiles, readRuleFile, rulesBlock } from "./rules.mjs";
 import { MAIN_MODEL, SUB_MODEL, MAIN_EFFORT, subEffortText, MAX_NOTE, nightModelSettings, sessionPlan, promptDirectives,
@@ -102,6 +104,32 @@ export const PROMPT_WARN_BYTES = 30_000;
 const ratioArg = (v, d) => { const n = Number(v); return v == null || v === true || Number.isNaN(n) ? d : n > 1 ? n / 100 : n; };
 const countArg = (v, d) => { const n = Number(v); return v == null || v === true || !Number.isFinite(n) || n < 0 ? d : Math.floor(n); };
 const pct = (u) => `${Math.round(u * 100)}%`;
+// <state>/limits.json: { week: { ratio, resetsAt (s), at (ms) }, the seven-day window's last reading (--weekly-ceiling),
+// and fieldsGone's memo { seen, told } (U14). A share as the stream gives it (0–1), or a percentage.
+const shareOf = (u) => (u > 1 ? u / 100 : u);
+// What each known stream field feeds, for the line that says it stopped arriving (fieldsGone).
+const FIELD_USE = {
+  rate_limit_event: "the limits line, the Fable gate and --weekly-ceiling have nothing to read",
+  "unifiedWindows.five_hour": "the limits line's 5h has nothing to read",
+  "unifiedWindows.seven_day": "--weekly-ceiling and the limits line's 7d have nothing to read",
+  "unifiedWindows.seven_day_overage_included": "the Fable gate goes by its last reading until that resets, then by the session count",
+};
+const limitsFile = (state) => path.join(state, "limits.json");
+export const readLimits = (state) => { const l = parseOr(read(limitsFile(state)), {}); return l && typeof l === "object" && !Array.isArray(l) ? l : {}; };
+const writeLimits = (state, patch) => fs.writeFileSync(limitsFile(state), JSON.stringify({ ...readLimits(state), ...patch }, null, 2));
+// The reading when it is at or over the ceiling and its window has not reset, with its share as a ratio; else null.
+// A reading that names no reset counts only in the chain that took it (start drops it: nothing says when it goes stale).
+export const weekOver = (week, ceiling, at = Date.now()) => {
+  if (!ceiling || typeof week?.ratio !== "number" || (week.resetsAt && week.resetsAt * 1000 <= at)) return null;
+  return shareOf(week.ratio) >= ceiling ? { ...week, share: shareOf(week.ratio) } : null;
+};
+// At start: the reading while its window has not reset, the fields seen, and nothing told yet (each chain tells once).
+const keepLimits = (state) => {
+  const l = readLimits(state);
+  const week = l.week?.resetsAt * 1000 > Date.now() && typeof l.week.ratio === "number" ? l.week : null;
+  fs.writeFileSync(limitsFile(state), JSON.stringify({ ...(week ? { week } : {}), seen: Array.isArray(l.seen) ? l.seen : [], told: [] }, null, 2));
+  return week;
+};
 // Hours as people read them: two decimals at most, no trailing zeros, and "<0.01" instead of a 0 or an exponent.
 export const hoursText = (h) => (h >= 0.01 ? String(Number(h.toFixed(2))) : "<0.01");
 // start's line about the models: the mode, the main model at its level, and the Opus that stands in
@@ -262,7 +290,7 @@ async function start(opt) {
   const hoursArg = opt["session-hours"];
   // At most 500: a timer over 2^31 ms (about 596 h) fires at once.
   if (hoursArg !== undefined && !(num(hoursArg) > 0 && num(hoursArg) <= 500)) fail(`--session-hours must be a positive number of hours, at most 500 (got ${got(hoursArg)})`);
-  for (const [flag, key] of [["effort", "effort"], ["fable-ceiling", "fableCeiling"], ["fable-sessions", "fableSessions"]]) {
+  for (const [flag, key] of [["effort", "effort"], ["fable-ceiling", "fableCeiling"], ["fable-sessions", "fableSessions"], ["weekly-ceiling", "weeklyCeiling"]]) {
     const v = opt[flag];
     const bad = v !== undefined && CONFIG_KEYS[key](key === "effort" ? v : num(v));
     if (bad) fail(`--${flag} ${bad} (got ${got(v)})`);
@@ -345,6 +373,8 @@ async function start(opt) {
     fableSessions: countArg(opt["fable-sessions"] ?? cfg.fableSessions, 2),
     // The longest a usage limit's reset may be away for the chain to wait for it; farther ends the chain.
     maxWaitHours: waitArg !== undefined ? Number(waitArg) : cfg.maxWaitHours > 0 ? cfg.maxWaitHours : 6,
+    // No new session once the seven-day window's use is at or over this share (null: no ceiling).
+    weeklyCeiling: ratioArg(opt["weekly-ceiling"] ?? cfg.weeklyCeiling, null),
     // "none", "inherit" or the list of servers the guard lets through (the guard reads the same file).
     mcp: cfg.mcp ?? "none",
     lang,
@@ -362,6 +392,9 @@ async function start(opt) {
   const fableFile = path.join(state, "fable.json");
   const fable = parseOr(read(fableFile), {});
   fs.writeFileSync(fableFile, JSON.stringify(fable.outUntil > Date.now() ? { outUntil: fable.outUntil } : {}, null, 2));
+  // The seven-day window's last reading stays while it has not reset, so a start that goes on here does not spend a
+  // session to learn the window is still over the ceiling; the stream fields seen stay, what was told goes (keepLimits).
+  const week = keepLimits(state);
   let task;
   try { task = scheduleRun(run); } catch (e) { fail(`Task Scheduler: ${String(e.stderr || e.message).trim().split("\n")[0]}`); }
   writePointer(repo, { pid: 0, state, task, scheduledAt: now(), finished: false });
@@ -371,6 +404,11 @@ async function start(opt) {
   console.log(modelLine(run));
   console.log(`  until:  ${run.until ? `${run.until} (no new session after that)` : "the work is done (STOP)"}${run.maxSessions ? `, at most ${run.maxSessions} sessions, the last of them session ${String(run.lastSession).padStart(2, "0")}` : ""}`);
   for (const l of ruleLines(ruleStatus(repo))) console.log(l);
+  if (run.weeklyCeiling) {
+    const over = weekOver(week, run.weeklyCeiling);
+    console.log(`  ceiling: no new session once the seven-day window is at or over ${pct(run.weeklyCeiling)}${over
+      ? `; it was at ${pct(over.share)} at ${stamp(week.at)}, so none starts before it resets ${stamp(week.resetsAt * 1000)}` : ""}`);
+  }
   if (mcpFound?.found.length) console.log(`  mcp:    ${mcpFound.found.map((f) => `${f.name} (${MCP_SOURCE[f.source](f.name)})`).join(", ")}; no other server starts`);
   else if (cfg.mcp === "inherit") console.log("  mcp:    inherit: every MCP server you have starts in each session, and the guard lets all their tools through");
   console.log(`  status: node "${SELF}" status --repo "${repo}"`);
@@ -510,6 +548,12 @@ async function runChain(opt) {
   // the limit resets; resume.json keeps it across a restarted chain too.
   const resumeFile = path.join(state, "resume.json");
   const pendingResume = () => parseOr(read(resumeFile), null);
+  // Ends the chain when the seven-day window's last reading is at or over --weekly-ceiling (weekOver); else returns.
+  const ceilingStop = () => {
+    const over = weekOver(readLimits(state).week, run.weeklyCeiling);
+    if (over) finish(`the seven-day window is at ${pct(over.share)}, at or over the ${pct(run.weeklyCeiling)} weekly ceiling (--weekly-ceiling)${over.resetsAt
+      ? ` until it resets ${stamp(over.resetsAt * 1000)}` : ""}; next-prompt.md stays for a start with --state`);
+  };
   let session = firstSession(state);
   const lastAllowed = lastSessionOf(run);
   let failures = 0;
@@ -581,6 +625,9 @@ async function runChain(opt) {
     if (run.deadline && Date.now() >= run.deadline) finish(`reached ${run.until}`);
     if (!prompt) finish("next-prompt.md is empty");
     if (!asked.body.trim()) finish("next-prompt.md holds only MODEL/EFFORT lines");
+    // --weekly-ceiling: no new session while the seven-day window's last reading is at or over it. A session a limit
+    // or an error cut off still goes on: its work may be uncommitted. next-prompt.md stays for a later start.
+    if (!pendingResume()) ceilingStop();
 
     const nn = String(session).padStart(2, "0");
     fs.writeFileSync(path.join(state, "prompts", `${nn}.md`), prompt);
@@ -610,13 +657,21 @@ async function runChain(opt) {
     if (isPremium(plan.family) && !resume && !premiumMode) writeFable({ sessions: (readFable().sessions || 0) + 1 });
     writeSettings({ [plan.family]: plan.effort });
     const result = await runSession(run, session, plan, nn, resume, readRules(), readMcp());
+    // U14, before the end line, at which the watcher makes the session's card.
+    const lost = fieldsGone({ fields: result.fields, turns: result.mainModels.length > 0, premium: result.mainModels.some((m) => isPremium(familyOf(m))) },
+      readLimits(state), { ceiling: run.weeklyCeiling });
+    for (const f of lost.gone) log(`session ${nn}: its stream had no ${f}, which earlier sessions' streams had (the CLI may have renamed it); ${FIELD_USE[f]}`);
+    if (lost.ceilingBlind) log(`session ${nn}: its stream had no unifiedWindows.seven_day, which --weekly-ceiling reads; until a session's stream has it, the ceiling stops no session`);
+    writeLimits(state, lost.memo);
     log(`session ${nn} ends: ${result.summary}`);
     // A session that wrote its handover has done its piece, even when a limit cut off what came after.
     const wrote = fs.statSync(next).mtimeMs > before && read(next).trim() !== prompt;
     const ran = result.mainModels.join(", ") || result.model || "no model reply";
     log(`session ${nn} limits: ${windowSpan(result.windows)}; it ran on ${ran}`);
-    const fw = result.windows.last?.seven_day_overage_included;
+    const fw = result.windows.latest?.seven_day_overage_included;
     if (fw?.utilization != null) writeFable({ ratio: fw.utilization, ratioResetsAt: fw.resetsAt ?? null, ratioAt: Date.now() });
+    const sw = result.windows.latest?.seven_day;
+    if (typeof sw?.utilization === "number") writeLimits(state, { week: { ratio: sw.utilization, resetsAt: sw.resetsAt ?? null, at: Date.now() } });
     if (isPremium(plan.family) && (result.switchedTo || result.mainModels.some((m) => familyOf(m) !== plan.family)))
       log(`session ${nn} was to run on ${modelName(plan.family)}, but ${result.switchedTo ? `the CLI switched it to ${result.switchedTo}` : `its turns ran on ${ran}`}`);
 
@@ -648,6 +703,8 @@ async function runChain(opt) {
         fs.rmSync(resumeFile, { force: true });
         // A STOP handover ends the chain at the loop's top: no reset to wait for, nor one too far away.
         if (isStop(sessionPlan(read(next).trim(), run).body)) { session++; continue; }
+        // Nor one the weekly ceiling would end the chain after: the next session is a new one.
+        ceilingStop();
       } else if (result.sessionId) fs.writeFileSync(resumeFile, JSON.stringify({ nn, sessionId: result.sessionId, why: "limit", model: plan.model, effort: plan.effort }));
       // A reset the chain cannot use ends it, with resume.json (or the handover) kept for the next start.
       if (result.resetAt && run.deadline && result.resetAt > run.deadline) finish(`the usage limit resets ${stamp(result.resetAt)}, after ${run.until}`);

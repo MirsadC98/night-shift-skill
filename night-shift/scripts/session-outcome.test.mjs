@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { sessionOutcome, windowSpan } from "./session-outcome.mjs";
+import { sessionOutcome, windowSpan, fieldsGone } from "./session-outcome.mjs";
 
 const fixture = (name) => fs.readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
 const result = (fields) => JSON.stringify({ type: "result", subtype: "success", num_turns: 3, total_cost_usd: 1, session_id: "s-1", ...fields });
@@ -227,4 +227,53 @@ test("with several rejected windows and no reset of its own, the smallest window
   const o = sessionOutcome([event, result({ is_error: true, api_error: "usage_limit_reached", num_turns: 5 })].join("\n"));
   assert.equal(o.limited, true);
   assert.equal(o.resetAt, 1795000000 * 1000 + 60_000);
+});
+
+// U14: the stream fields the runner decides on are the CLI's undocumented ones; a rename must not blind the checks in silence.
+test("a session's outcome names the known stream fields its stream carried", () => {
+  const o = sessionOutcome([limitEvent({ five_hour: { utilization: 0.4 } }), limitEvent({ seven_day: { utilization: 0.8 }, other: {} }), turn("claude-opus-5-5"), result({})].join("\n"));
+  assert.deepEqual(o.fields, ["rate_limit_event", "unifiedWindows.five_hour", "unifiedWindows.seven_day"]);
+  assert.deepEqual(sessionOutcome([turn("claude-opus-5-5"), result({})].join("\n")).fields, []);
+  // A window whose share is gone (a renamed utilization) is no reading: it counts as missing.
+  assert.deepEqual(sessionOutcome([limitEvent({ five_hour: { utilization: 0.4 }, seven_day: { used: 0.8 } }), turn("claude-opus-5-5"), result({})].join("\n")).fields,
+    ["rate_limit_event", "unifiedWindows.five_hour"]);
+});
+
+test("each window's latest reading is kept, also when the session's last event lacks it", () => {
+  const o = sessionOutcome([limitEvent({ five_hour: { utilization: 0.4 }, seven_day: { utilization: 0.81, resetsAt: 1795000000 } }),
+    limitEvent({ five_hour: { utilization: 0.5 } }), turn("claude-opus-5-5"), result({})].join("\n"));
+  assert.equal(o.windows.last.seven_day, undefined);
+  assert.deepEqual(o.windows.latest, { five_hour: { utilization: 0.5 }, seven_day: { utilization: 0.81, resetsAt: 1795000000 } });
+  assert.deepEqual(sessionOutcome(result({})).windows.latest, {});
+});
+
+test("a field earlier sessions had and a session with turns lacks is gone, once per chain", () => {
+  const all = ["rate_limit_event", "unifiedWindows.five_hour", "unifiedWindows.seven_day"];
+  let r = fieldsGone({ fields: all, turns: true });
+  assert.deepEqual(r.gone, []);
+  assert.deepEqual(r.memo, { seen: all, told: [] });
+  // A session with no turn made no call: its stream says nothing about the fields.
+  assert.deepEqual(fieldsGone({ fields: [], turns: false }, r.memo).gone, []);
+  r = fieldsGone({ fields: ["rate_limit_event", "unifiedWindows.five_hour"], turns: true }, r.memo);
+  assert.deepEqual(r.gone, ["unifiedWindows.seven_day"]);
+  assert.deepEqual(fieldsGone({ fields: ["rate_limit_event"], turns: true }, r.memo).gone, ["unifiedWindows.five_hour"], "seven_day was told already");
+  // The whole event gone is one line, not one per window.
+  assert.deepEqual(fieldsGone({ fields: [], turns: true }, { seen: all, told: [] }).gone, ["rate_limit_event"]);
+});
+
+test("Fable's window is expected only of a session that ran on Fable or Mythos", () => {
+  const fable = ["rate_limit_event", "unifiedWindows.seven_day", "unifiedWindows.seven_day_overage_included"];
+  const memo = fieldsGone({ fields: fable, turns: true, premium: true }).memo;
+  assert.deepEqual(fieldsGone({ fields: ["rate_limit_event", "unifiedWindows.seven_day"], turns: true }, memo).gone, []);
+  assert.deepEqual(fieldsGone({ fields: ["rate_limit_event", "unifiedWindows.seven_day"], turns: true, premium: true }, memo).gone, ["unifiedWindows.seven_day_overage_included"]);
+});
+
+test("with a weekly ceiling, a seven-day window that never came is told once", () => {
+  let r = fieldsGone({ fields: [], turns: true }, undefined, { ceiling: 0.8 });
+  assert.equal(r.ceilingBlind, true);
+  assert.equal(fieldsGone({ fields: [], turns: true }, r.memo, { ceiling: 0.8 }).ceilingBlind, false);
+  assert.equal(fieldsGone({ fields: [], turns: true }).ceilingBlind, false, "no ceiling, nothing to tell");
+  assert.equal(fieldsGone({ fields: ["rate_limit_event", "unifiedWindows.seven_day"], turns: true }, undefined, { ceiling: 0.8 }).ceilingBlind, false);
+  // An old memo file that lacks a list reads as empty.
+  assert.deepEqual(fieldsGone({ fields: ["rate_limit_event"], turns: true }, {}).memo, { seen: ["rate_limit_event"], told: [] });
 });
