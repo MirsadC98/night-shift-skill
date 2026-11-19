@@ -148,6 +148,7 @@ test("the help, interactive.md and the README name --worktree, and the README it
     assert.ok(t.includes("--worktree") && t.includes("<repo>-night") && t.includes("night-shift"), `${name}: --worktree`);
   }
   assert.match(readme, /^- `worktree`: /m);
+  assert.match(readme, /^- `worktreeCopy`: /m);
   assert.ok(readme.includes("`git merge night-shift`") && readme.includes("`git worktree remove <dir>`"), "README: the user's merge and remove");
   // K6 task 4: the session in the user's tree is told which tree is the chain's, and that both commands are the user's.
   const tree = interactive.split("\n").find((l) => l.startsWith("An interactive session does not edit the tree")) || "";

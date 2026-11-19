@@ -24,7 +24,9 @@
 //    worktree, except one a failed start made. A start that goes on (no new prompt) keeps the tree its run had;
 //    --worktree false turns a config's true off for a start with a new prompt. Given the worktree's folder, start,
 //    status, wait, stop, reload, init and doctor take its main tree; status and the end card name the worktree, and
-//    once the chain has ended the user's git merge night-shift (in the main tree) and git worktree remove <dir>)
+//    once the chain has ended the user's git merge night-shift (in the main tree) and git worktree remove <dir>.
+//    "worktreeCopy" in the project's file copies the paths git ignores that it lists into a worktree made now, never
+//    back; start names the ignored top-level folders it did not copy, and warns when a new prompt names the main tree)
 //   (without --until and --max-sessions the chain goes on until a session writes STOP,
 //    two handovers fail in a row, or stop is called; a usage limit pauses it, and the
 //    session it cut off is resumed with --resume once the limit resets. start without
@@ -308,6 +310,37 @@ const chainRepo = (dir) => {
   try { ptr = readPointer(home); } catch {}
   return ptr?.tree && sameDir(ptr.tree, repo) ? home : repo;
 };
+// K6: worktreeCopy's paths (the project's file), checked before anything is made: each inside the repository (no drive,
+// no root, no .. out of it), reached through no link, and ignored by git, since what git tracks is in the worktree
+// already. One that is not there is left out, with a line. Returns { copies, missing }, each path by its place in the
+// repository with forward slashes (./x/ is x).
+function copyChoice(repo, list = []) {
+  const top = realOr(repo), copies = [], missing = [];
+  for (const rel of list) {
+    const src = path.resolve(repo, rel);
+    if (path.isAbsolute(rel) || /^[a-z]:/i.test(rel) || !within(src, repo) || sameDir(src, repo)) fail(`worktreeCopy: ${rel} is not a path inside ${repo}`);
+    // The deepest part of it that is there, its links read, must lie where it lies in the repository.
+    let at = src;
+    while (!fs.existsSync(at) && !sameDir(at, repo)) at = path.dirname(at);
+    if (!platform.samePath(realOr(at), path.join(top, path.relative(repo, at)))) fail(`worktreeCopy: ${rel} is a link or lies under one; list the folder it points to inside ${repo}, or drop it`);
+    const place = path.relative(repo, src).split(path.sep).join("/");
+    if (!fs.existsSync(src)) { missing.push(place); continue; }
+    if (gitIn(repo, ["check-ignore", "-q", "--", place]) === null) {
+      fail(`worktreeCopy: ${rel} is not a path git ignores in ${repo}; what git tracks is in the worktree already, so list only ignored ones`);
+    }
+    copies.push(place);
+  }
+  return { copies, missing };
+}
+// K6: whether text names dir or a path in it, in any spelling: backslashes, forward slashes and Git Bash's /c/ form, in
+// any case where the file system folds case. A longer name does not count, on the right (<dir>-night, <dir>.old; a dot
+// that ends a sentence does) or on the left (/mnt<dir>).
+export const namesDir = (text, dir) => {
+  const fwd = dir.replace(/\\/g, "/");
+  const forms = new Set([dir, fwd, ...(/^[a-z]:\//i.test(fwd) ? [`/${fwd[0].toLowerCase()}${fwd.slice(2)}`] : [])]);
+  const any = [...forms].map((f) => f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  return new RegExp(`(?<![\\w.\\-/\\\\])(?:${any})(?![\\w-]|\\.[\\w-])`, platform.fold("A") === "a" ? "i" : "").test(text);
+};
 
 // start: the worktree this start's chain works in, checked and not yet made, or null for the checked-out branch:
 // { tree, branch, kept (it exists already), madeBranch (the branch does not exist yet) }. A start that goes on (no new
@@ -358,15 +391,16 @@ function treeChoice({ repo, state, opt, cfg, from, prev, fresh }) {
 // moved back), and puts back the state folder's files it writes before the launch (run.json, fable.json, limits.json), so
 // that the next start finds the folder as it was; from the exit handler it returns, which start drops once the chain is
 // launched. It never touches a worktree it did not make: the handler removes one only after git has made it.
+// copy: copyChoice's answer; its paths go into a worktree made now, and only then: never into a kept one, never back.
 const UNDONE_FILES = ["run.json", "fable.json", "limits.json"];
-function makeTree(repo, wt, { dirty, state }) {
+function makeTree(repo, wt, { dirty, state, copy = { copies: [], missing: [] } }) {
   const head = gitIn(repo, ["rev-parse", "HEAD"]);
   const mine = (gitIn(repo, ["symbolic-ref", "--quiet", "HEAD"]) || "").replace(/^refs\/heads\//, "") || "HEAD";
   const ref = `refs/heads/${wt.branch}`;
   const tip = wt.madeBranch ? null : gitIn(repo, ["rev-parse", ref]);
   const contained = !wt.madeBranch && gitIn(repo, ["merge-base", "--is-ancestor", ref, "HEAD"]) !== null;
   const behind = contained && tip !== head;
-  const lines = [];
+  const lines = [], held = [];
   let how, undo = null;
   if (wt.kept) {
     how = behind && !dirty ? `kept, moved up to ${mine}` : "kept";
@@ -391,6 +425,22 @@ function makeTree(repo, wt, { dirty, state }) {
     added = true;
     how = wt.madeBranch ? `made now from ${mine}` : behind ? `made now, moved up to ${mine}` : contained ? "made now" : "made now on the branch as it was";
     wt.tree = realOr(tree);
+    // A link inside a copied folder stays out (a junction, which npm makes for a file: dependency, cpSync would follow,
+    // out of the repository or into the main tree); copyChoice let no link through as the path itself.
+    let links = 0;
+    const noLink = (from) => { try { if (!fs.lstatSync(from).isSymbolicLink()) return true; } catch { return true; } links++; return false; };
+    for (const rel of copy.copies) {
+      try { fs.cpSync(path.join(repo, rel), path.join(wt.tree, rel), { recursive: true, force: false, errorOnExist: false, filter: noLink }); }
+      catch (e) { fail(`worktreeCopy: copying ${rel} into ${wt.tree} failed (${e.code || String(e.message).slice(0, 200)})`); }
+    }
+    if (copy.copies.length) held.push(`  worktree: copied ${copy.copies.join(", ")} from ${repo}${links ? `, without the ${plural(links, "link")} inside them` : ""}`);
+    for (const rel of copy.missing) held.push(`  worktree: ${rel} is not in ${repo}, so not copied`);
+    // The folders git ignores at the top of the main tree that the worktree does not get, such as a dependency folder.
+    const names = fs.readdirSync(repo, { withFileTypes: true }).filter((d) => d.isDirectory() && d.name !== ".git").map((d) => d.name);
+    const taken = new Set(copy.copies.map((r) => platform.fold(r)));
+    // core.quotePath=false: git would quote a name with letters outside ASCII.
+    const left = (names.length ? gitIn(repo, ["-c", "core.quotePath=false", "check-ignore", "--", ...names]) || "" : "").split("\n").map((n) => n.trim()).filter((n) => n && !taken.has(platform.fold(n)));
+    if (left.length) held.push(`  worktree: git ignores these top-level folders, not copied: ${left.slice(0, 10).join(", ")}${left.length > 10 ? `, and ${left.length - 10} more` : ""} (worktreeCopy in .claude/night-shift.json copies one when the worktree is made)`);
   }
   lines.unshift(`  worktree: ${wt.tree} on ${wt.branch}, ${how}; the chain works there, and ${repo} stays yours`);
   const own = !wt.madeBranch && !contained ? Number(gitIn(repo, ["rev-list", "--count", `HEAD..${ref}`])) : 0;
@@ -398,7 +448,7 @@ function makeTree(repo, wt, { dirty, state }) {
     const newer = Number(gitIn(repo, ["rev-list", "--count", `${ref}..HEAD`]));
     lines.push(`  worktree: ${wt.branch} holds ${plural(own, "commit")} ${mine} lacks, kept as it is${newer ? `; ${mine}'s ${plural(newer, "newer commit")} ${newer === 1 ? "is" : "are"} not in it` : ""}`);
   }
-  return { lines, undo };
+  return { lines: [...lines, ...held], undo };
 }
 
 // The session chain.log shows as started and never ended, with its conversation id.
@@ -549,6 +599,7 @@ async function start(opt) {
   // K6: the tree, chosen before the state folder is made, so that a refused one leaves nothing inside it.
   const fresh = Boolean(planning) || Boolean(opt["prompt-file"]) || typeof opt.prompt === "string";
   const wt = treeChoice({ repo, state, opt, cfg, from, fresh, prev: fs.existsSync(path.join(state, "run.json")) ? parseOr(read(path.join(state, "run.json")), {}) : null });
+  const copy = wt ? copyChoice(repo, cfg.worktreeCopy) : null;
   fs.mkdirSync(path.join(state, "prompts"), { recursive: true });
   // In long form, so the guard, which refuses 8.3 short names, accepts the handover's path whatever way --state or %TEMP% spelled it.
   state = fs.realpathSync.native(state);
@@ -579,8 +630,10 @@ async function start(opt) {
   const claude = findClaude();
   fs.rmSync(path.join(state, "STOP-REQUEST"), { force: true });
   // The last step that can be refused is behind: the worktree is made (or its branch moved) only now.
-  const made = wt ? makeTree(repo, wt, { dirty, state }) : { lines: [], undo: null };
+  const made = wt ? makeTree(repo, wt, { dirty, state, copy }) : { lines: [], undo: null };
   if (mainDirty) made.lines.push(`  worktree: your uncommitted changes in ${repo} are not in it`);
+  // A new prompt that names the main tree's paths would send the sessions where the guard refuses their writes.
+  if (wt && fresh && namesDir(read(next), repo)) made.lines.push(`  worktree: the prompt names ${repo}, the main tree; the sessions work in ${wt.tree} and may not write in the main tree, so name paths in the worktree or relative ones`);
 
   // The task runs with the user's stored environment, not this shell's: keep
   // this PATH, minus fnm's per-shell links, with the real node directory first.
@@ -1101,6 +1154,8 @@ function runSession(run, session, plan, nn, resume, rules = "", mcp = ["--strict
     `Mode: ${run.mode}.`,
     ...[modeRules(run.mode), attendedRules(run)].filter(Boolean),
     `Skill folder: ${SKILL_DIR}. Continuation file: ${path.join(run.state, "next-prompt.md")}. Night report: ${run.report}.`,
+    // K6: a run on its own worktree; the guard refuses writes in the main tree (NIGHT_SHIFT_MAIN_TREE).
+    ...(run.tree ? [`This chain works in its own worktree, ${run.tree}, on the branch ${run.branch || NIGHT_BRANCH}: write there. ${run.repo} is the main tree and the user's; read it if you need to, never write there (the guard refuses it).`] : []),
     // Opus mode: a Fable or Mythos session is for its one piece, and a refused one is told why. Fable or
     // mythos mode: the stand-in is told the main model cannot run it and why.
     ...(isPremium(plan.family) && !isPremium(run.mode) ? [premiumNote(plan.family)] : []),

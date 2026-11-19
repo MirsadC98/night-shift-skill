@@ -8,7 +8,7 @@ It is a safety net, not a sandbox. It does not confine a process: a program the 
 
 ## Rule files
 
-A project's `.claude/night-shift-rules.md` is trusted like its `CLAUDE.md`, and `start` names the rule files in force. A night session cannot write the rule files, the config files or anything under `~/.claude/night-shift/`. In a chain on its own worktree (`start --worktree`), the guard reads the project's `.claude/night-shift.json` in the main tree, not the worktree's copy, and protects the main tree's config file, rule file and `.git` as it protects the worktree's.
+A project's `.claude/night-shift-rules.md` is trusted like its `CLAUDE.md`, and `start` names the rule files in force. A night session cannot write the rule files, the config files or anything under `~/.claude/night-shift/`. In a chain on its own worktree (`start --worktree`), the guard reads the project's `.claude/night-shift.json` in the main tree, not the worktree's copy, and protects the main tree's config file, rule file and `.git` as it protects the worktree's. `worktreeCopy` copies only paths inside the repository that git ignores and that are no link and lie under none, leaving out any link inside a copied folder, from the main tree into the worktree when `start` makes it, never back.
 
 ## Language tables
 

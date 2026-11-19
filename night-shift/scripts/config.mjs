@@ -65,6 +65,8 @@ export const CONFIG_KEYS = {
   maxUsd: (v) => (typeof v === "number" && v > 0 && Number.isFinite(v) ? null : "must be a number of dollars above 0"),
   attended: (v) => (typeof v === "boolean" ? null : "must be true or false"),
   worktree: (v) => (typeof v === "boolean" ? null : "must be true or false"),
+  // K6: what a worktree made now gets of what git ignores in the main tree (night-chain.mjs, copyChoice); a project's key.
+  worktreeCopy: (v) => (Array.isArray(v) && v.every((p) => typeof p === "string" && p.trim()) ? null : "must be a list of paths relative to the repository"),
   telegramInbox: (v) => (typeof v === "boolean" ? null : "must be true or false"),
   mcp: (v) => (v === "none" || v === "inherit" || (Array.isArray(v) && v.every((s) => isStr(s) && s)) ? null : 'must be "none", "inherit" or a list of server names'),
   deny: (v) => denyErrors(v),

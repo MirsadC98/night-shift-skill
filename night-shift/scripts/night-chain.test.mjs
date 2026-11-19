@@ -3352,7 +3352,9 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
 const nightDir = (repo) => path.join(path.dirname(repo), `${path.basename(repo)}-night`);
 const TREE_FAKE = `import fs from "node:fs"; import path from "node:path"; import { execFileSync } from "node:child_process";
 const st = process.env.NIGHT_SHIFT_STATE;
-fs.writeFileSync(path.join(st, "where.json"), JSON.stringify({ cwd: process.cwd(), repo: process.env.NIGHT_SHIFT_REPO, main: process.env.NIGHT_SHIFT_MAIN_TREE ?? null }));
+let input = "";
+for await (const c of process.stdin) input += c;
+fs.writeFileSync(path.join(st, "where.json"), JSON.stringify({ cwd: process.cwd(), repo: process.env.NIGHT_SHIFT_REPO, main: process.env.NIGHT_SHIFT_MAIN_TREE ?? null, input }));
 execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "night work"], { windowsHide: true });
 fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done");
 console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-1", result: "ok" }));
@@ -3664,4 +3666,129 @@ test("status gives a worktree run whose runner is gone the user's commands, and 
   const out = status();
   assert.match(out, /^finished /m);
   assert.doesNotMatch(out, /worktree:/);
+});
+
+// ---------------------------------------------------------------- K6 task 5: what the worktree holds, and the header
+// What a project keeps out of git: a dependency folder, a local file in a tracked folder, a cache, and a project file that
+// asks for the first two and for a file that is not there.
+const ignoredRepo = (s) => {
+  fs.writeFileSync(path.join(s.repo, ".gitignore"), "node_modules/\n*.local\ncache/\ncach\u00e9/\n");
+  fs.mkdirSync(path.join(s.repo, "sub"));
+  fs.writeFileSync(path.join(s.repo, "sub", "keep.txt"), "tracked");
+  fs.mkdirSync(path.join(s.repo, ".claude"));
+  fs.writeFileSync(path.join(s.repo, ".claude", "night-shift.json"), JSON.stringify({ worktreeCopy: ["./node_modules", "sub/conf.local", "gone.local"] }));
+  gitT(s.repo, "add", ".gitignore", "sub", ".claude");
+  gitT(s.repo, "commit", "-q", "-m", "ignore");
+  fs.mkdirSync(path.join(s.repo, "node_modules", "pkg"), { recursive: true });
+  fs.writeFileSync(path.join(s.repo, "node_modules", "pkg", "index.js"), "v1");
+  fs.writeFileSync(path.join(s.repo, "sub", "conf.local"), "local");
+  fs.writeFileSync(path.join(s.repo, "a.local"), "a");
+  fs.mkdirSync(path.join(s.repo, "cache"));
+  fs.writeFileSync(path.join(s.repo, "cache", "x"), "x");
+  fs.mkdirSync(path.join(s.repo, "cach\u00e9"));
+  // A link inside the dependency folder: to a folder outside the repository, and one back to the folder itself.
+  const elsewhere = path.join(s.root, "elsewhere");
+  fs.mkdirSync(elsewhere);
+  fs.writeFileSync(path.join(elsewhere, "far.js"), "far");
+  fs.symlinkSync(elsewhere, path.join(s.repo, "node_modules", "linked"), "junction");
+  fs.symlinkSync(path.join(s.repo, "node_modules"), path.join(s.repo, "node_modules", "self"), "junction");
+};
+
+test("worktreeCopy copies the ignored paths it names into a worktree made now, once and never back; start names them and the ignored folders it left", async () => {
+  const s = await treeStart(["--worktree"], ignoredRepo);
+  const tree = fs.realpathSync.native(nightDir(s.repo));
+  assert.match(s.out, new RegExp(`^ {2}worktree: copied node_modules, sub/conf\\.local from ${lit(s.repo)}, without the 2 links inside them$`, "m"));
+  assert.match(s.out, new RegExp(`^ {2}worktree: gone\\.local is not in ${lit(s.repo)}, so not copied$`, "m"));
+  assert.match(s.out, /^ {2}worktree: git ignores these top-level folders, not copied: cache, cach\u00e9 \(worktreeCopy in \.claude\/night-shift\.json copies one when the worktree is made\)$/m);
+  assert.equal(fs.readFileSync(path.join(tree, "node_modules", "pkg", "index.js"), "utf8"), "v1");
+  assert.equal(fs.readFileSync(path.join(tree, "sub", "conf.local"), "utf8"), "local");
+  for (const f of ["a.local", "cache", "gone.local", "node_modules/linked", "node_modules/self"]) assert.equal(fs.existsSync(path.join(tree, f)), false, f);
+  assert.deepEqual(s.log(tree), ["night work", "ignore", "base"], "the copies are ignored there too");
+  // The session's header names both trees.
+  assert.ok(s.where.input.includes(`This chain works in its own worktree, ${tree}, on the branch night-shift: write there. ${s.repo} is the main tree and the user's;`), s.where.input);
+  // A later start keeps the worktree and copies nothing again; what the chain changed there stays there.
+  fs.writeFileSync(path.join(s.repo, "node_modules", "pkg", "index.js"), "v2");
+  fs.writeFileSync(path.join(tree, "node_modules", "pkg", "new.js"), "the chain's");
+  const e = { ...s.env, NIGHT_SHIFT_CLAUDE: path.join(s.root, "fake-claude.mjs") };
+  const out = execFileSync(process.execPath, [CHAIN, "start", "--repo", s.repo, "--state", s.state, "--prompt", "second", "--worktree"], { env: e, cwd: s.root, encoding: "utf8" });
+  const done = await waitFor(s.repo, e, s.root).done;
+  assert.equal(done.code, 0, done.out);
+  assert.match(out, /^ {2}worktree: .* on night-shift, kept; /m);
+  assert.doesNotMatch(out, /copied/);
+  assert.equal(fs.readFileSync(path.join(tree, "node_modules", "pkg", "index.js"), "utf8"), "v1");
+  assert.equal(fs.existsSync(path.join(s.repo, "node_modules", "pkg", "new.js")), false);
+  // A run on the checked-out branch: no worktree line in the header, and the key copies nothing.
+  const plain = await treeStart([], ignoredRepo);
+  assert.doesNotMatch(plain.where.input, /own worktree/);
+  assert.doesNotMatch(plain.out, /worktree:/);
+});
+
+test("start refuses a worktreeCopy path outside the repository, through a link, or one git does not ignore, before it makes anything", () => {
+  const c = pointerCase();
+  fs.writeFileSync(path.join(c.repo, ".gitignore"), "lnk\n*.local\n");
+  gitT(c.repo, "add", ".gitignore");
+  gitT(c.repo, "commit", "-q", "-m", "base");
+  const outside = path.join(path.dirname(c.repo), "outside");
+  fs.mkdirSync(outside);
+  fs.symlinkSync(outside, path.join(c.repo, "lnk"), "junction");
+  fs.mkdirSync(path.join(c.repo, ".claude"));
+  const refused = (v, re) => {
+    fs.writeFileSync(path.join(c.repo, ".claude", "night-shift.json"), JSON.stringify({ worktreeCopy: v }));
+    const r = c.run("start", ["--prompt", "x", "--worktree"]);
+    assert.match(r.stderr, re, JSON.stringify(v));
+    assert.equal(fs.existsSync(nightDir(c.repo)), false, JSON.stringify(v));
+  };
+  refused("node_modules", /"worktreeCopy" must be a list of paths relative to the repository/);
+  refused([""], /"worktreeCopy" must be a list of paths relative to the repository/);
+  refused(["../outside"], new RegExp(`worktreeCopy: \\.\\./outside is not a path inside ${lit(c.repo)}`));
+  refused([outside], new RegExp(`worktreeCopy: ${lit(outside)} is not a path inside ${lit(c.repo)}`));
+  refused(["."], new RegExp(`worktreeCopy: \\. is not a path inside ${lit(c.repo)}`));
+  refused(["lnk"], new RegExp(`worktreeCopy: lnk is a link or lies under one; list the folder it points to inside ${lit(c.repo)}, or drop it`));
+  refused(["lnk/x.local"], /worktreeCopy: lnk\/x\.local is a link or lies under one; /);
+  refused([".gitignore"], new RegExp(`worktreeCopy: \\.gitignore is not a path git ignores in ${lit(c.repo)}; what git tracks is in the worktree already`));
+  assert.equal(worktreeCount(c.repo), 1);
+  // In the global file it is refused as a project's key.
+  globalConfig(c.home, { worktreeCopy: ["x.local"] });
+  fs.rmSync(path.join(c.repo, ".claude", "night-shift.json"));
+  assert.match(c.run("start", ["--prompt", "x", "--worktree"]).stderr, /"worktreeCopy" belongs in a project's \.claude\/night-shift\.json/);
+  globalConfig(c.home, {});
+  // Without a worktree the paths are not looked at: the start gets as far as the launch.
+  fs.writeFileSync(path.join(c.repo, ".claude", "night-shift.json"), JSON.stringify({ worktreeCopy: ["../outside"] }));
+  assert.match(c.run("start", ["--prompt", "x", "--allow-dirty"]).stderr, /launch refused \(test\)/);
+});
+
+test("namesDir finds a folder's path in a text by its spellings, and not a longer name on either side", async () => {
+  const { namesDir } = await import("./night-chain.mjs");
+  const dir = process.platform === "win32" ? "C:\\work\\app" : "/home/u/app";
+  for (const text of [`fix ${dir}`, `fix ${dir}.`, `see ${dir}, then`, `(${dir})`, `"${dir}"`, `${dir}${path.sep}src${path.sep}a.js`, `cd ${dir.replace(/\\/g, "/")}/src`]) assert.ok(namesDir(text, dir), text);
+  for (const text of [`fix ${dir}-night`, `fix ${dir}2`, `fix ${dir}.old`, `fix ${dir}_x`, `fix /mnt${dir.replace(/\\/g, "/")}`, `fix x${dir}`]) assert.ok(!namesDir(text, dir), text);
+  if (process.platform === "win32") {
+    assert.ok(namesDir("cd /c/work/app && ls", dir), "Git Bash's /c/ form");
+    assert.ok(namesDir("fix c:\\WORK\\App\\x", dir), "another case");
+  }
+});
+
+test("start warns when a worktree run's new prompt names the main tree, in its spellings, and not for the worktree's own path", async () => {
+  const s = setup();
+  gitT(s.repo, "commit", "-q", "--allow-empty", "-m", "base");
+  fs.writeFileSync(path.join(s.root, "fake-claude.mjs"), TREE_FAKE);
+  const e = { ...s.env, NIGHT_SHIFT_CLAUDE: path.join(s.root, "fake-claude.mjs") };
+  const go = async (prompt, extra = ["--worktree"]) => {
+    const out = execFileSync(process.execPath, [CHAIN, "start", "--repo", s.repo, "--state", s.state, "--prompt", prompt, ...extra], { env: e, cwd: s.root, encoding: "utf8" });
+    const done = await waitFor(s.repo, e, s.root).done;
+    assert.equal(done.code, 0, done.out);
+    return out;
+  };
+  const warning = `  worktree: the prompt names ${s.repo}, the main tree; the sessions work in `;
+  const fwd = s.repo.replace(/\\/g, "/");
+  assert.ok((await go(`fix ${path.join(s.repo, "src", "a.js")}`)).includes(warning));
+  const tree = fs.realpathSync.native(nightDir(s.repo));
+  assert.ok(!(await go(`fix ${path.join(tree, "src")}`)).includes(warning), "the worktree's own path");
+  assert.ok((await go(`read ${fwd}/README.md`)).includes(warning), "forward slashes");
+  if (process.platform === "win32") {
+    assert.ok((await go(`read ${fwd.toLowerCase()}/x`)).includes(warning), "another case");
+    assert.ok((await go(`cd /${fwd[0].toLowerCase()}${fwd.slice(2)} && ls`)).includes(warning), "Git Bash's /c/ form");
+  }
+  assert.ok(!(await go("fix src/a.js")).includes(warning), "a relative path");
+  assert.ok(!(await go(`fix ${path.join(s.repo, "src")}`, ["--worktree", "false"])).includes("the prompt names"), "no worktree");
 });
