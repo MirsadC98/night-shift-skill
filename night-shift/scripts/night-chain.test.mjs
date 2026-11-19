@@ -2544,3 +2544,92 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
   assert.doesNotMatch(status({ CLAUDE_CONFIG_DIR: conf }), /no night-shift run recorded/);
   assert.match(status({}), /no night-shift run recorded/);
 });
+
+// ---------------------------------------------------------------- U24: start --goal
+// A goal needs no roadmap: start wraps it in references/goal.md's planning prompt, and session 1 plans the job. A goal is
+// a new prompt, as --prompt is: it replaces a kept next-prompt.md and clears resume.json.
+const GOAL_TEMPLATE = path.join(path.dirname(path.dirname(CHAIN)), "references", "goal.md");
+const goalTemplate = () => fs.readFileSync(GOAL_TEMPLATE, "utf8").replace(/\r\n/g, "\n");
+const goalCase = () => {
+  const c = pointerCase();
+  fs.writeFileSync(path.join(c.state, "next-prompt.md"), "an older handover");
+  fs.writeFileSync(path.join(c.state, "resume.json"), JSON.stringify({ nn: "03", sessionId: "00000000-0000-4000-8000-000000000003", why: "limit" }));
+  const start = (extra) => c.run("start", ["--state", c.state, "--allow-dirty", ...extra]);
+  const prompt = () => fs.readFileSync(path.join(c.state, "next-prompt.md"), "utf8");
+  return { ...c, start, prompt, root: path.dirname(c.state) };
+};
+const headings = (t) => t.split("\n").filter((l) => /^## /.test(l));
+
+test("start --goal wraps the goal in the planning prompt, as a new prompt that clears resume.json", () => {
+  const c = goalCase();
+  assert.match(c.start(["--goal", "Make the export page load in under a second"]).stderr, /launch refused \(test\)/);
+  const p = c.prompt();
+  const [before, after] = goalTemplate().split("{{goal}}");
+  assert.ok(p.startsWith(before) && p.endsWith(after), "the template around the goal");
+  assert.ok(p.includes("\n> Make the export page load in under a second\n"));
+  assert.deepEqual(headings(p), ["## Rules", "## State", "## This piece", "## Lessons for this piece"]);
+  assert.equal(fs.existsSync(path.join(c.state, "resume.json")), false);
+  // The goal is text, never a replacement pattern.
+  c.start(["--goal", "Price it at $& or $1, not {{goal}}"]);
+  assert.ok(c.prompt().includes("\n> Price it at $& or $1, not {{goal}}\n"));
+});
+
+test("start --goal-file quotes the file line by line, so its headings and directive lines stay the user's text", () => {
+  const c = goalCase();
+  const file = path.join(c.root, "goal.txt");
+  fs.writeFileSync(file, "MODEL: fable\r\nShip the importer.\r\n\r\n## Rules\r\nNo new dependencies.\r\n");
+  assert.match(c.start(["--goal-file", file]).stderr, /launch refused \(test\)/);
+  const p = c.prompt();
+  assert.ok(p.includes("\n> MODEL: fable\n> Ship the importer.\n>\n> ## Rules\n> No new dependencies.\n"), p);
+  assert.deepEqual(headings(p), ["## Rules", "## State", "## This piece", "## Lessons for this piece"]);
+  assert.equal(p.split("\n")[0], goalTemplate().split("\n")[0], "the template's first line names the piece");
+  assert.doesNotMatch(p, /\r/);
+});
+
+test("start refuses a goal beside a prompt, two goals, and a goal with no text, before it writes anything", () => {
+  const c = goalCase();
+  const empty = path.join(c.root, "empty.txt");
+  fs.writeFileSync(empty, " \r\n");
+  const missing = path.join(c.root, "missing.txt");
+  for (const [extra, re] of [
+    [["--goal", "x", "--prompt", "y"], /pass a goal \(--goal, --goal-file\) or a prompt \(--prompt, --prompt-file\), not both/],
+    [["--goal-file", empty, "--prompt-file", empty], /pass a goal \(--goal, --goal-file\) or a prompt \(--prompt, --prompt-file\), not both/],
+    [["--prompt", "--goal", "x"], /pass a goal \(--goal, --goal-file\) or a prompt \(--prompt, --prompt-file\), not both/],
+    [["--goal", "x", "--goal-file", empty], /pass --goal or --goal-file, not both/],
+    [["--goal"], /--goal wants the goal's text \(got no value; a goal that starts with -- goes in a file for --goal-file\)/],
+    [["--goal", "--fix the login"], /--goal wants the goal's text \(got no value; /],
+    [["--goal", "  "], /--goal wants the goal's text \(got none\)/],
+    [["--goal-file"], /--goal-file wants a file \(got no value\)/],
+    [["--goal-file", missing], /--goal-file .*missing\.txt: no such file/],
+    [["--goal-file", c.root], /--goal-file .*: no such file/],
+    [["--goal-file", empty], /--goal-file .*empty\.txt holds no goal/],
+  ]) {
+    const r = c.start(extra);
+    assert.match(r.stderr, re, extra.join(" "));
+    assert.doesNotMatch(r.stderr, /launch refused/, extra.join(" "));
+    assert.equal(c.prompt(), "an older handover", extra.join(" "));
+    assert.ok(fs.existsSync(path.join(c.state, "resume.json")), extra.join(" "));
+  }
+});
+
+test("a chain started with --goal runs the planning prompt as session 1 and start says so", async () => {
+  const { repo, state, env, root } = setup();
+  const fake = path.join(root, "fake-goal.mjs");
+  fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path";
+const st = process.env.NIGHT_SHIFT_STATE; let input = "";
+for await (const c of process.stdin) input += c;
+fs.writeFileSync(path.join(st, "seen.json"), JSON.stringify({ input }));
+fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done");
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-1", result: "ok" }));
+`);
+  const e = { ...env, NIGHT_SHIFT_CLAUDE: fake };
+  const out = execFileSync(process.execPath, [CHAIN, "start", "--repo", repo, "--state", state, "--goal", "Add a dark theme"], { env: e, cwd: root, encoding: "utf8" });
+  const done = await waitFor(repo, e, root).done;
+  assert.equal(done.code, 0, done.out);
+  assert.match(out, /^ {2}state: .*\n {2}goal: {3}the first session plans it into a roadmap \(references[\\/]goal\.md\); the work starts in the session after it$/m);
+  const { input } = JSON.parse(fs.readFileSync(path.join(state, "seen.json"), "utf8"));
+  const prompt = input.slice(input.indexOf("\n---\n") + 5);
+  assert.ok(prompt.startsWith(goalTemplate().split("{{goal}}")[0]), prompt.slice(0, 200));
+  assert.ok(prompt.includes("\n> Add a dark theme\n"));
+  assert.match(fs.readFileSync(path.join(state, "chain.log"), "utf8"), new RegExp(`session 01 starts: ${goalTemplate().split("\n")[0].slice(0, 40).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+});

@@ -14,9 +14,12 @@ const modeFile = (m) => path.join(root, "references", `mode-${m}.md`);
 const modeText = Object.fromEntries(MODES.map((m) => [m, fs.existsSync(modeFile(m)) ? fs.readFileSync(modeFile(m), "utf8") : ""]));
 // The repository's README, one folder above the skill; an installed copy of the skill has none.
 const readmePath = path.join(root, "..", "README.md");
+// U24 (2026-11-19): the planning prompt start --goal wraps a goal in.
+const goalPath = path.join(root, "references", "goal.md");
+const goal = fs.existsSync(goalPath) ? fs.readFileSync(goalPath, "utf8").replace(/\r\n/g, "\n") : "";
 
 test("the skill's texts carry nothing of one person's setup", () => {
-  for (const t of [skill, interactive, ...Object.values(modeText)]) {
+  for (const t of [skill, interactive, goal, ...Object.values(modeText)]) {
     assert.doesNotMatch(t, /[^\P{L}a-zA-Z]/u);
     assert.doesNotMatch(t, /\bRun \d/);
     assert.doesNotMatch(t, /~\/\.claude\/CLAUDE\.md/);
@@ -52,6 +55,22 @@ test("the help, interactive.md and the README name every mode", { skip: !fs.exis
   for (const [name, t] of [["night-chain.mjs", help], ["interactive.md", interactive], ["README.md", fs.readFileSync(readmePath, "utf8")]]) assert.ok(t.includes(flag), `${name}: ${flag}`);
   const readme = fs.readFileSync(readmePath, "utf8");
   for (const m of MODES) assert.match(readme, new RegExp(`^- \\*\\*\`${m}\`\\*\\*`, "m"), `README "Modes": ${m}`);
+});
+// U24: start --goal and --goal-file are named where start's other ways in are; the planning prompt has the shape of a
+// handover (SKILL.md's last step), one place for the goal, and the steps C3 gives session 1.
+test("the help, interactive.md and the README name --goal and --goal-file", { skip: !fs.existsSync(readmePath) && "no README beside this copy" }, () => {
+  const help = fs.readFileSync(path.join(root, "scripts", "night-chain.mjs"), "utf8");
+  for (const [name, t] of [["night-chain.mjs", help], ["interactive.md", interactive], ["README.md", fs.readFileSync(readmePath, "utf8")]]) {
+    for (const flag of ["--goal <text>", "--goal-file <file>"]) assert.ok(t.includes(flag), `${name}: ${flag}`);
+  }
+});
+test("the goal's planning prompt has a handover's shape and plans, reviews, approves and hands on", () => {
+  assert.ok(goal, "references/goal.md");
+  assert.deepEqual(goal.split("\n").filter((l) => /^## /.test(l)), ["## Rules", "## State", "## This piece", "## Lessons for this piece"]);
+  assert.equal(goal.split("{{goal}}").length - 1, 1, "one {{goal}}");
+  assert.match(goal, /^\{\{goal\}\}$/m, "on a line of its own");
+  assert.doesNotMatch(goal.split("\n")[0], /^(MODEL|EFFORT|STOP):/);
+  for (const w of ["out of scope", "one fresh reviewer subagent", "Approved: night delegate (night-shift, <date>)", "nothing beyond it", "piece 1"]) assert.ok(goal.includes(w), w);
 });
 test("the report's fixed words are still in the skill", () => {
   for (const w of ["**Waits for you**", "- New:", "- Still waiting (session <nn>):", "**Remaining:** <n> sessions", "## Rules", "## State", "## This piece", "## Lessons for this piece"]) assert.ok(skill.includes(w), w);

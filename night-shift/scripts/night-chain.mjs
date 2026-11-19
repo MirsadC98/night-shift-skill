@@ -4,12 +4,14 @@
 // Sessions hand over through <state>/next-prompt.md; a first line
 // "STOP: <reason>" ends the chain.
 //
-//   node night-chain.mjs start  --repo <dir> (--prompt-file <f> | --prompt <text>) [--until HH:MM]
-//                               [--max-sessions <n>] [--session-hours 4] [--model <m>] [--allow-dirty]
+//   node night-chain.mjs start  --repo <dir> (--prompt-file <f> | --prompt <text> | --goal <text> | --goal-file <file>)
+//                               [--until HH:MM] [--max-sessions <n>] [--session-hours 4] [--model <m>] [--allow-dirty]
 //                               [--effort xhigh] [--fable-ceiling 0.6] [--fable-sessions 2]
 //                               [--max-wait-hours 6] [--weekly-ceiling <share>] [--max-usd <dollars>]
 //                               [--mode opus|fable|mythos]
 //                               [--lang <code>] [--state <dir>] [--window]
+//   (a goal needs no roadmap: the runner wraps it in references/goal.md's planning prompt, and session 1 writes a
+//    roadmap for it, approves it and hands its first piece on; a goal starts fresh as a prompt does)
 //   (without --until and --max-sessions the chain goes on until a session writes STOP,
 //    two handovers fail in a row, or stop is called; a usage limit pauses it, and the
 //    session it cut off is resumed with --resume once the limit resets. start without
@@ -73,6 +75,12 @@ const SKILL_DIR = path.dirname(path.dirname(SELF)); // the folder that holds SKI
 // references/mode-<mode>.md, and a new session's header carries its own mode's text: SKILL.md, which every session
 // loads, holds none of the three. "" for a mode with no file (a copy of the skill without it).
 const modeRules = (mode) => (mode ? read(path.join(SKILL_DIR, "references", `mode-${mode}.md`)).replace(/\r\n/g, "\n").trim() : "");
+// U24 (2026-11-19): start --goal "<text>" or --goal-file <path> needs no roadmap. The goal goes into this planning
+// prompt, each line quoted ("> "), so that a heading or a MODEL: line in it stays the user's text and never the prompt's
+// shape or a directive; session 1 plans the job and hands its first piece to session 2.
+const GOAL_PROMPT = path.join(SKILL_DIR, "references", "goal.md");
+const goalPrompt = (goal, template) => template.replace(/\r\n/g, "\n").replace("{{goal}}",
+  () => goal.replace(/\r\n?/g, "\n").trim().split("\n").map((l) => (l.trim() ? `> ${l}` : ">")).join("\n"));
 const GUARD = path.join(path.dirname(SELF), "guard.mjs");
 const REPORT = path.join(path.dirname(SELF), "night-report.mjs");
 const HIDE = path.join(path.dirname(SELF), "hide-windows.cjs");
@@ -316,6 +324,24 @@ async function start(opt) {
     const bad = v !== undefined && CONFIG_KEYS[key](key === "effort" ? v : num(v));
     if (bad) fail(`--${flag} ${bad} (got ${got(v)})`);
   }
+  // U24: a goal instead of a prompt, refused beside one, since which of the two was meant is not guessed. Read here,
+  // before anything is written, so that a refused goal leaves an earlier run's next-prompt.md and resume.json as they were.
+  let planning = null;
+  if (opt.goal !== undefined || opt["goal-file"] !== undefined) {
+    if (opt.prompt !== undefined || opt["prompt-file"] !== undefined) fail("pass a goal (--goal, --goal-file) or a prompt (--prompt, --prompt-file), not both");
+    if (opt.goal !== undefined && opt["goal-file"] !== undefined) fail("pass --goal or --goal-file, not both");
+    // parseArgs reads a value that starts with -- as the next flag.
+    if (opt.goal === true) fail("--goal wants the goal's text (got no value; a goal that starts with -- goes in a file for --goal-file)");
+    const file = opt["goal-file"];
+    if (file === true) fail("--goal-file wants a file (got no value)");
+    if (file !== undefined && !(fs.existsSync(file) && fs.statSync(file).isFile())) fail(`--goal-file ${path.resolve(file)}: no such file`);
+    let goal = opt.goal;
+    if (file !== undefined) { try { goal = fs.readFileSync(file, "utf8"); } catch (e) { fail(`--goal-file ${path.resolve(file)} cannot be read (${e.code || e.message})`); } }
+    if (!goal.trim()) fail(file !== undefined ? `--goal-file ${path.resolve(file)} holds no goal` : "--goal wants the goal's text (got none)");
+    const template = read(GOAL_PROMPT);
+    if (!template.includes("{{goal}}")) fail(`${GOAL_PROMPT} is missing or has no {{goal}} line; copy the skill folder again`);
+    planning = goalPrompt(goal, template);
+  }
   // A language is never guessed from "PT" or "pt-BR": a night in English that was asked for in another language is worse than a refusal.
   if (opt.lang !== undefined && !isLangCode(opt.lang)) fail(`--lang must be a language code in lowercase, such as en or pt-br (got ${opt.lang === true ? "no value" : opt.lang})`);
   if (opt.mode !== undefined && !MODES.includes(opt.mode)) fail(`--mode must be one of ${MODES.join(", ")} (got ${opt.mode === true ? "no value" : opt.mode})`);
@@ -355,12 +381,13 @@ async function start(opt) {
   // In long form, so the guard, which refuses 8.3 short names, accepts the handover's path whatever way --state or %TEMP% spelled it.
   state = fs.realpathSync.native(state);
   const next = path.join(state, "next-prompt.md");
-  // A new prompt starts fresh; without one, a session a usage limit cut off (resume.json) goes on.
-  if (opt["prompt-file"]) fs.copyFileSync(opt["prompt-file"], next);
+  // A new prompt, a goal's included, starts fresh; without one, a session a usage limit cut off (resume.json) goes on.
+  if (planning) fs.writeFileSync(next, planning);
+  else if (opt["prompt-file"]) fs.copyFileSync(opt["prompt-file"], next);
   else if (typeof opt.prompt === "string") fs.writeFileSync(next, opt.prompt);
-  else if (!read(next).trim()) fail("no prompt: pass --prompt-file or --prompt");
+  else if (!read(next).trim()) fail("no prompt: pass --prompt-file, --prompt, --goal or --goal-file");
   const resumeFile = path.join(state, "resume.json");
-  const fresh = Boolean(opt["prompt-file"]) || typeof opt.prompt === "string";
+  const fresh = Boolean(planning) || Boolean(opt["prompt-file"]) || typeof opt.prompt === "string";
   if (fresh) fs.rmSync(resumeFile, { force: true });
   // A runner that died mid-session (a power cut, a crash, a restart) leaves the session
   // unfinished in chain.log; start without a prompt goes on in that conversation.
@@ -425,6 +452,7 @@ async function start(opt) {
   console.log(`night-shift started for ${repo}`);
   if (cut) console.log(`  resumes session ${cut.nn} (${cut.sessionId}), which the last runner left unfinished`);
   console.log(`  state:  ${state}`);
+  if (planning) console.log("  goal:   the first session plans it into a roadmap (references/goal.md); the work starts in the session after it");
   console.log(modelLine(run));
   console.log(`  until:  ${run.until ? `${run.until} (no new session after that)` : "the work is done (STOP)"}${run.maxSessions ? `, at most ${run.maxSessions} sessions, the last of them session ${String(run.lastSession).padStart(2, "0")}` : ""}`);
   for (const l of ruleLines(ruleStatus(repo))) console.log(l);

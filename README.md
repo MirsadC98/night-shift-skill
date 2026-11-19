@@ -34,11 +34,14 @@ You can also drive the runner yourself:
 
 ```bash
 node ~/.claude/skills/night-shift/scripts/night-chain.mjs start  --repo <dir> --prompt-file <file>
+node ~/.claude/skills/night-shift/scripts/night-chain.mjs start  --repo <dir> --goal <text>
 node ~/.claude/skills/night-shift/scripts/night-chain.mjs status --repo <dir>
 node ~/.claude/skills/night-shift/scripts/night-chain.mjs wait   --repo <dir>
 node ~/.claude/skills/night-shift/scripts/night-chain.mjs stop   --repo <dir> [--now]
 node ~/.claude/skills/night-shift/scripts/night-chain.mjs reload --repo <dir>
 ```
+
+A chain works from an approved roadmap: the pieces in order, each one session's work. Without one, give `start` the goal instead of a prompt, with `--goal <text>` or `--goal-file <file>` (one of the two, and never beside `--prompt` or `--prompt-file`). The runner wraps it in the planning prompt `references/goal.md`. The first session reads the repository and your recorded preferences, writes the roadmap (the pieces in order, what done looks like for each, the checks, what is out of scope), has one reviewer check it, marks it approved and commits it; the work starts in the second session. The goal approves the work it needs and nothing beyond it. Keep a long specification in the repository and name it in the goal ("the spec in docs/spec.md"): the first session reads the goal again in every call. Like a prompt, a goal starts fresh: it replaces a kept `next-prompt.md` and a session kept in `resume.json`.
 
 `start` also takes `--until HH:MM`, `--max-sessions <n>` (the sessions this `start` runs, counted from the first, also in an earlier run's folder), `--session-hours <h>`, `--model <m>`, `--effort <level>`, `--fable-ceiling <share>`, `--fable-sessions <n>`, `--mode opus|fable|mythos`, `--lang <code>`, `--max-wait-hours <h>` (the longest wait for a usage limit or an outage, default 6), `--weekly-ceiling <share>`, `--max-usd <dollars>`, `--state <dir>` (continue in an earlier run's folder) and `--window` (a visible console; closing it stops the chain). A value of the wrong shape for any of them stops `start` and names the flag; a flag with a config key below takes the values that key takes. `start` without a prompt goes on from a session a limit or an error cut off, kept in `<state>/resume.json`.
 
