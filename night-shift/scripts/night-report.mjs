@@ -352,7 +352,8 @@ function runnerNote(text, T, main = null) {
   if ((m = /^session \d+: (\w+)'s allowance is used up/.exec(text))) return (main ? T.note.mainCut : T.note.fableCut)(m[1]);
   if ((m = /^session \d+ was to run on (\w+), but (.*)$/.exec(text))) return T.note.fableNot(m[2], m[1]);
   if ((m = /^session \d+: this account cannot run (\w+) \(.*\); MODEL: (\w+) runs on Opus at max for the rest of this chain$/.exec(text))) return T.note.cannotRun(m[1], m[2]);
-  if ((m = /^session \d+ wrote a next-prompt\.md of (\d+) KB/.exec(text))) return T.note.bigPrompt(m[1]);
+  // The line names its limit and what the prompt costs a call since 2026-11-19 (T2); an older one was over 30 KB.
+  if ((m = /^session \d+ wrote a next-prompt\.md of (\d+) KB(?: \(over (\d+) KB\))?(?:.*, about (\d+)k tokens a call)?/.exec(text))) return T.note.bigPrompt(m[1], m[2] || "30", m[3] || null);
   // U14 (2026-11-19 on): a known stream field stopped arriving, or the weekly ceiling's window never came.
   if ((m = /^session \d+: its stream had no (\S+), which earlier sessions' streams had/.exec(text))) return T.note.fieldGone(m[1]);
   if (/^session \d+: its stream had no unifiedWindows\.seven_day, which --weekly-ceiling reads/.test(text)) return T.note.ceilingBlind;

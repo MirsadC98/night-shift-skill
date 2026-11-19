@@ -70,3 +70,8 @@ test("SKILL.md does not grow past its budget", () => {
   assert.ok(Buffer.byteLength(text) <= 16283, `SKILL.md is ${Buffer.byteLength(text)} bytes, over 16283: cut what pays for the addition`);
   assert.ok(text.trimEnd().split("\n").length <= 110, `SKILL.md has ${text.trimEnd().split("\n").length} lines, over 110`);
 });
+// T2 (2026-11-19): the size SKILL.md names is the one the runner flags.
+test("SKILL.md names the prompt size the runner flags", async () => {
+  const { PROMPT_WARN_BYTES } = await import("./night-chain.mjs");
+  assert.ok(skill.includes(`the runner reports one over ${PROMPT_WARN_BYTES / 1000} KB`), `SKILL.md: over ${PROMPT_WARN_BYTES / 1000} KB`);
+});

@@ -82,7 +82,7 @@ export default {
     mainFell: (why, level, model) => `${model} is the main model, but ran on Opus at ${level} (${why})`,
     mainCut: (model) => `cut off because ${model}'s share ran out; the rest goes on Opus at xhigh`,
     fableNot: (why, model) => `did not run on ${model}: ${why}`,
-    bigPrompt: (kb) => `continuation prompt is ${kb} KB (over 30 KB; every call reads it again)`,
+    bigPrompt: (kb, over = "30", tokens = null) => `continuation prompt is ${kb} KB (over ${over} KB; every call reads it again${tokens ? `, about ${tokens}k tokens each` : ""})`,
     fieldGone: (field) => `stream field ${field} stopped arriving (the CLI may have renamed it); chain.log says what it blinds`,
     ceilingBlind: "the CLI's stream has no seven-day window, so the weekly ceiling stops no session",
     badModel: (m) => `MODEL: ${m} not recognised, ran on Opus`,

@@ -97,9 +97,12 @@ const cap = (s) => s[0].toUpperCase() + s.slice(1);
 const modelText = (p) => `${cap(p.family)}${p.model !== p.family ? ` (${p.model})` : ""}`;
 const stamp = (ms) => new Date(ms).toLocaleString("sv-SE").slice(0, 16);
 // A handover prompt over this many bytes is flagged: the next session reads all of it on every call.
-// Of 127 prompts of 2026-10-30 … 11-15 the median was 15 KB; only the 10-30 run's prompts, which
-// grew by accumulation to 98 KB, and four of 11-11 went over 30 KB.
-export const PROMPT_WARN_BYTES = 30_000;
+// 12 KB since 2026-11-19 (T2), 30 KB before: one project's first prompts grew from 4.6k to 31.8k characters in three
+// days, and its first calls by 17k tokens, unflagged; prompts written fresh hold 2–9 KB.
+export const PROMPT_WARN_BYTES = 12_000;
+// What a byte costs in each call: this chain's first 15 prompts (2.1–6.9 KB, English) added 0.4 tokens a byte to the
+// first call's context (2026-11-19), that project's 0.6.
+const PROMPT_TOKENS_PER_BYTE = 0.4;
 // A fraction (0.6) or a percentage (60).
 const ratioArg = (v, d) => { const n = Number(v); return v == null || v === true || Number.isNaN(n) ? d : n > 1 ? n / 100 : n; };
 const countArg = (v, d) => { const n = Number(v); return v == null || v === true || !Number.isFinite(n) || n < 0 ? d : Math.floor(n); };
@@ -663,9 +666,13 @@ async function runChain(opt) {
     for (const f of lost.gone) log(`session ${nn}: its stream had no ${f}, which earlier sessions' streams had (the CLI may have renamed it); ${FIELD_USE[f]}`);
     if (lost.ceilingBlind) log(`session ${nn}: its stream had no unifiedWindows.seven_day, which --weekly-ceiling reads; until a session's stream has it, the ceiling stops no session`);
     writeLimits(state, lost.memo);
-    log(`session ${nn} ends: ${result.summary}`);
     // A session that wrote its handover has done its piece, even when a limit cut off what came after.
     const wrote = fs.statSync(next).mtimeMs > before && read(next).trim() !== prompt;
+    // T2: before the end line too, so the session's card has it.
+    const size = wrote ? Buffer.byteLength(read(next).trim()) : 0;
+    if (size > PROMPT_WARN_BYTES) log(`session ${nn} wrote a next-prompt.md of ${Math.round(size / 1000)} KB (over ${PROMPT_WARN_BYTES / 1000} KB): ` +
+      `every call of the next session reads all of it again, about ${Math.round((size * PROMPT_TOKENS_PER_BYTE) / 1000)}k tokens a call`);
+    log(`session ${nn} ends: ${result.summary}`);
     const ran = result.mainModels.join(", ") || result.model || "no model reply";
     log(`session ${nn} limits: ${windowSpan(result.windows)}; it ran on ${ran}`);
     const fw = result.windows.latest?.seven_day_overage_included;
@@ -778,11 +785,7 @@ async function runChain(opt) {
       fs.writeFileSync(next, `${directiveLines(d)}The previous night session (${nn}) ended without writing a continuation prompt (${result.summary}). ` +
         `Work out the state from git log, the project's logs and the night report; do not redo finished work.\n\n${d.model || d.effort ? d.body : prompt}`);
       log(`session ${nn} left no continuation prompt; retrying with a recovery note`);
-    } else {
-      failures = 0;
-      const size = Buffer.byteLength(after);
-      if (size > PROMPT_WARN_BYTES) log(`session ${nn} wrote a next-prompt.md of ${Math.round(size / 1000)} KB (over ${PROMPT_WARN_BYTES / 1000} KB): the next session reads all of it on every call`);
-    }
+    } else failures = 0;
     session++;
   }
   // The last allowed session may have written a STOP handover: that reason ends the chain, not the cap.

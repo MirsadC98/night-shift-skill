@@ -566,8 +566,8 @@ test("a runner whose language table is gone reads English and says so once in ch
 
 test("a MODEL: fable prompt runs that session on Fable at high without the model fallback; the next one on Opus", async () => {
   const resets = Math.floor(Date.now() / 1000) + 3 * 86_400;
-  const { log, seen, flag, fable } = await fableRun("MODEL: fable — the parser resisted Opus twice\nhard piece", {
-    1: { fable: 0.2, resets, next: `plain piece\n${"x".repeat(31_000)}` }, 2: { next: "STOP: done" } });
+  const { state, log, seen, flag, fable } = await fableRun("MODEL: fable — the parser resisted Opus twice\nhard piece", {
+    1: { fable: 0.2, resets, next: `plain piece\n${"x".repeat(13_000)}` }, 2: { next: "STOP: done" } });
   const [one, two] = [seen(1), seen(2)];
   assert.equal(flag(one, "--model"), "fable");
   assert.equal(flag(one, "--effort"), null, "high goes through the settings layer");
@@ -583,7 +583,11 @@ test("a MODEL: fable prompt runs that session on Fable at high without the model
   assert.match(log, /session 01 starts: the parser resisted Opus twice\n/);
   assert.match(log, /session 01 runs Fable at high\n/);
   assert.match(log, /session 01 limits: 5h 40%→40% · 7d 30%→30% · fable 20%→20%; it ran on no model reply/);
-  assert.match(log, /session 01 wrote a next-prompt\.md of 31 KB \(over 30 KB\)/);
+  // T2: flagged from 12 KB, with what it costs, before the end line, at which the watcher makes the session's card.
+  assert.match(log, /session 01 wrote a next-prompt\.md of 13 KB \(over 12 KB\): every call of the next session reads all of it again, about 5k tokens a call\n\[[^\]]+\] session 01 ends: /);
+  assert.doesNotMatch(log, /session 02 wrote a next-prompt/);
+  const { sessionMessage } = await import("./night-report.mjs");
+  assert.match(sessionMessage(state, "01", process.pid).text, /continuation prompt is 13 KB \(over 12 KB; every call reads it again, about 5k tokens each\)/);
   assert.match(log, /session 02 runs Opus at xhigh\n/);
   assert.deepEqual(fable(), { sessions: 1, ratio: 0.2, ratioResetsAt: resets, ratioAt: fable().ratioAt });
 });
@@ -1341,7 +1345,9 @@ test("an old chain.log's Fable lines still give their notes on the cards, in opu
     " asked for Fable, but its allowance is used up until 2026-11-18 10:00; it runs on Opus at max",
     ": Fable's allowance is used up (model_requires_usage_credits) until 2026-11-18 10:00; limit record null",
     " was to run on Fable, but the CLI switched it to Opus",
+    " wrote a next-prompt.md of 31 KB (over 30 KB): the next session reads all of it on every call",
   ]);
+  assert.match(opus[5], /continuation prompt is 31 KB \(over 30 KB; every call reads it again\)/, "the line before 2026-11-19 names its own limit");
   assert.match(opus[0], /asked for Fable, ran on Opus at max \(the chain already ran 2 sessions on Fable's allowance, the share is unknown\)/);
   assert.match(opus[1], /asked for Fable, ran on Opus at max \(Fable's share is 65%, at the 60% ceiling\)/);
   assert.match(opus[2], /asked for Fable, ran on Opus at max \(Fable's share is used up until 2026-11-18 10:00\)/);
