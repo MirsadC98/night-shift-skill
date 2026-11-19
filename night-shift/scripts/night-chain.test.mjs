@@ -13,6 +13,10 @@ import { fileURLToPath } from "node:url";
 delete process.env.CLAUDE_CONFIG_DIR;
 
 const CHAIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "night-chain.mjs");
+// T8: a mode's rules as a new session's header carries them.
+const modeText = (m) => fs.readFileSync(path.join(path.dirname(path.dirname(CHAIN)), "references", `mode-${m}.md`), "utf8").replace(/\r\n/g, "\n").trim();
+// A header without its mode's rules: what the runner itself says to the session (its notes name the model in play).
+const ownLines = (input, m) => input.replace(modeText(m), "");
 // A made-up language table, "xx", copied into a throwaway home as the user's own (lang/index.mjs).
 const XX = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "lang-xx.mjs");
 const putTable = (home, code = "xx", text) => {
@@ -550,6 +554,9 @@ test("a session's header opens with the marker and names the user's language and
   assert.ok(one.input.includes(`Skill folder: ${skillDir}.`));
   assert.equal(one.skill, skillDir);
   assert.ok(one.input.endsWith("\n---\nhard piece\n"));
+  // T8: its own mode's rules follow the mode's line; no other mode's.
+  assert.ok(one.input.includes(`Mode: opus.\n${modeText("opus")}\nSkill folder: `));
+  assert.doesNotMatch(one.input, /\*\*Mode (fable|mythos)\.\*\*/);
   assert.doesNotMatch(one.log, /language table/);
   assert.match((await headerOf("en")).input, /The user reads English: /);
 });
@@ -680,7 +687,8 @@ test("fable mode: every session runs on Fable at high, past the count, with no o
     assert.equal(s.settings.fable.effortLevel, "high");
     assert.equal(s.noFallback, "1");
   }
-  assert.match(seen(1).input, /Mode: fable\./);
+  assert.ok(seen(1).input.includes(`Mode: fable.\n${modeText("fable")}\nSkill folder: `));
+  assert.doesNotMatch(seen(1).input, /\*\*Mode (opus|mythos)\.\*\*|A piece earns/);
   assert.doesNotMatch(seen(1).input, /only for this piece/);
   assert.match(log, /Fable as the main model under 60% of its allowance, else opus at xhigh\n/);
   assert.equal(fable().sessions, undefined);
@@ -695,7 +703,7 @@ test("fable mode: at the ceiling the next session runs on Opus at xhigh and says
   assert.equal(flag(two, "--effort"), null);
   assert.equal(two.settings.opus.effortLevel, "xhigh");
   assert.match(two.input, /main model is Fable/);
-  assert.doesNotMatch(two.input, /\bmax\b/);
+  assert.doesNotMatch(ownLines(two.input, "fable"), /\bmax\b/);
   assert.match(log, /session 02: Fable is the main model, but its allowance is at 65%, at or over the 60% ceiling; it runs on Opus at xhigh\n/);
   assert.match(log, /session 02 runs Opus at xhigh\n/);
   const { sessionMessage } = await import("./night-report.mjs");
@@ -774,7 +782,7 @@ test("a MODEL: mythos prompt runs that session as Mythos's id at high, with its 
   assert.equal(one.noFallback, "1");
   assert.match(one.input, /This session runs on Mythos, only for this piece: .* Mythos's weekly allowance is the user's/);
   assert.match(one.input, /keeps MODEL: mythos\)/);
-  assert.doesNotMatch(one.input, /Fable/);
+  assert.doesNotMatch(ownLines(one.input, "opus"), /Fable/);
   assert.match(one.input, /\n---\nhard piece\n$/);
   assert.match(log, /session 01 runs Mythos \(claude-mythos-5-2\) at high\n/);
   assert.equal(fable().sessions, 1);
@@ -863,7 +871,8 @@ test("mythos mode: every session runs on Mythos's id at high, past the count; MO
     assert.equal(s.settings[MYTHOS].effortLevel, "high");
     assert.equal(s.noFallback, "1");
   }
-  assert.match(seen(1).input, /Mode: mythos\./);
+  assert.ok(seen(1).input.includes(`Mode: mythos.\n${modeText("mythos")}\nSkill folder: `));
+  assert.doesNotMatch(seen(1).input, /\*\*Mode (opus|fable)\.\*\*/);
   assert.doesNotMatch(seen(1).input, /only for this piece/);
   assert.match(log, /Mythos as the main model under 60% of its allowance, else opus at xhigh\n/);
   assert.match(log, /session 01: MODEL: fable is the same model as Mythos, this run's main model; it runs on claude-mythos-5-2\n/);
@@ -885,7 +894,7 @@ test("mythos mode: at the ceiling, and when the allowance is used up, the sessio
   assert.equal(two.noFallback, null);
   assert.match(two.input, /This run's main model is Mythos, but it cannot run this session: its allowance is at 65%/);
   assert.match(two.input, /goes back to Mythos when it can/);
-  assert.doesNotMatch(two.input, /\bmax\b|Fable/);
+  assert.doesNotMatch(ownLines(two.input, "mythos"), /\bmax\b|Fable/);
   assert.match(ceiling.log, /session 02: Mythos is the main model, but its allowance is at 65%, at or over the 60% ceiling; it runs on Opus at xhigh\n/);
   const { sessionMessage } = await import("./night-report.mjs");
   const fell = sessionMessage(ceiling.state, "02", process.pid).text;
@@ -2341,6 +2350,8 @@ test("the five-hour wait: a reading an earlier start kept holds the first sessio
   // A session an error cut off waits too: a session started into a full window is cut again, its work half done.
   const resumed = await fableRun("first", { 1: { next: "STOP: done" } }, {}, keep(soon, true));
   assert.match(resumed.log, /usage limit: waiting until [^\n]*\n[^\n]*session 01 resumes 00000000-0000-4000-8000-000000000001 after the error/);
+  // T8: a resumed session's header carries no mode text: its conversation has it from its first header.
+  assert.doesNotMatch(resumed.seen(1).input, /\*\*Mode opus\.\*\*/);
   // No session may start after --until, so a reset after it ends the chain now, next-prompt.md kept.
   const late = await fableRun("first", { 1: { next: "STOP: done" } }, { until: "23:59", deadline: Date.now() + 600_000 }, keep(later));
   assert.match(late.log, /chain ends: the five-hour window is at 95%, at or over 90%, and resets \d{4}-\d\d-\d\d \d\d:\d\d, after 23:59; next-prompt\.md stays for a start with --state$/m);

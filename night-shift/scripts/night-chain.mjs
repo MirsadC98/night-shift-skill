@@ -67,6 +67,10 @@ import { MAIN_MODEL, SUB_MODEL, MAIN_EFFORT, subEffortText, MAX_NOTE, nightModel
 
 const SELF = fileURLToPath(import.meta.url);
 const SKILL_DIR = path.dirname(path.dirname(SELF)); // the folder that holds SKILL.md
+// T8 (2026-11-19): what a mode means for a session (when it may ask for Fable, what it never does) is in
+// references/mode-<mode>.md, and a new session's header carries its own mode's text: SKILL.md, which every session
+// loads, holds none of the three. "" for a mode with no file (a copy of the skill without it).
+const modeRules = (mode) => (mode ? read(path.join(SKILL_DIR, "references", `mode-${mode}.md`)).replace(/\r\n/g, "\n").trim() : "");
 const GUARD = path.join(path.dirname(SELF), "guard.mjs");
 const REPORT = path.join(path.dirname(SELF), "night-report.mjs");
 const HIDE = path.join(path.dirname(SELF), "hide-windows.cjs");
@@ -841,6 +845,7 @@ function runSession(run, session, plan, nn, resume, rules = "", mcp = ["--strict
     `First invoke the night-shift skill and follow its "Inside a night session" part.`,
     `The user reads ${strings(langOf(run)).name}: write the night report's own text and its Waits-for-you items in that language, and keep the report's fixed words as the skill gives them.`,
     `Mode: ${run.mode}.`,
+    ...[modeRules(run.mode)].filter(Boolean),
     `Skill folder: ${SKILL_DIR}. Continuation file: ${path.join(run.state, "next-prompt.md")}. Night report: ${run.report}.`,
     // Opus mode: a Fable or Mythos session is for its one piece, and a refused one is told why. Fable or
     // mythos mode: the stand-in is told the main model cannot run it and why.
