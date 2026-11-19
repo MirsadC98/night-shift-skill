@@ -69,9 +69,17 @@ function namedFolder(value, wide) {
 // two lists of what is installed. Their hooks and servers run in the user's own sessions; data/ is the plugins' own.
 const PLUGIN_PARTS = ["cache", "marketplaces", "installed_plugins.json", "known_marketplaces.json"];
 
+// K6: a chain on its own worktree. The runner names the main tree in NIGHT_SHIFT_MAIN_TREE, the worktree being the
+// session's repository (NIGHT_SHIFT_REPO); the project's file is read there (projectRoot), its rule files and its .git
+// are protected as the worktree's are, and it is no writable root: the main tree is the user's while the chain runs.
+// A value that names no other folder (blank, or the repository in another spelling) reads the repository's file, as before;
+// one in Git Bash's /c/ form is read as its drive path, which Node would read as \c\ on the current drive.
+const projectRoot = (env) => (!env.NIGHT_SHIFT_REPO ? "" : env.NIGHT_SHIFT_MAIN_TREE && roots(env).main ? P.fsHome(String(env.NIGHT_SHIFT_MAIN_TREE).trim()) : env.NIGHT_SHIFT_REPO);
+
 function roots(env) {
   const home = norm(P.home(env));
   const repo = norm(env.NIGHT_SHIFT_REPO || "");
+  const main = repo ? norm(env.NIGHT_SHIFT_MAIN_TREE || "") : "";
   // A state folder that is a drive, the home folder or the like (a typo in stateDir) would make
   // all of it writable: it adds nothing, and the runner refuses to start with one.
   const state = env.NIGHT_SHIFT_STATE && !stateDirProblem(env.NIGHT_SHIFT_STATE, { home, repo, temp: P.tempRoot(), env, platform: P }) ? norm(env.NIGHT_SHIFT_STATE) : "";
@@ -81,6 +89,8 @@ function roots(env) {
   const skill = namedFolder(env.NIGHT_SHIFT_SKILL, wide);
   return {
     repo,
+    // The main tree of a worktree run, "" otherwise (none given, or the repository itself).
+    main: main && main !== repo ? main : "",
     state,
     // Besides these, the system's temp folders (platform.mjs).
     writable: [repo, state, ...P.tempRoots(home)].filter(Boolean),
@@ -116,8 +126,11 @@ function protectedSpelling(p, r) {
   if (p === norm(`${r.home}/.claude/CLAUDE.md`)) return "the user's global CLAUDE.md";
   // Config, rules and run state the user steers the night with. Before the repo roots: with the repo at ~/.claude they sit inside a writable root.
   if (under(p, `${r.home}/.claude/night-shift`)) return "the user's night-shift settings and rules";
-  if (r.repo && (p === `${r.repo}/.claude/night-shift.json` || p === `${r.repo}/.claude/night-shift-rules.md`)) return "the project's night-shift rules";
-  if (r.repo && under(p, `${r.repo}/.git`)) return "the .git directory";
+  // A worktree run's main tree holds the copy the guard and the runner read, and the .git the worktree's commits go to.
+  for (const tree of [r.repo, r.main].filter(Boolean)) {
+    if (p === `${tree}/.claude/night-shift.json` || p === `${tree}/.claude/night-shift-rules.md`) return "the project's night-shift rules";
+    if (under(p, `${tree}/.git`)) return "the .git directory";
+  }
   if (r.state && under(p, r.state) && RUNNER_FILES.test(p.slice(r.state.length + 1))) return "the runner's own files in the state folder";
   return null;
 }
@@ -346,6 +359,8 @@ function protectedTargets(r) {
     [r.state, "the run's state folder"],
     [r.repo && `${r.repo}/.git`, "the .git directory"],
     [r.repo && `${r.repo}/.claude`, "the project's .claude folder"],
+    [r.main && `${r.main}/.git`, "the .git directory"],
+    [r.main && `${r.main}/.claude`, "the project's .claude folder"],
     [`${r.home}/.claude/skills/night-shift`, "the night-shift skill itself"],
     ...r.skill.map((s) => [s, "the night-shift skill itself"]),
     ...r.plugins.flatMap((root) => PLUGIN_PARTS.map((f) => [`${root}/${f}`, "Claude Code's installed plugins"])),
@@ -1314,10 +1329,30 @@ export function checkCommand(cmd, env, where, opts = {}, depth = 0) {
 // The project's deny rules. A file that does not validate yields an error instead: a rule that
 // cannot be read must not silently stop refusing, so decide refuses every shell command.
 function projectRules(env) {
-  if (!env.NIGHT_SHIFT_REPO) return { rules: [] };
-  const { config, errors } = readProjectConfig(env.NIGHT_SHIFT_REPO);
+  if (!projectRoot(env)) return { rules: [] };
+  const { config, errors } = readProjectConfig(projectRoot(env));
   if (errors.length) return { error: errors[0] };
   return { rules: (config.deny || []).map((d) => [new RegExp(d.pattern, d.flags ?? "i"), d.reason ?? `refused by a project rule (${d.pattern})`]) };
+}
+
+// A worktree run's command with the worktree's path read as the main tree's, in each spelling a command may write it
+// (on Windows backslashes, forward slashes and Git Bash's /c/; in any case where the system folds it), so that a
+// project rule naming the main tree's absolute path still matches; null when there is no main tree or no such path.
+function asMainTree(cmd, env) {
+  if (!env.NIGHT_SHIFT_MAIN_TREE || !roots(env).main) return null;
+  // A variable given in Git Bash's /c/ form is read as its drive path first, so every spelling comes from one form.
+  const spell = (dir) => {
+    const fwd = P.fsHome(String(dir).trim()).replace(/\\/g, "/").replace(/\/+$/, "");
+    if (P.name !== "win32") return [fwd];
+    const msys = fwd.replace(/^([A-Za-z]):(?=\/|$)/, (_, d) => `/${d.toLowerCase()}`);
+    return [fwd.replace(/\//g, "\\"), fwd, ...(msys !== fwd ? [msys] : [])];
+  };
+  const from = spell(env.NIGHT_SHIFT_REPO), to = spell(env.NIGHT_SHIFT_MAIN_TREE);
+  const flags = P.fold("A") === "a" ? "gi" : "g";
+  let out = cmd;
+  // Not inside a longer name: C:/work/repo-nightly is another folder than C:/work/repo-night.
+  from.forEach((f, i) => { if (to[i]) out = out.replace(new RegExp(`${f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w.-])`, flags), () => to[i]); });
+  return out === cmd ? null : out;
 }
 
 // opts.platform: the system whose path rules judge the call (platform.mjs), the live one when none is given.
@@ -1338,11 +1373,16 @@ function decideOn(input, env, opts) {
     if (error) return `.claude/night-shift.json is invalid (${error}); the user must fix it`;
     // The project's rules read the path with forward slashes, as given and as the system resolves it (norm, in
     // lower case where it folds), each from the repository down too. An MSYS /c/ is read as c:/ to line it up with the repository.
-    const given = String(file ?? "").replace(/\\/g, "/"), p = norm(given), repo = roots(env).repo;
+    const given = String(file ?? "").replace(/\\/g, "/"), p = norm(given), { repo, main } = roots(env);
     const lined = given.replace(/^\/([a-z])(?=\/)/i, "$1:"), forms = [given, p];
     if (repo && p.startsWith(repo + "/")) {
       forms.push(p.slice(repo.length + 1));
-      if (P.fold(lined).startsWith(repo + "/")) forms.push(lined.slice(repo.length + 1));
+      // A worktree run: the path in the main tree's spelling too, so a rule naming the main tree's absolute path holds.
+      if (main) forms.push(`${main}/${p.slice(repo.length + 1)}`);
+      if (P.fold(lined).startsWith(repo + "/")) {
+        forms.push(lined.slice(repo.length + 1));
+        if (main) forms.push(`${String(env.NIGHT_SHIFT_MAIN_TREE).replace(/\\/g, "/").replace(/\/+$/, "")}/${lined.slice(repo.length + 1)}`);
+      }
     }
     // lastIndex goes back to 0 for each form: a rule with the g or y flag keeps its place between tests.
     for (const [re, reason] of rules) if (forms.some((f) => { re.lastIndex = 0; return re.test(f); })) return reason;
@@ -1350,7 +1390,7 @@ function decideOn(input, env, opts) {
   }
   if (typeof tool === "string" && tool.startsWith("mcp__")) {
     // A server the project did not name may do anything its tools do, outside every rule here.
-    const { config, errors } = env.NIGHT_SHIFT_REPO ? readProjectConfig(env.NIGHT_SHIFT_REPO) : { config: {}, errors: [] };
+    const { config, errors } = projectRoot(env) ? readProjectConfig(projectRoot(env)) : { config: {}, errors: [] };
     if (errors.length) return `.claude/night-shift.json is invalid (${errors[0]}); the user must fix it`;
     const mode = config.mcp ?? "none", server = tool.slice(5, Math.max(5, tool.lastIndexOf("__")));
     // A listed name in the tools' spelling: "plugin:x:y", as `claude mcp list` shows a plugin's server, names tools mcp__plugin_x_y__….
@@ -1362,8 +1402,8 @@ function decideOn(input, env, opts) {
     const { rules, error } = projectRules(env);
     if (error) return `.claude/night-shift.json is invalid (${error}); the user must fix it`;
     // The project's own rules read the whole command as written (a line continued on the next is one line).
-    const cmd = raw.replace(/[\\`]\r?\n/g, " ");
-    for (const [re, reason] of rules) if (re.test(cmd)) return reason;
+    const cmd = raw.replace(/[\\`]\r?\n/g, " "), alt = asMainTree(cmd, env);
+    for (const [re, reason] of rules) if (re.test(cmd) || (alt && ((re.lastIndex = 0), re.test(alt)))) return reason;
     // cwd is where the hook says the command starts; without one it starts in the repository.
     return checkCommand(raw, env, { at: norm(input.cwd || "") || roots(env).repo, lost: false }, { ...opts, ps: tool === "PowerShell" });
   }
@@ -1404,6 +1444,8 @@ function selfTest() {
   const penv = { NIGHT_SHIFT_REPO: "/work/repo", NIGHT_SHIFT_STATE: "/tmp/x-night", HOME: "/home/u" };
   // inHome: the run's repository is the user's own .claude folder.
   const inHome = { ...env, NIGHT_SHIFT_REPO: "C:/Users/u/.claude" };
+  // worktree: a chain on its own worktree beside the main tree C:/work/repo.
+  const worktree = { ...env, NIGHT_SHIFT_REPO: "C:/work/repo-night", NIGHT_SHIFT_MAIN_TREE: "C:/work/repo" };
   const call = (tool_name, tool_input, e, platform) => decide({ tool_name, tool_input }, e, { platform });
   const bash = (command, e = env, platform = WIN) => call("Bash", { command }, e, platform);
   const ps = (command, e = env) => call("PowerShell", { command }, e, WIN);
@@ -1502,6 +1544,9 @@ function selfTest() {
     [write("C:/work/repo/.claude/night-shift-rules.md"), true], [bash("echo 'push is fine' >> .claude/night-shift-rules.md"), true],
     [bash("rm .claude/night-shift-rules.md"), true], [bash("rm -f C:/work/repo/.claude/night-shift-*"), true],
     [ps("Set-Content .claude\\night-shift-rules.md 'x'"), true], [bash("cat .claude/night-shift-rules.md"), false],
+    // A worktree run (K6): the main tree's rule files and .git are the user's; the worktree is the session's repository.
+    [bash("echo x >> C:/work/repo/.claude/night-shift-rules.md", worktree), true], [bash("cp hook C:/work/repo/.git/hooks/pre-commit", worktree), true],
+    [write("C:/work/repo-night/src/a.ts", worktree), false],
     [write("C:/Users/u/.claude/night-shift/rules.md", inHome), true], [write("C:/Users/u/.claude/night-shift/config.json", inHome), true],
     // the user's language tables are code the runner and the watcher run (lang/index.mjs)
     [write("C:/Users/u/.claude/night-shift/lang/tr.mjs", inHome), true], [bash("echo 'export default {}' > C:/Users/u/.claude/night-shift/lang/xx.mjs", inHome), true],

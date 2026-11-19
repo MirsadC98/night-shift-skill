@@ -269,6 +269,82 @@ test("an MCP tool is refused unless the project's config allows its server", () 
   assert.match(call("mcp__plugin_x_y__do_it", repoWithConfig({ mcp: 3 })), /\.claude\/night-shift\.json is invalid/);
 });
 
+// K6: a chain on its own worktree. The runner names the main tree in NIGHT_SHIFT_MAIN_TREE beside the worktree in
+// NIGHT_SHIFT_REPO; a gitignored or uncommitted project file is not in the worktree, so the guard reads the main tree's.
+test("a worktree run reads the project's file in the main tree: its deny rules and its MCP list, not the worktree's copy", () => {
+  const mainEnv = repoWithConfig({});
+  const main = mainEnv.NIGHT_SHIFT_REPO, fwd = main.replace(/\\/g, "/");
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), msys = (s) => s.replace(/^([A-Za-z]):/, (_, d) => `/${d.toLowerCase()}`);
+  writeFileSync(join(main, ".claude", "night-shift.json"), JSON.stringify({ deny: [{ pattern: "deploy\\.ps1" }, { pattern: "secrets/" },
+    { pattern: `${esc(fwd)}/private/`, reason: "the main tree's private folder" }, { pattern: `${esc(main.replace(/\//g, "\\"))}\\\\keep\\\\`, reason: "kept, backslashes" },
+    { pattern: `${esc(msys(fwd))}/bash/`, reason: "Git Bash's spelling" }, { pattern: `^${esc(fwd)}/Exact/`, flags: "", reason: "in its own case" }], mcp: ["x"] }));
+  const wt = mkdtempSync(join(tempRoot(), "guard-worktree-test-"));
+  mkdirSync(join(wt, ".claude"));
+  writeFileSync(join(wt, ".claude", "night-shift.json"), JSON.stringify({ mcp: "inherit" }));
+  const e = { ...env, NIGHT_SHIFT_REPO: wt, NIGHT_SHIFT_MAIN_TREE: main }, wfwd = wt.replace(/\\/g, "/");
+  const here = { platform: platformFor("win32") };
+  const w = (file) => decide({ tool_name: "Write", tool_input: { file_path: file } }, e, here);
+  const sh = (command) => decide({ tool_name: "Bash", tool_input: { command } }, e, here);
+  const tool = (name) => decide({ tool_name: name, tool_input: {} }, e, here);
+  assert.match(sh("./deploy.ps1") ?? "", /refused by a project rule \(deploy\\\.ps1\)/);
+  assert.match(w(`${wt}/secrets/a.txt`) ?? "", /project rule/);
+  // The MCP list is the main tree's: its "inherit" in the worktree's copy lets nothing more through.
+  assert.equal(tool("mcp__x__look"), null);
+  assert.match(tool("mcp__blender__look") ?? "", /MCP tools are off in a night run \(server "blender"\)/);
+  // A rule that names the main tree's absolute path holds for the same path in the worktree, written in any spelling.
+  assert.equal(w(`${wt}/private/a.txt`), "the main tree's private folder");
+  assert.equal(w(`${wt}\\private\\a.txt`), "the main tree's private folder");
+  assert.equal(sh(`echo x > ${wfwd}/private/a.txt`), "the main tree's private folder");
+  assert.equal(sh(`echo x > ${wfwd.toUpperCase()}/private/a.txt`), "the main tree's private folder");
+  assert.equal(sh(`echo x > ${wt.replace(/\//g, "\\")}\\keep\\a.txt`), "kept, backslashes");
+  if (/^[A-Za-z]:/.test(wfwd)) assert.equal(sh(`echo x > ${msys(wfwd)}/bash/a.txt`), "Git Bash's spelling");
+  // A rule without "i" reads the main tree as the runner gave it, the worktree's part as written.
+  assert.equal(w(`${wt}/Exact/a.txt`), "in its own case");
+  assert.equal(w(`${wt}/exact/a.txt`), null);
+  // The variables in Git Bash's /c/ form are read as the drive paths they name.
+  if (/^[A-Za-z]:/.test(wfwd)) {
+    const e2 = { ...env, NIGHT_SHIFT_REPO: msys(wfwd), NIGHT_SHIFT_MAIN_TREE: msys(fwd) };
+    assert.equal(decide({ tool_name: "Bash", tool_input: { command: `echo x > ${wfwd}/private/a.txt` } }, e2, here), "the main tree's private folder");
+  }
+  // A folder whose name only starts with the worktree's is another folder.
+  assert.equal(sh(`echo x > ${wfwd}x/private/a.txt`), null);
+  assert.equal(w(`${wt}/src/a.txt`), null);
+  assert.equal(sh("ls"), null);
+  // The main tree's file broken refuses as it does for a chain on the checked-out branch; a broken copy in the worktree is not read.
+  writeFileSync(join(wt, ".claude", "night-shift.json"), "{ not json");
+  assert.equal(sh("ls"), null);
+  writeFileSync(join(main, ".claude", "night-shift.json"), "{ not json");
+  assert.match(sh("ls") ?? "", /\.claude\/night-shift\.json is invalid/);
+  assert.match(w(`${wt}/src/a.txt`) ?? "", /night-shift\.json is invalid/);
+  assert.match(tool("mcp__x__look") ?? "", /night-shift\.json is invalid/);
+  // Without the second variable, with it blank, or with it naming the repository itself in another spelling, the
+  // repository's own file is read, as before.
+  writeFileSync(join(wt, ".claude", "night-shift.json"), JSON.stringify({ mcp: "inherit" }));
+  for (const m of [undefined, "", " ", wt, `${wt.toUpperCase()}/`]) {
+    const e2 = { ...env, NIGHT_SHIFT_REPO: wt, ...(m === undefined ? {} : { NIGHT_SHIFT_MAIN_TREE: m }) };
+    assert.equal(decide({ tool_name: "mcp__blender__look", tool_input: {} }, e2, here), null);
+    assert.equal(decide({ tool_name: "Bash", tool_input: { command: "ls" } }, e2, here), null);
+  }
+});
+
+test("a worktree run cannot write the main tree's night-shift rules or its .git, nor the worktree's own", () => {
+  const wt = { ...env, NIGHT_SHIFT_REPO: "C:/work/repo-night", NIGHT_SHIFT_MAIN_TREE: "C:\\work\\repo" };
+  const rules = /the project's night-shift rules/;
+  assert.match(bash("echo 'push is fine' >> C:/work/repo/.claude/night-shift-rules.md", wt) ?? "", rules);
+  assert.match(bash("echo {} > C:\\work\\repo\\.claude\\night-shift.json", wt) ?? "", rules);
+  assert.match(bash("cp x /c/work/repo/.claude/night-shift.json", wt) ?? "", rules);
+  assert.match(bash("cp hook C:/work/repo/.git/hooks/pre-commit", wt) ?? "", /the \.git directory/);
+  assert.equal(bash("rm -f C:/work/repo/.git/index.lock", wt), "refusing a delete of the .git directory (C:/work/repo/.git/index.lock)");
+  assert.equal(bash("rm -rf C:/work/repo/.claude", wt), "refusing a delete of the project's .claude folder (C:/work/repo/.claude)");
+  // These held before the main tree was known, and must still: the worktree's own rule file and .git, its work, and
+  // a Write into the main tree, which is no writable root.
+  assert.match(bash("echo x >> .claude/night-shift-rules.md", wt) ?? "", rules);
+  assert.match(bash("echo x > C:/work/repo-night/.git", wt) ?? "", /the \.git directory/);
+  assert.equal(write("C:/work/repo-night/src/a.ts", wt), null);
+  assert.equal(bash("echo x > C:/work/repo-night/notes.txt", wt), null);
+  assert.ok(write("C:/work/repo/src/a.ts", wt));
+});
+
 test("a state folder that is too wide adds nothing to what may be written", () => {
   const wide = { ...env, NIGHT_SHIFT_STATE: "C:/Users/u" };
   assert.ok(bash("rm -rf C:/Users/u/Documents", wide));
@@ -1268,6 +1344,15 @@ const LINUX = posixOf("linux"), MAC = posixOf("darwin");
 const penv = { NIGHT_SHIFT_REPO: "/work/Repo", NIGHT_SHIFT_STATE: "/tmp/x-night", HOME: "/home/u" };
 const pbash = (command, platform, e = penv, cwd) => decide({ tool_name: "Bash", tool_input: { command }, ...(cwd ? { cwd } : {}) }, e, { platform });
 const pwrite = (file_path, platform, e = penv) => decide({ tool_name: "Write", tool_input: { file_path } }, e, { platform });
+
+test("on Linux a worktree run's main tree is protected in its own case; on macOS in any case", () => {
+  const wt = { ...penv, NIGHT_SHIFT_REPO: "/work/Repo-night", NIGHT_SHIFT_MAIN_TREE: "/work/Repo" };
+  assert.match(pbash("echo x >> /work/Repo/.claude/night-shift-rules.md", LINUX, wt) ?? "", /the project's night-shift rules/);
+  assert.match(pbash("cp h /work/Repo/.git/hooks/pre-commit", LINUX, wt) ?? "", /the \.git directory/);
+  assert.equal(pbash("echo x >> /work/repo/.claude/night-shift-rules.md", LINUX, wt), null);
+  assert.match(pbash("echo x >> /work/repo/.claude/night-shift-rules.md", MAC, wt) ?? "", /the project's night-shift rules/);
+  assert.equal(pwrite("/work/Repo-night/src/a.ts", LINUX, wt), null);
+});
 
 test("on Linux the repository is the folder in its own case; on macOS any case of it is the repository", () => {
   assert.equal(pwrite("/work/Repo/src/a.ts", LINUX), null);
