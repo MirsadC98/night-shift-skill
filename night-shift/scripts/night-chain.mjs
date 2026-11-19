@@ -35,7 +35,8 @@
 //    at xhigh (never max) stands in while its allowance is at or over the ceiling or used up.
 //    --weekly-ceiling ("weeklyCeiling", default none) starts no new session once the seven-day window
 //    is at or over that share, and ends the chain with next-prompt.md kept for a start with --state, and
-//    --max-usd ("maxUsd", default none) does the same once the sessions this start ran cost that many dollars;
+//    --max-usd ("maxUsd", default none) does the same once the sessions this start ran cost that many dollars
+//    (one that wrote no result line, killed or crashed, at what its transcript is priced at);
 //    at or over 90% of the five-hour window a session waits for its reset)
 //   node night-chain.mjs status --repo <dir>
 //   node night-chain.mjs wait   --repo <dir> [--state <dir>]  (returns once the chain is over: exit 0
@@ -63,7 +64,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
-import { buildReport, userWaits, stateLang, questionLines } from "./night-report.mjs";
+import { buildReport, userWaits, stateLang, questionLines, estimatedCost } from "./night-report.mjs";
 import { slug, pointerFile, readPointer, writePointer, isRunner, stopRun } from "./runs.mjs";
 import { strings, langOf, loadLang } from "./lang/index.mjs";
 import { mergedConfig, isLangCode, MODES, CONFIG_KEYS, stateDirProblem, tempRoot, isMain, claudeHome } from "./config.mjs";
@@ -313,6 +314,9 @@ async function start(opt) {
     const bad = v !== undefined && CONFIG_KEYS[key](key === "effort" ? v : num(v));
     if (bad) fail(`--${flag} ${bad} (got ${got(v)})`);
   }
+  // Dropped in silence before: a --state so given started a new folder instead of the earlier run's.
+  if (opt.model === true) fail("--model wants a model name (got no value)");
+  if (opt.state === true) fail("--state wants the folder of an earlier run (got no value)");
   // U24: a goal instead of a prompt, refused beside one, since which of the two was meant is not guessed. Read here,
   // before anything is written, so that a refused goal leaves an earlier run's next-prompt.md and resume.json as they were.
   let planning = null;
@@ -742,10 +746,12 @@ async function runChain(opt) {
     if (lost.ceilingBlind) log(`session ${nn}: its stream had no unifiedWindows.seven_day, which --weekly-ceiling reads; until a session's stream has it, the ceiling stops no session`);
     writeLimits(state, lost.memo);
     // T5: a conversation's latest total replaces its earlier one (a resumed session's includes what came before), but
-    // never lowers it: a resumed part that ends without a result line (killed, crashed, an expired id) reports $0.
+    // never lowers it. F5: a part that ends without a result line (killed at --session-hours, crashed) reports no dollars,
+    // and the killed ones are the dearest: it counts what the report prices its transcript at.
     if (result.sessionId) {
-      const spent = readLimits(state).usd || {};
-      writeLimits(state, { usd: { ...spent, [result.sessionId]: Math.max(Number(spent[result.sessionId]) || 0, result.cost || 0) } });
+      const spent = readLimits(state).usd || {}, cost = result.resulted ? result.cost : estimatedCost(state, nn);
+      if (!result.resulted && run.maxUsd) log(`session ${nn} wrote no result line: --max-usd counts ${usd(cost)} for it, what its transcript is priced at`);
+      writeLimits(state, { usd: { ...spent, [result.sessionId]: Math.max(Number(spent[result.sessionId]) || 0, cost || 0) } });
     }
     // A session that wrote its handover has done its piece, even when a limit cut off what came after.
     const wrote = fs.statSync(next).mtimeMs > before && read(next).trim() !== prompt;

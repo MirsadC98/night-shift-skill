@@ -485,8 +485,8 @@ const settings = JSON.parse(fs.readFileSync(path.join(st, "night-settings.json")
 fs.writeFileSync(path.join(st, "seen-" + n + ".json"), JSON.stringify({ args: process.argv.slice(2), input, settings,
   noFallback: process.env.CLAUDE_CODE_NO_MODEL_FALLBACK ?? null }));
 const step = JSON.parse(process.env.TEST_SCRIPT)[n] || {};
-// step.stream: a recorded stream (a fixture) is the whole session, as the CLI wrote it.
-if (step.stream) { process.stdout.write(fs.readFileSync(step.stream, "utf8")); process.exit(0); }
+// step.stream: a recorded stream (a fixture) is the whole session, as the CLI wrote it (after step.next, when given).
+if (step.stream) { if (step.next != null) fs.writeFileSync(path.join(st, "next-prompt.md"), step.next); process.stdout.write(fs.readFileSync(step.stream, "utf8")); process.exit(0); }
 // step.rules: { global, project } rewrites the user's rule files (null deletes one), as a session or an editor may.
 for (const [k, v] of Object.entries(step.rules || {})) {
   const f = k === "global" ? path.join(process.env.USERPROFILE, ".claude", "night-shift", "rules.md") : path.join(process.cwd(), ".claude", "night-shift-rules.md");
@@ -1663,6 +1663,18 @@ test("two API errors in a row are waited out and the same piece runs again", asy
   assert.deepEqual(calls, ["1 -", "1 -", "1 -"]);
 });
 
+// A retry after an error with no turn is a new session: the weekly ceiling its stream's reading crossed ends the chain first.
+test("the retry after a transient error ends the chain at the weekly ceiling the failed session's reading crossed", async () => {
+  const ahead = Math.floor(Date.now() / 1000) + 86_400;
+  const { log, calls } = await errorRun(`console.log(JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "allowed",
+  unifiedWindows: { five_hour: { utilization: 0.4 }, seven_day: { utilization: 0.85, resetsAt: ${ahead} } } } }));
+if (call === 1) apiError();
+stop();`, { weeklyCeiling: 0.8 });
+  assert.match(log, /session 01: transient error \(API Error: 500 Internal server error\); try 1/);
+  assert.match(log, /chain ends: the seven-day window is at 85%, at or over the 80% weekly ceiling \(--weekly-ceiling\) until it resets [^;]*; next-prompt\.md stays for a start with --state$/m);
+  assert.deepEqual(calls, ["1 -"]);
+});
+
 test("a session that worked before the error goes on in the same conversation", async () => {
   const { state, log, calls } = await errorRun(`
 if (call === 1) {
@@ -1779,7 +1791,7 @@ function pointerCase(ptrOf) {
   const file = path.join(home, ".claude", "night-shift", "runs", `${slug}.json`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const write = (p) => fs.writeFileSync(file, JSON.stringify({ state, task: "x", finished: false, ...p }));
-  const run = (cmd, extra = [], more = {}) => spawnSync(process.execPath, [CHAIN, cmd, "--repo", repo, ...extra],
+  const run = (cmd, extra = [], more = {}, chain = CHAIN) => spawnSync(process.execPath, [chain, cmd, "--repo", repo, ...extra],
     { env: { ...env, NIGHT_SHIFT_LAUNCH: "fail", NIGHT_SHIFT_CLAUDE: process.execPath, TEMP: root, TMP: root, ...more }, encoding: "utf8", cwd: root });
   return { write, run, state, repo, home, read: () => JSON.parse(fs.readFileSync(file, "utf8")) };
 }
@@ -2269,6 +2281,44 @@ test("start refuses an --effort, --fable-ceiling, --fable-sessions or --weekly-c
   assert.equal(startRun(["--max-usd", "12.5"], { maxUsd: 20 }).run.maxUsd, 12.5);
 });
 
+// F4 (session 20's closure): a --model or --state with no value was dropped in silence, and a --state so given started a
+// new folder instead of the earlier run's.
+test("start refuses --model and --state with no value, naming the flag", () => {
+  const model = startRun(["--model"]);
+  assert.equal(model.status, 1);
+  assert.match(model.stderr, /--model wants a model name \(got no value\)/);
+  const c = pointerCase();
+  for (const extra of [["--state"], ["--state", "--allow-dirty"]]) {
+    const r = c.run("start", ["--prompt", "x", "--allow-dirty", ...extra]);
+    assert.equal(r.status, 1, extra.join(" "));
+    assert.match(r.stderr, /--state wants the folder of an earlier run \(got no value\)/, extra.join(" "));
+    assert.doesNotMatch(r.stderr, /launch refused/);
+  }
+});
+
+// The texts start reads from references/: a copy of the skill's scripts/ and references/ with one of them gone, or
+// without its {{goal}} line, refuses start before anything is written.
+test("start refuses a goal without references/goal.md or its {{goal}} line, and an attended run without references/attended.md", () => {
+  const skill = path.dirname(path.dirname(CHAIN)), copy = fs.mkdtempSync(path.join(os.tmpdir(), "night-skill-copy-"));
+  for (const d of ["scripts", "references"]) fs.cpSync(path.join(skill, d), path.join(copy, d), { recursive: true });
+  const chain = path.join(copy, "scripts", "night-chain.mjs"), goal = path.join(copy, "references", "goal.md");
+  const c = pointerCase();
+  const start = (extra) => c.run("start", ["--state", c.state, "--allow-dirty", ...extra], {}, chain);
+  assert.match(start(["--goal", "x"]).stderr, /launch refused \(test\)/, "the copy starts as the skill does");
+  fs.writeFileSync(goal, "## Rules\nno goal line here\n");
+  for (const text of ["## Rules\nno goal line here\n", null]) {
+    if (text == null) fs.rmSync(goal);
+    const r = start(["--goal", "x"]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /goal\.md is missing or has no \{\{goal\}\} line; copy the skill folder again/);
+  }
+  fs.rmSync(path.join(copy, "references", "attended.md"));
+  const r = start(["--prompt", "x", "--attended"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /attended\.md is missing; copy the skill folder again/);
+  assert.match(start(["--prompt", "x"]).stderr, /launch refused \(test\)/, "an unattended run needs no attended.md");
+});
+
 // T4, U14: limits.json keeps the seven-day window's last reading for a later start in the same folder while the window has
 // not reset, and the stream fields the chain has seen; which lost field was told goes, so each chain tells it once.
 test("start keeps the seven-day window's reading until it resets, and the stream fields seen, but not what was told", () => {
@@ -2352,6 +2402,32 @@ test("--max-usd: no new session once this start's sessions cost it; next-prompt.
   assert.doesNotMatch(blank.log, /session 03 starts/);
 });
 
+// F5 (session 20's closure): a session that ends with no result line (killed at --session-hours, crashed) reported $0, and
+// those are the dearest. It counts what its transcript is priced at, as the report prices a running session: at the
+// other sessions' dollars per weighted token of each model.
+test("--max-usd counts a session with no result line at what its transcript is priced at", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "night-usd-")), opus = "claude-opus-5-5";
+  const id1 = "00000000-0000-4000-8000-000000000001", id2 = "00000000-0000-4000-8000-000000000002";
+  const turn = (sid, id, inT, outT) => JSON.stringify({ type: "assistant", session_id: sid, message: { id, model: opus, usage: { input_tokens: inT, output_tokens: outT }, content: [] } });
+  const init = (sid) => JSON.stringify({ type: "system", subtype: "init", session_id: sid, model: opus });
+  // Session 01: 6 weighted tokens (1 in, 1 out at 5) for $4.
+  const s1 = path.join(dir, "s1.jsonl"), s2 = path.join(dir, "s2.jsonl");
+  fs.writeFileSync(s1, [init(id1), turn(id1, "m1", 1, 1), JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 4,
+    session_id: id1, result: "ok", modelUsage: { [opus]: { costUSD: 4, inputTokens: 1, outputTokens: 1 } } })].join("\n") + "\n");
+  // Session 02 ends with no result line; its transcript holds 36 weighted tokens (6 in, 6 out): $24 at session 01's price.
+  fs.writeFileSync(s2, [init(id2), turn(id2, "m2", 1, 1)].join("\n") + "\n");
+  const r = await fableRun("first", { 1: { stream: s1, next: "second" }, 2: { stream: s2, next: "third" }, 3: { next: "STOP: done" } }, { maxUsd: 20 }, (state, { home }) => {
+    const project = path.join(home, ".claude", "projects", "demo-app");
+    fs.mkdirSync(project, { recursive: true });
+    fs.writeFileSync(path.join(project, `${id2}.jsonl`), turn(id2, "t1", 6, 6) + "\n");
+  });
+  assert.match(r.log, /session 02 ends: exit 0, no result line/);
+  assert.match(r.log, /session 02 wrote no result line: --max-usd counts \$24\.00 for it, what its transcript is priced at$/m);
+  assert.match(r.log, /chain ends: this start's sessions cost \$28\.00, at or over the \$20\.00 cap \(--max-usd\)/);
+  assert.doesNotMatch(r.log, /session 03 starts/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(r.state, "limits.json"), "utf8")).usd, { [id1]: 4, [id2]: 24 });
+});
+
 // T4: --weekly-ceiling ends the chain before a new session once the seven-day window's last reading is at or over it.
 test("--weekly-ceiling: no new session once the seven-day window is at or over it; next-prompt.md and the reading stay", async () => {
   const resets = Math.floor(Date.now() / 1000) + 3 * 86_400;
@@ -2414,6 +2490,24 @@ test("the five-hour wait: a reading an earlier start kept holds the first sessio
   const far = await fableRun("first", { 1: { next: "STOP: done" } }, { maxWaitHours: 0.5 }, keep(later));
   assert.match(far.log, /chain ends: the five-hour window is at 95%, at or over 90%, and resets \d{4}-\d\d-\d\d \d\d:\d\d, more than 0\.5 h away \(--max-wait-hours\); next-prompt\.md stays for a start with --state$/m);
   assert.doesNotMatch(far.log, /session 01 starts/);
+});
+
+// The user's stop (the watcher's /stop, `stop`) ends the five-hour wait too: the chain ends without waiting for the reset.
+test("a STOP-REQUEST during the five-hour wait ends the chain at once: stop requested", async () => {
+  let poll;
+  const t0 = Date.now();
+  const r = await fableRun("first", { 1: { next: "STOP: done" } }, {}, (state) => {
+    fs.writeFileSync(path.join(state, "limits.json"), JSON.stringify({ five: { ratio: 95, resetsAt: Math.floor(Date.now() / 1000) + 3_600, at: Date.now() } }));
+    // Written once the runner says it waits: written before, the loop's own check would end the chain.
+    poll = setInterval(() => {
+      const log = path.join(state, "chain.log");
+      if (fs.existsSync(log) && /usage limit: waiting until/.test(fs.readFileSync(log, "utf8"))) { fs.writeFileSync(path.join(state, "STOP-REQUEST"), "x"); clearInterval(poll); }
+    }, 50);
+  });
+  clearInterval(poll);
+  assert.match(r.log, /five-hour window at 95%[^\n]*\n[^\n]*usage limit: waiting until [^\n]*\n[^\n]*chain ends: stop requested$/m);
+  assert.doesNotMatch(r.log, /session 01 starts/);
+  assert.ok(Date.now() - t0 < 60_000, "it did not wait for the reset an hour away");
 });
 
 test("--weekly-ceiling: a reading an earlier start kept stops the first session, a reset one does not, and a cut-off session still resumes", async () => {

@@ -111,6 +111,8 @@ export function sessionOutcome(stream, errText = "", code = null, { timedOut = f
     windows: { first, last, latest },
     // The session's dollars, the CLI's total_cost_usd: a resumed conversation's total includes its earlier parts.
     cost,
+    // Whether the stream had a result line at all: one killed or crashed has none, and so no dollars.
+    resulted: Boolean(res),
     timedOut,
     // The known stream fields this stream carried (STREAM_FIELDS' order), for fieldsGone.
     fields: STREAM_FIELDS.filter((f) => fields.has(f)),

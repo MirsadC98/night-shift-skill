@@ -295,16 +295,9 @@ function collect(state, pid = null) {
   const parsed = sessions.map((s) => ({ ...s, ...parseSession(state, s.nn) }));
 
   // A running session has no totals yet: price it at this run's dollars per weighted token.
-  const price = {};
-  for (const s of parsed.filter((p) => p.result)) {
-    for (const r of s.rows) {
-      const p = (price[r.model] ||= { cost: 0, units: 0 });
-      p.cost += r.cost || 0;
-      p.units += r.usage.units;
-    }
-  }
+  const price = unitPrices(parsed.filter((p) => p.result));
   for (const s of parsed.filter((p) => !p.result)) {
-    for (const r of s.rows) if (price[r.model]?.units) { r.cost = r.usage.units * price[r.model].cost / price[r.model].units; r.estimated = true; }
+    for (const r of s.rows) if (price[r.model]?.units) { r.cost = priced(r, price); r.estimated = true; }
   }
 
   const issues = [];
@@ -415,6 +408,28 @@ function progressOf(c, upto = null) {
   const p = chainProgress(jobs.map((s) => ({ ok: okOf(s), ended: Boolean(s.end), workMs: workMs(s), remaining: s.end ? sectionOf(c, s)?.remaining ?? null : null })),
     { now, waitUntil: upto ? null : limitWait(c) });
   return progressText(p, now, c.T);
+}
+
+// Dollars and weighted tokens of each model over sessions that have their totals; a row priced at them.
+function unitPrices(sessions) {
+  const price = {};
+  for (const r of sessions.flatMap((s) => s.rows)) {
+    const p = (price[r.model] ||= { cost: 0, units: 0 });
+    p.cost += r.cost || 0;
+    p.units += r.usage.units;
+  }
+  return price;
+}
+const priced = (r, price) => (price[r.model]?.units ? r.usage.units * price[r.model].cost / price[r.model].units : 0);
+// F5: what session nn cost when it wrote no result line (killed at --session-hours, crashed), for --max-usd: its
+// transcript priced as a running session's is above, at the other sessions' totals in this state folder; 0 when none
+// of them has a total for its models.
+export function estimatedCost(state, nn) {
+  try {
+    const all = fs.readdirSync(state).map((f) => /^session-(\d+)\.jsonl$/.exec(f)?.[1]).filter(Boolean).map((n) => parseSession(state, n));
+    const price = unitPrices(all.filter((p) => p.result && p.nn !== nn));
+    return (all.find((p) => p.nn === nn)?.rows || []).reduce((sum, r) => sum + priced(r, price), 0);
+  } catch { return 0; }
 }
 
 export function buildReport(state, { headline = "", focus = null, pid = null } = {}) {
