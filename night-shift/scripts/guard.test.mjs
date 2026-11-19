@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { decide as judge } from "./guard.mjs";
@@ -343,6 +343,42 @@ test("a worktree run cannot write the main tree's night-shift rules or its .git,
   assert.equal(write("C:/work/repo-night/src/a.ts", wt), null);
   assert.equal(bash("echo x > C:/work/repo-night/notes.txt", wt), null);
   assert.ok(write("C:/work/repo/src/a.ts", wt));
+});
+
+// Session 32's final review: a temp root kept a main tree under it writable (C:/temp/app beside C:/temp/app-night).
+test("a worktree run cannot write or delete in its main tree under a temp root; the worktree and the state folder stay writable", () => {
+  const wt = { ...env, NIGHT_SHIFT_REPO: "C:/temp/app-night", NIGHT_SHIFT_MAIN_TREE: "C:\\temp\\app" };
+  const ed = (file_path, e = wt) => decide({ tool_name: "Edit", tool_input: { file_path, old_string: "a", new_string: "b" } }, e);
+  const mainTree = /the main tree/;
+  for (const f of ["C:/temp/app/src/a.ts", "C:\\temp\\app\\src\\a.ts", "/c/temp/app/src/a.ts", "C:/TEMP/App/src/a.ts", "C:/temp/app"]) {
+    assert.match(write(f, wt) ?? "", mainTree, f);
+    assert.match(ed(f) ?? "", mainTree, f);
+  }
+  assert.equal(bash("rm C:/temp/app/src/a.ts", wt), "refusing a delete in the main tree (C:/temp/app/src/a.ts): it is the user's while the chain works in its worktree");
+  assert.equal(bash("rm -rf C:/temp/app/src", wt), "refusing a recursive delete in the main tree (C:/temp/app/src): it is the user's while the chain works in its worktree");
+  assert.match(bash("cd C:/temp/app && rm -f src/a.ts", wt) ?? "", mainTree);
+  assert.match(bash("rm -f /c/temp/app/src/*.log", wt) ?? "", mainTree);
+  assert.match(bash("find C:/temp/app/src -name '*.log' -delete", wt) ?? "", mainTree);
+  assert.match(bash("mv C:/temp/app/src/a.ts C:/temp/b.ts", wt) ?? "", mainTree);
+  // The worktree beside it, a folder whose name only starts with the main tree's, and the rest of the temp root stay writable.
+  assert.equal(write("C:/temp/app-night/src/a.ts", wt), null);
+  assert.equal(ed("C:/temp/app-night/src/a.ts"), null);
+  assert.equal(bash("rm -rf C:/temp/app-night/build", wt), null);
+  assert.equal(write("C:/temp/apps/a.ts", wt), null);
+  assert.equal(bash("rm -rf C:/temp/other", wt), null);
+  assert.equal(write("C:/temp/x-night/notes.md", wt), null);
+  // A state folder inside the main tree (start allows one) stays the run's: its files may be written and deleted,
+  // but not the runner's own, and the rest of the main tree stays refused.
+  const inside = { ...wt, NIGHT_SHIFT_STATE: "C:/temp/app/.night" };
+  assert.equal(write("C:/temp/app/.night/notes.md", inside), null);
+  assert.equal(bash("rm C:/temp/app/.night/old.txt", inside), null);
+  assert.match(write("C:/temp/app/.night/run.json", inside) ?? "", /the runner's own files/);
+  assert.match(write("C:/temp/app/src/a.ts", inside) ?? "", mainTree);
+  // Outside a temp root the main tree was refused before, and now says why.
+  assert.match(write("C:/work/repo/src/a.ts", { ...env, NIGHT_SHIFT_REPO: "C:/work/repo-night", NIGHT_SHIFT_MAIN_TREE: "C:/work/repo" }) ?? "", mainTree);
+  // Without a main tree, a temp folder of that name is just a temp folder.
+  assert.equal(write("C:/temp/app/src/a.ts", { ...env, NIGHT_SHIFT_REPO: "C:/temp/app-night" }), null);
+  assert.equal(bash("rm -rf C:/temp/app/src", { ...env, NIGHT_SHIFT_REPO: "C:/temp/app-night" }), null);
 });
 
 test("a state folder that is too wide adds nothing to what may be written", () => {
@@ -1227,9 +1263,9 @@ test("the run's skill folder is the night-shift skill itself wherever it is: Wri
   for (const c of ["rm -rf .claude", "rm -rf C:/work/repo/.claude/", "mv .claude old-claude"]) assert.match(bash(c) ?? "", /of the project's \.claude folder/, c);
   assert.equal(bash("rm -rf .claude/worktrees/x"), null);
   assert.equal(bash("find . -name '*.tmp' -delete"), null, "a find from the repository is read by its tests, as before");
-  // A drive-relative value (C:x) names a folder below that drive's own folder, as resolve() reads it (a path C:x itself
+  // A drive-relative value (C:x) names a folder below that drive's own folder, as path.win32.resolve() reads it, on any system (a path C:x itself
   // is refused as a stream name in any write).
-  const driveRelative = resolve("C:tools-x/night-shift").replace(/\\/g, "/");
+  const driveRelative = win32.resolve("C:tools-x/night-shift").replace(/\\/g, "/");
   assert.match(bash(`echo x > "${driveRelative}/SKILL.md"`, withSkill("C:tools-x/night-shift")) ?? "", /the night-shift skill itself/);
 });
 
@@ -1352,6 +1388,39 @@ test("on Linux a worktree run's main tree is protected in its own case; on macOS
   assert.equal(pbash("echo x >> /work/repo/.claude/night-shift-rules.md", LINUX, wt), null);
   assert.match(pbash("echo x >> /work/repo/.claude/night-shift-rules.md", MAC, wt) ?? "", /the project's night-shift rules/);
   assert.equal(pwrite("/work/Repo-night/src/a.ts", LINUX, wt), null);
+});
+
+// Session 32's final review: the project's rules of a POSIX worktree run (asMainTree's POSIX branch, Linux's own case,
+// Write's main-tree forms). The main tree is a real folder whose file the guard reads: off Windows the folder as made,
+// on Windows its spelling from the drive's root, which node reads on the current folder's drive.
+test("off Windows a worktree run's project rules hold for the main tree's path, in its own case on Linux and in any case on macOS", (t) => {
+  const made = repoWithConfig({}).NIGHT_SHIFT_REPO;
+  const win = live.name === "win32";
+  if (win && win32.parse(process.cwd()).root.toLowerCase() !== win32.parse(made).root.toLowerCase())
+    return t.skip("the temp folder is on another drive than the current folder, so its POSIX spelling names no file here");
+  const main = win ? made.replace(/\\/g, "/").replace(/^[A-Za-z]:/, "") : made, worktree = `${main}-Night`;
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  writeFileSync(join(made, ".claude", "night-shift.json"), JSON.stringify({ deny: [
+    { pattern: `${esc(main)}/private/`, reason: "the main tree's private folder" },
+    { pattern: `^${esc(main)}/Exact/`, flags: "", reason: "in its own case" }] }));
+  const e = { ...penv, NIGHT_SHIFT_REPO: worktree, NIGHT_SHIFT_MAIN_TREE: main };
+  for (const P of [LINUX, MAC]) {
+    // A path in the worktree is read as the same path in the main tree, by Bash and by Write.
+    assert.equal(pbash(`echo x > ${worktree}/private/a.txt`, P, e), "the main tree's private folder", P.name);
+    assert.equal(pbash(`cat ${worktree}/private/a.txt`, P, e), "the main tree's private folder", P.name);
+    assert.equal(pwrite(`${worktree}/private/a.txt`, P, e), "the main tree's private folder", P.name);
+    assert.equal(pwrite(`${worktree}/src/../private/a.txt`, P, e), "the main tree's private folder", P.name);
+    // A rule without "i" reads the main tree as the runner gave it.
+    assert.equal(pwrite(`${worktree}/Exact/a.txt`, P, e), "in its own case", P.name);
+    // A folder whose name only starts with the worktree's is another folder.
+    assert.equal(pbash(`echo x > ${worktree}x/private/a.txt`, P, e), null, P.name);
+    assert.equal(pbash("ls", P, e), null, P.name);
+  }
+  // Linux keeps case: the worktree's name in another case is another folder, and so is a path whose case differs from
+  // a rule without "i". macOS folds case: either is the worktree's path in the main tree.
+  assert.equal(pbash(`echo x > ${worktree.toUpperCase()}/private/a.txt`, LINUX, e), null);
+  assert.equal(pbash(`echo x > ${worktree.toUpperCase()}/private/a.txt`, MAC, e), "the main tree's private folder");
+  assert.equal(pwrite(`${worktree}/exact/a.txt`, LINUX, e), null);
 });
 
 test("on Linux the repository is the folder in its own case; on macOS any case of it is the repository", () => {

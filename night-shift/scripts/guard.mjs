@@ -135,6 +135,11 @@ function protectedSpelling(p, r) {
   return null;
 }
 
+// A path in a worktree run's main tree, which is no writable root even where a temp root holds it; the repository and
+// a state folder inside it (start allows one) stay the run's.
+const inMainTree = (p, r) => Boolean(r.main) && under(p, r.main) && !under(p, r.repo) && !(r.state && under(p, r.state));
+const MAIN_TREE_WHY = "it is the user's while the chain works in its worktree";
+
 function checkWrite(file, env) {
   const p = norm(file);
   const r = roots(env);
@@ -145,6 +150,7 @@ function checkWrite(file, env) {
   // Only the user's own memory folders: a `.claude/projects/x/memory` anywhere else is not one.
   const mem = `${r.home}/.claude/projects/`;
   if (p.startsWith(mem) && /^[^/]+\/memory(\/|$)/.test(p.slice(mem.length))) return null;
+  if (inMainTree(p, r)) return `writing the main tree is not allowed during a night run: ${MAIN_TREE_WHY} (got ${file})`;
   if (!r.writable.some((root) => under(p, root)))
     return `writes are limited to the repository, ${P.name === "win32" ? "C:\\temp" : "/tmp"} and the temp folder (got ${file})`;
   return null;
@@ -973,6 +979,7 @@ function targetReason(t, o, where, r) {
   if (find && !find.expr && wideFind(q, r) && !find.narrowed(q)) return wideFindReason(t);
   // A find from a temp root itself empties the folder every program shares.
   if (find && !find.expr && q !== r.repo && r.writable.includes(q) && !find.narrowed(q)) return `refusing a find delete from the temp folder itself (${t}) without a name, path or regex test`;
+  if (inMainTree(q, r)) return `refusing a ${noun} in the main tree (${t}): ${MAIN_TREE_WHY}`;
   if (!r.writable.some((root) => under(q, root) && !(recursive && q === root))) return `${noun}s are limited to the repository and temp folders (got ${t})`;
   return null;
 }
@@ -1547,6 +1554,8 @@ function selfTest() {
     // A worktree run (K6): the main tree's rule files and .git are the user's; the worktree is the session's repository.
     [bash("echo x >> C:/work/repo/.claude/night-shift-rules.md", worktree), true], [bash("cp hook C:/work/repo/.git/hooks/pre-commit", worktree), true],
     [write("C:/work/repo-night/src/a.ts", worktree), false],
+    // Its main tree stays the user's under a temp root too.
+    [write("C:/temp/app/src/a.ts", { ...env, NIGHT_SHIFT_REPO: "C:/temp/app-night", NIGHT_SHIFT_MAIN_TREE: "C:/temp/app" }), true],
     [write("C:/Users/u/.claude/night-shift/rules.md", inHome), true], [write("C:/Users/u/.claude/night-shift/config.json", inHome), true],
     // the user's language tables are code the runner and the watcher run (lang/index.mjs)
     [write("C:/Users/u/.claude/night-shift/lang/tr.mjs", inHome), true], [bash("echo 'export default {}' > C:/Users/u/.claude/night-shift/lang/xx.mjs", inHome), true],
