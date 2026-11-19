@@ -6,12 +6,21 @@ import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSyn
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { decide } from "./guard.mjs";
+import { decide as judge } from "./guard.mjs";
 import { tempRoot } from "./config.mjs";
-import { platformFor } from "./platform.mjs";
+import { platformFor, platform as live } from "./platform.mjs";
+
+// The Windows-shaped cases are judged by Windows' path rules on every system (C5): a win32 object with a Windows home
+// and temp folder and no links, unless a call passes its own platform (the POSIX cases at the end do). The cases that
+// make real folders and links pass the live system (onLive) and an environment shaped for it (host).
+const noLink = () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); };
+const WIN = platformFor("win32", { tmpdir: () => "C:\\Users\\u\\AppData\\Local\\Temp", homedir: () => "C:\\Users\\u", realpath: noLink });
+const decide = (input, e, opts = {}) => judge(input, e, { platform: WIN, ...opts });
+const onLive = { platform: live };
 
 const env = { NIGHT_SHIFT_REPO: "C:/work/repo", NIGHT_SHIFT_STATE: "C:/temp/x-night", USERPROFILE: "C:\\Users\\u" };
-const bash = (command, e = env) => decide({ tool_name: "Bash", tool_input: { command } }, e);
+const host = live.name === "win32" ? env : { NIGHT_SHIFT_REPO: "/work/repo", NIGHT_SHIFT_STATE: "/tmp/x-night", HOME: "/home/u" };
+const bash = (command, e = env, opts) => decide({ tool_name: "Bash", tool_input: { command } }, e, opts);
 const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
 
 test("session 08's command: a slash in a heredoc's text is not the delete's target", () => {
@@ -214,7 +223,10 @@ test("a project rule also reads the path a Write, Edit, MultiEdit or NotebookEdi
   const e = repoWithConfig({ deny: [{ pattern: "secrets/" }, { pattern: "^build/out\\.txt$", reason: "build output is the CI's" }, { pattern: "^docs/Keep\\.md$", flags: "" },
     { pattern: "^private/", reason: "private" }, { pattern: "^gl/", flags: "g" }] });
   const repo = e.NIGHT_SHIFT_REPO, msys = repo.replace(/\\/g, "/").replace(/^([A-Za-z]):/, (_, d) => `/${d.toLowerCase()}`);
-  const w = (file, tool = "Write", env2 = e) => decide({ tool_name: tool, tool_input: tool === "NotebookEdit" ? { notebook_path: file } : { file_path: file } }, env2);
+  // Windows' rules over the real folder this test makes: a win32 object with the live temp folder, since WIN reads
+  // Git Bash's /tmp as its own temp folder, and on Linux the repository is in /tmp.
+  const here = { platform: platformFor("win32") };
+  const w = (file, tool = "Write", env2 = e) => decide({ tool_name: tool, tool_input: tool === "NotebookEdit" ? { notebook_path: file } : { file_path: file } }, env2, here);
   assert.match(w(`${repo}/secrets/a.txt`) ?? "", /refused by a project rule \(secrets\/\)/);
   assert.match(w(`${repo}\\secrets\\a.txt`, "Edit") ?? "", /project rule/);
   assert.match(w(`${repo}/secrets/b.txt`, "MultiEdit") ?? "", /project rule/);
@@ -600,7 +612,7 @@ test("an escaped backslash leaves the semicolon after it a separator; an escaped
 });
 
 // ---------------------------------------------------------------- final-review fix wave B
-test("a short-form TEMP leaves the tool's own temp paths writable; a short name still is refused", () => {
+test("a short-form TEMP leaves the tool's own temp paths writable; a short name still is refused", { skip: process.platform !== "win32" && "TEMP and 8.3 short names are Windows' own" }, () => {
   // A directory junction named like an 8.3 name stands in for a volume that makes short names. The base is in long
   // form, so that only the junction is short where the real TEMP is short too (a CI runner's C:\Users\RUNNER~1\...).
   const base = mkdtempSync(join(tempRoot(), "night-short-temp-"));
@@ -612,11 +624,11 @@ test("a short-form TEMP leaves the tool's own temp paths writable; a short name 
   try {
     const state = long.replace(/\\/g, "/") + "/night-x";
     const e = { ...env, NIGHT_SHIFT_STATE: state };
-    assert.equal(decide({ tool_name: "Write", tool_input: { file_path: `${state}/next-prompt.md` } }, e), null);
-    assert.equal(bash(`cat > "$NIGHT_SHIFT_STATE/next-prompt.md" <<'EOF'\nx\nEOF`, e), null);
-    assert.equal(bash("echo x > /tmp/scratch.txt", e), null);
-    assert.equal(bash(`D=$(mktemp -d) && rm -rf "$D"`, e), null);
-    assert.match(bash(`echo x > ${link.replace(/\\/g, "/")}/a.txt`, e), /short \(8\.3\) name/);
+    assert.equal(decide({ tool_name: "Write", tool_input: { file_path: `${state}/next-prompt.md` } }, e, onLive), null);
+    assert.equal(bash(`cat > "$NIGHT_SHIFT_STATE/next-prompt.md" <<'EOF'\nx\nEOF`, e, onLive), null);
+    assert.equal(bash("echo x > /tmp/scratch.txt", e, onLive), null);
+    assert.equal(bash(`D=$(mktemp -d) && rm -rf "$D"`, e, onLive), null);
+    assert.match(bash(`echo x > ${link.replace(/\\/g, "/")}/a.txt`, e, onLive), /short \(8\.3\) name/);
   } finally {
     for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
     rmSync(base, { recursive: true, force: true });
@@ -1034,21 +1046,23 @@ test("a home whose .claude is a link: its protected files are protected under th
   mkdirSync(home);
   symlinkSync(target, join(home, ".claude"), "junction");
   const t = target.replace(/\\/g, "/"), h = home.replace(/\\/g, "/");
-  const e = { ...env, USERPROFILE: home };
+  const e = { ...host, USERPROFILE: home, HOME: home };
+  // Windows and macOS read an upper-case spelling as the same file; on Linux it names another one.
+  const upper = live.fold("A") === "a" ? [`echo '{}' > "${t.toUpperCase()}/SETTINGS.LOCAL.JSON"`] : [];
   try {
     for (const c of [`echo x > "${t}/settings.json"`, `echo x >> "${t}/CLAUDE.md"`, `cp a.mjs "${t}/skills/night-shift/scripts/guard.mjs"`,
-      `echo x > "${t}/night-shift/rules.md"`, `echo '{}' > "${t.toUpperCase()}/SETTINGS.LOCAL.JSON"`, `echo x > "${h}/.claude/settings.json"`])
-      assert.match(bash(c, e) ?? "", /Claude settings|global CLAUDE\.md|night-shift skill|night-shift settings/, c);
-    assert.equal(bash(`echo x > "${t}/notes.md"`, e), null);
+      `echo x > "${t}/night-shift/rules.md"`, ...upper, `echo x > "${h}/.claude/settings.json"`])
+      assert.match(bash(c, e, onLive) ?? "", /Claude settings|global CLAUDE\.md|night-shift skill|night-shift settings/, c);
+    assert.equal(bash(`echo x > "${t}/notes.md"`, e, onLive), null);
     // The repository is that folder, named by its real path (Write and Edit are limited to the roots).
     const inTarget = { ...e, NIGHT_SHIFT_REPO: t };
-    const write = (file_path) => decide({ tool_name: "Write", tool_input: { file_path } }, inTarget);
+    const write = (file_path) => decide({ tool_name: "Write", tool_input: { file_path } }, inTarget, onLive);
     assert.match(write(`${t}/settings.json`) ?? "", /Claude settings/);
     assert.match(write(`${t}/skills/night-shift/SKILL.md`) ?? "", /night-shift skill/);
     assert.equal(write(`${t}/notes.md`), null);
-    assert.match(bash(`rm -f "${t}"/settings.*`, inTarget) ?? "", /Claude settings/);
-    assert.match(bash("find . -name rules.md -delete", inTarget) ?? "", /find delete/);
-    assert.equal(bash("find . -name notes.md -delete", inTarget), null);
+    assert.match(bash(`rm -f "${t}"/settings.*`, inTarget, onLive) ?? "", /Claude settings/);
+    assert.match(bash("find . -name rules.md -delete", inTarget, onLive) ?? "", /find delete/);
+    assert.equal(bash("find . -name notes.md -delete", inTarget, onLive), null);
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 test("a linked home known only by an MSYS HOME (no USERPROFILE) still knows the link's target", () => {
@@ -1059,12 +1073,12 @@ test("a linked home known only by an MSYS HOME (no USERPROFILE) still knows the 
   symlinkSync(target, join(home, ".claude"), "junction");
   const t = target.replace(/\\/g, "/");
   // Git Bash's HOME: /c/Users/u for C:\Users\u.
-  const e = { ...env, HOME: home.replace(/\\/g, "/").replace(/^([A-Za-z]):/, (_, d) => `/${d.toLowerCase()}`) };
+  const e = { ...host, HOME: home.replace(/\\/g, "/").replace(/^([A-Za-z]):/, (_, d) => `/${d.toLowerCase()}`) };
   delete e.USERPROFILE;
   try {
-    assert.match(bash(`echo x > "${t}/settings.json"`, e) ?? "", /Claude settings/);
-    assert.match(bash(`echo x > "${t}/night-shift/rules.md"`, e) ?? "", /night-shift settings/);
-    assert.equal(bash(`echo x > "${t}/notes.md"`, e), null);
+    assert.match(bash(`echo x > "${t}/settings.json"`, e, onLive) ?? "", /Claude settings/);
+    assert.match(bash(`echo x > "${t}/night-shift/rules.md"`, e, onLive) ?? "", /night-shift settings/);
+    assert.equal(bash(`echo x > "${t}/notes.md"`, e, onLive), null);
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
@@ -1090,8 +1104,8 @@ test("a folder named by CLAUDE_CONFIG_DIR is protected as ~/.claude is, also by 
   symlinkSync(target, link, "junction");
   try {
     const t = target.replace(/\\/g, "/");
-    assert.match(bash(`echo x > "${t}/settings.json"`, { ...env, CLAUDE_CONFIG_DIR: link }) ?? "", /Claude settings/);
-    assert.equal(bash(`echo x > "${t}/notes.md"`, { ...env, CLAUDE_CONFIG_DIR: link }), null);
+    assert.match(bash(`echo x > "${t}/settings.json"`, { ...host, CLAUDE_CONFIG_DIR: link }, onLive) ?? "", /Claude settings/);
+    assert.equal(bash(`echo x > "${t}/notes.md"`, { ...host, CLAUDE_CONFIG_DIR: link }, onLive), null);
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
@@ -1230,21 +1244,21 @@ test("a linked home's and a linked skill folder's targets are protected too", ()
   symlinkSync(target, join(home, ".claude"), "junction");
   symlinkSync(real, link, "junction");
   const t = target.replace(/\\/g, "/"), h = home.replace(/\\/g, "/"), r = real.replace(/\\/g, "/");
-  const e = { ...env, USERPROFILE: home };
+  const e = { ...host, USERPROFILE: home, HOME: home };
   try {
     // ~/.claude is a link: its plugins by the target's path, and a skill folder in its cache by either spelling.
-    assert.match(bash(`cp a "${t}/plugins/cache/m/x.mjs"`, e) ?? "", /installed plugins/);
-    assert.match(bash(`echo {} > "${t}/plugins/installed_plugins.json"`, e) ?? "", /installed plugins/);
-    assert.equal(bash(`echo x > "${t}/plugins/data/p/x.json"`, e), null);
+    assert.match(bash(`cp a "${t}/plugins/cache/m/x.mjs"`, e, onLive) ?? "", /installed plugins/);
+    assert.match(bash(`echo {} > "${t}/plugins/installed_plugins.json"`, e, onLive) ?? "", /installed plugins/);
+    assert.equal(bash(`echo x > "${t}/plugins/data/p/x.json"`, e, onLive), null);
     const cached = withSkill(`${h}/.claude/plugins/cache/night-shift/night-shift/0.3.0/night-shift`, e);
-    assert.match(bash(`echo x > "${t}/plugins/cache/night-shift/night-shift/0.3.0/night-shift/SKILL.md"`, cached) ?? "", /the night-shift skill itself/);
+    assert.match(bash(`echo x > "${t}/plugins/cache/night-shift/night-shift/0.3.0/night-shift/SKILL.md"`, cached, onLive) ?? "", /the night-shift skill itself/);
     // The skill folder is a link: the folder it points at is the skill too.
-    assert.match(bash(`echo x > "${r}/SKILL.md"`, withSkill(link, e)) ?? "", /the night-shift skill itself/);
-    assert.match(bash(`echo x > "${link.replace(/\\/g, "/")}/SKILL.md"`, withSkill(link, e)) ?? "", /the night-shift skill itself/);
+    assert.match(bash(`echo x > "${r}/SKILL.md"`, withSkill(link, e), onLive) ?? "", /the night-shift skill itself/);
+    assert.match(bash(`echo x > "${link.replace(/\\/g, "/")}/SKILL.md"`, withSkill(link, e), onLive) ?? "", /the night-shift skill itself/);
     // A linked skill folder whose target is inside the repository (not the repository itself) is the repository's.
     const inRepo = { ...withSkill(link, e), NIGHT_SHIFT_REPO: repo.replace(/\\/g, "/") };
-    assert.equal(bash(`echo x > "${r}/SKILL.md"`, inRepo), null);
-    assert.equal(decide({ tool_name: "Write", tool_input: { file_path: `${r}/SKILL.md` } }, inRepo), null);
+    assert.equal(bash(`echo x > "${r}/SKILL.md"`, inRepo, onLive), null);
+    assert.equal(decide({ tool_name: "Write", tool_input: { file_path: `${r}/SKILL.md` } }, inRepo, onLive), null);
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 

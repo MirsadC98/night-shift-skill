@@ -538,7 +538,8 @@ test("the table's own names answer /stop and /stop now, in the run's language", 
 
 // The answers to stopRun's other outcomes. A watcher whose PATH has no PowerShell cannot check what the runner's process
 // is (unsure); one whose PATH has PowerShell but no taskkill sees the runner outlive the kill (failed), its second answer.
-test("/stop's answers for a runner that never started, one already gone, one it could not check, and one that outlived the kill", async () => {
+// Those two need Windows' tools; runs.test.mjs reaches both outcomes through a fake platform on every system.
+test("/stop's answers for a runner that never started and one already gone", async () => {
   const dead = spawnSync(process.execPath, ["-e", ""]).pid;
   for (const [pid, reason] of [[0, "its runner never started"], [dead, "its runner was already gone"]]) {
     await scene(asking("/stop"), { runner: { pid } }, async ({ api, state, home, repo }) => {
@@ -549,6 +550,9 @@ test("/stop's answers for a runner that never started, one already gone, one it 
       assert.ok(after(state));
     });
   }
+});
+
+test("/stop now's answers for a runner it could not check and one that outlived the kill", { skip: process.platform !== "win32" && "reaches them by a PATH without PowerShell or taskkill" }, async () => {
   const empty = fs.mkdtempSync(path.join(os.tmpdir(), "ns-nopath-"));
   await scene(asking("/stop now"), { runner: true, env: { PATH: empty, Path: empty } }, async ({ api, state, home, repo, helper }) => {
     await until(() => api.sends().length >= 1, 10_000, "the /stop now answer");

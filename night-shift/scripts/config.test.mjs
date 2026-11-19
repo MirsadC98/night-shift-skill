@@ -79,7 +79,7 @@ test("a misspelt key and a wrong type are named", () => {
 });
 
 test("a state folder may not be a drive, the home folder, the repository, temp itself, .git or ~/.claude", () => {
-  const where = { home: "C:\\Users\\u", repo: "C:/Users/u/Desktop/My Game", temp: "C:/Users/u/AppData/Local/Temp" };
+  const where = { home: "C:\\Users\\u", repo: "C:/Users/u/Desktop/My Game", temp: "C:/Users/u/AppData/Local/Temp", platform: platformFor("win32") };
   for (const bad of ["C:/", "C:\\temp", "D:/x", "C:/Users/u", "C:/Users", "C:/Users/u/Desktop/My Game", "C:/Users/u/Desktop",
     "C:/Users/u/Desktop/My Game/.git/night", "C:/Users/u/.claude/night", "C:/Users/u/AppData/Local/Temp"])
     assert.ok(stateDirProblem(bad, where), bad);
@@ -88,13 +88,13 @@ test("a state folder may not be a drive, the home folder, the repository, temp i
 });
 
 test("a state folder may not sit in AppData outside temp, in Windows, Program Files or ProgramData", () => {
-  const where = { home: "C:\\Users\\u", repo: "C:/work/repo", temp: "C:/Users/u/AppData/Local/Temp" };
+  const where = { home: "C:\\Users\\u", repo: "C:/work/repo", temp: "C:/Users/u/AppData/Local/Temp", platform: platformFor("win32") };
   for (const bad of ["C:/Users/u/AppData/Roaming/night", "C:/Users/u/AppData/Local/night", "C:/Users/u/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/n",
     "C:/Windows/Temp/n", "C:/Windows/n", "C:/Program Files/x/n", "C:/Program Files (x86)/x/n", "C:/ProgramData/n"])
     assert.ok(stateDirProblem(bad, where), bad);
   for (const good of ["C:/Users/u/AppData/Local/Temp/night-shift-My Game-20261116", "C:/temp/my-game-night", "C:/Users/u/Desktop/night-shift/n"])
     assert.equal(stateDirProblem(good, where), null, good);
-  // The default (what night-chain builds from the temp folder) stays valid.
+  // The default (what night-chain builds from the temp folder) stays valid, under the system the suite runs on.
   assert.equal(stateDirProblem(path.join(tempRoot(), "night-shift-My Game-20261116"), { home: os.homedir(), repo: "C:/work/repo" }), null);
 });
 
@@ -111,7 +111,7 @@ test("off Windows a state folder may not be the root, /tmp, the home or the repo
   assert.match(String(stateDirProblem("/Work/my game/.GIT/night", { ...where, platform: mac })), /inside \.git/);
 });
 
-test("tempRoot is the temp folder in long form: a short-form TEMP resolves, one that cannot be resolved is kept", () => {
+test("tempRoot is the temp folder in long form: a short-form TEMP resolves, one that cannot be resolved is kept", { skip: process.platform !== "win32" && "TEMP and 8.3 short names are Windows' own" }, () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "night-temproot-"));
   const long = path.join(base, "LongTempFolderName"), link = path.join(base, "LONGUS~1");
   fs.mkdirSync(long);

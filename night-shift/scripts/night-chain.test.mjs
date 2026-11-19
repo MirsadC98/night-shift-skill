@@ -1822,7 +1822,7 @@ function pointerCase(ptrOf) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const write = (p) => fs.writeFileSync(file, JSON.stringify({ state, task: "x", finished: false, ...p }));
   const run = (cmd, extra = [], more = {}, chain = CHAIN) => spawnSync(process.execPath, [chain, cmd, "--repo", repo, ...extra],
-    { env: { ...env, NIGHT_SHIFT_LAUNCH: "fail", NIGHT_SHIFT_CLAUDE: process.execPath, TEMP: root, TMP: root, ...more }, encoding: "utf8", cwd: root });
+    { env: { ...env, NIGHT_SHIFT_LAUNCH: "fail", NIGHT_SHIFT_CLAUDE: process.execPath, TEMP: root, TMP: root, TMPDIR: root, ...more }, encoding: "utf8", cwd: root });
   return { write, run, state, repo, home, read: () => JSON.parse(fs.readFileSync(file, "utf8")) };
 }
 const stamped = (ms) => new Date(ms).toLocaleString("sv-SE");
@@ -1870,7 +1870,7 @@ test("start names what is wrong in .claude/night-shift.json instead of a stack t
   assert.match(broken, /\.claude[\\/]night-shift\.json: .*not valid JSON/);
   assert.doesNotMatch(broken, /at JSON\.parse/);
   assert.match(startWithConfig({ modle: "fable" }).result.stderr, /unknown key "modle"/);
-  assert.match(startWithConfig({ stateDir: "C:/" }).result.stderr, /stateDir/);
+  assert.match(startWithConfig({ stateDir: process.platform === "win32" ? "C:/" : "/" }).result.stderr, /stateDir/);
 });
 
 test("start refuses a state folder that already holds something else", () => {
@@ -1893,7 +1893,7 @@ test("start builds the default state folder from the temp folder in long form, s
   fs.mkdirSync(long);
   fs.symlinkSync(long, link, "junction");
   const r = spawnSync(process.execPath, [CHAIN, "start", "--repo", repo, "--prompt", "x"],
-    { env: { ...env, NIGHT_SHIFT_LAUNCH: "fail", NIGHT_SHIFT_CLAUDE: process.execPath, TEMP: link, TMP: link }, encoding: "utf8", cwd: root });
+    { env: { ...env, NIGHT_SHIFT_LAUNCH: "fail", NIGHT_SHIFT_CLAUDE: process.execPath, TEMP: link, TMP: link, TMPDIR: link }, encoding: "utf8", cwd: root });
   assert.match(r.stderr, /launch refused \(test\)/);
   const made = fs.readdirSync(long).filter((f) => f.startsWith("night-shift-"));
   assert.equal(made.length, 1, r.stderr);

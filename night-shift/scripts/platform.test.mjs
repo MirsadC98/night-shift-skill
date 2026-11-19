@@ -106,12 +106,13 @@ test("fsHome turns an MSYS drive into a drive path only on Windows, and home rea
 });
 
 test("oddPath refuses a stream name and a short name, and lets a drive's colon and a plain path pass", () => {
-  assert.equal(platform.oddPath("c:/x/a.ts:x"), "an NTFS stream name");
-  assert.equal(platform.oddPath("c:/x/.git::$index_allocation"), "an NTFS stream name");
-  assert.equal(platform.oddPath("c:/users/settin~1.jso"), "a short (8.3) name");
-  assert.equal(platform.oddPath("c:/users/u/x~y"), null);
-  assert.equal(platform.oddPath("c:"), null);
-  assert.equal(platform.oddPath("c:/work/repo/a.ts"), null);
+  const { oddPath } = platformFor("win32");
+  assert.equal(oddPath("c:/x/a.ts:x"), "an NTFS stream name");
+  assert.equal(oddPath("c:/x/.git::$index_allocation"), "an NTFS stream name");
+  assert.equal(oddPath("c:/users/settin~1.jso"), "a short (8.3) name");
+  assert.equal(oddPath("c:/users/u/x~y"), null);
+  assert.equal(oddPath("c:"), null);
+  assert.equal(oddPath("c:/work/repo/a.ts"), null);
 });
 
 test("oddPath off Windows: a colon and ~1 are ordinary, and macOS's resource fork is refused", () => {

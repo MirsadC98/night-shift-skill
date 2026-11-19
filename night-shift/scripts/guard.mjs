@@ -13,7 +13,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, mkdtempSync, mkdirSync, symlinkSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { readProjectConfig, stateDirProblem, tempRoot, isMain, mcpToolName } from "./config.mjs";
-import { platform as live } from "./platform.mjs";
+import { platform as live, platformFor } from "./platform.mjs";
 
 // The system whose path rules a call is judged by (platform.mjs): the live one, or the one a test hands decide() in
 // opts.platform. decide() sets it for the call and puts it back after; it runs synchronously, so no other call sees it.
@@ -1371,6 +1371,7 @@ function decideOn(input, env, opts) {
 
 // The self-test's cases for a home whose .claude is a link: a home in the temp folder with a junction
 // to the folder lt, and the files the guard protects named by lt. The folder goes even when a case throws.
+// They make a real link, so they run under the live system, with the home in HOME beside USERPROFILE.
 function linkedCases(env, bash, write) {
   const base = mkdtempSync(join(tempRoot(), "night-guard-self-test-"));
   try {
@@ -1378,8 +1379,8 @@ function linkedCases(env, bash, write) {
     mkdirSync(join(base, "folder"));
     symlinkSync(join(base, "folder"), join(base, "home", ".claude"), "junction");
     const lt = join(base, "folder").replace(/\\/g, "/");
-    const linked = { ...env, USERPROFILE: join(base, "home") }, linkedRepo = { ...linked, NIGHT_SHIFT_REPO: lt };
-    // The home known only by Git Bash's HOME (/c/Users/u), with no USERPROFILE.
+    const linked = { ...env, USERPROFILE: join(base, "home"), HOME: join(base, "home") }, linkedRepo = { ...linked, NIGHT_SHIFT_REPO: lt };
+    // The home known only by HOME: on Windows Git Bash's (/c/Users/u), with no USERPROFILE.
     const msys = { ...env, USERPROFILE: undefined, HOME: join(base, "home").replace(/\\/g, "/").replace(/^([A-Za-z]):/, (_, d) => `/${d.toLowerCase()}`) };
     return [
       [bash(`echo x > "${lt}/settings.json"`, msys), true],
@@ -1393,14 +1394,22 @@ function linkedCases(env, bash, write) {
 }
 
 function selfTest() {
+  // The Windows-shaped cases are judged by Windows' path rules on every system: a win32 object with a Windows home and
+  // temp folder and no links. A few cases follow under Linux's rules (penv), and the linked-home ones under the live system.
+  const noLink = () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); };
+  const WIN = platformFor("win32", { tmpdir: () => "C:\\Users\\u\\AppData\\Local\\Temp", homedir: () => "C:\\Users\\u", realpath: noLink });
+  const LINUX = platformFor("linux", { tmpdir: () => "/tmp", homedir: () => "/home/u", realpath: noLink });
   const env = { NIGHT_SHIFT_REPO: "C:/work/repo", NIGHT_SHIFT_STATE: "C:/temp/x-night", USERPROFILE: "C:\\Users\\u" };
+  const penv = { NIGHT_SHIFT_REPO: "/work/repo", NIGHT_SHIFT_STATE: "/tmp/x-night", HOME: "/home/u" };
   // inHome: the run's repository is the user's own .claude folder.
   const inHome = { ...env, NIGHT_SHIFT_REPO: "C:/Users/u/.claude" };
-  const bash = (command, e = env) => decide({ tool_name: "Bash", tool_input: { command } }, e);
-  const ps = (command, e = env) => decide({ tool_name: "PowerShell", tool_input: { command } }, e);
-  const write = (file_path, e = env) => decide({ tool_name: "Write", tool_input: { file_path } }, e);
-  const mcp = (tool_name) => decide({ tool_name, tool_input: {} }, env);
+  const call = (tool_name, tool_input, e, platform) => decide({ tool_name, tool_input }, e, { platform });
+  const bash = (command, e = env, platform = WIN) => call("Bash", { command }, e, platform);
+  const ps = (command, e = env) => call("PowerShell", { command }, e, WIN);
+  const write = (file_path, e = env, platform = WIN) => call("Write", { file_path }, e, platform);
+  const mcp = (tool_name) => call(tool_name, {}, env, WIN);
   const skill = (dir) => ({ ...env, NIGHT_SHIFT_SKILL: dir });
+  const lbash = (command) => bash(command, penv, LINUX), lwrite = (file_path) => write(file_path, penv, LINUX);
   const cases = [
     [mcp("mcp__blender__execute_blender_code"), true],
     [bash("git push --force origin master"), true], [bash("git push -f"), true], [bash("git push origin :old"), true],
@@ -1517,7 +1526,12 @@ function selfTest() {
     [bash("echo x > C:/temp/a.txt", skill("C:/temp")), false], [write("C:/temp/x-night/notes.md", skill("C:/temp/x-night")), false],
     [bash("cp a D:/plugins/cache/m/x.mjs", { ...env, CLAUDE_CODE_PLUGIN_CACHE_DIR: "D:/plugins" }), true],
     [write("C:/work/repo/cache/a.ts", { ...env, CLAUDE_CODE_PLUGIN_CACHE_DIR: "C:/work/repo" }), false],
-    ...linkedCases(env, bash, write),
+    // C5: Linux's rules. The case written counts, a backslash is part of a name, /tmp is a temp root, /proc is refused.
+    [lbash("echo x > /home/u/.claude/settings.json"), true], [lbash("echo x > //home/u/.claude/settings.json"), true],
+    [lwrite("/work/repo/src/a.ts"), false], [lwrite("/work/Repo/src/a.ts"), true], [lwrite("/work/repo\\x"), true],
+    [lbash("rm -rf /tmp/build"), false], [lbash("rm -rf /home/u/Documents"), true], [lwrite("/tmp/x-night/run.json"), true],
+    [lbash("echo x > /proc/self/cwd/a.ts"), true],
+    ...linkedCases(live.name === "win32" ? env : penv, (c, e) => bash(c, e, live), (f, e) => write(f, e, live)),
   ];
   let failed = 0;
   cases.forEach(([got, deny], i) => {

@@ -58,7 +58,9 @@ test("stopRun finds no active run, or none in another state folder, and then wri
 test("stopRun marks a run whose runner never started or is gone finished, now or not", async () => {
   const { repo, state } = scene();
   writePointer(repo, { state, finished: false });
-  assert.equal((await stopRun(repo, { state: state.toUpperCase() })).outcome, "never");
+  // In another case where the file system ignores it (Windows, macOS); on Linux that would be another folder.
+  const same = platformFor().fold("A") === "a" ? state.toUpperCase() : state;
+  assert.equal((await stopRun(repo, { state: same })).outcome, "never");
   assert.equal(readPointer(repo).finished, true);
   assert.equal(readPointer(repo).reason, "its runner never started");
   const gone = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });

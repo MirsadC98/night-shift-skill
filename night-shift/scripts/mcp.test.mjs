@@ -110,7 +110,7 @@ test("a plugin.json may declare its servers as a .json file, or a list of files 
   assert.deepEqual(Object.keys(r.servers), ["plugin_steam_filed", "plugin_steam_inline"]);
 });
 
-test("the repository's key in .claude.json matches in any slash and drive-letter case", () => {
+test("the repository's key in .claude.json matches in any slash and drive-letter case", { skip: process.platform !== "win32" && "a backslash and a drive letter's case spell one path only on Windows" }, () => {
   const s = scene();
   const claude = JSON.parse(fs.readFileSync(path.join(s.home, ".claude.json"), "utf8"));
   const key = Object.keys(claude.projects)[0];
