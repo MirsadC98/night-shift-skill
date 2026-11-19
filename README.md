@@ -19,12 +19,25 @@ It runs a chain of fresh headless sessions (`claude -p`). Each session is like o
 
 ## Install
 
-Copy the `night-shift` folder to `~/.claude/skills/night-shift/`. The guard protects the skill's files at that path from night sessions, so a copy anywhere else is not protected; the commands below use it too. If you set `CLAUDE_CONFIG_DIR`, Claude Code keeps its folder there instead, and so does this skill: read that folder wherever this page says `~/.claude` (the runner, the guard and the report follow it, and the guard protects `~/.claude` as well). `status`, `stop` and `wait` find a run only from a shell that has the variable too.
+Two ways; use one of them, not both (two copies are two skills that answer the same requests).
+
+**Copy the folder** (the copy the guard protects). Copy the `night-shift` folder to `~/.claude/skills/night-shift/`. The guard protects the skill's files at that path from night sessions, so a copy anywhere else is not protected; the commands below use it too. If you set `CLAUDE_CONFIG_DIR`, Claude Code keeps its folder there instead, and so does this skill: read that folder wherever this page says `~/.claude` (the runner, the guard and the report follow it, and the guard protects `~/.claude` as well). `status`, `stop` and `wait` find a run only from a shell that has the variable too.
 
 ```bash
 git clone https://github.com/<you>/<this-repo>.git
 cp -r <this-repo>/night-shift ~/.claude/skills/night-shift
 ```
+
+**Or install it as a plugin.** The repository is a Claude Code plugin, whose manifest `.claude-plugin/plugin.json` names the `night-shift` folder as its skill, and its own marketplace (`.claude-plugin/marketplace.json`):
+
+```bash
+claude plugin marketplace add <you>/<this-repo>
+claude plugin install night-shift@night-shift
+```
+
+Claude Code copies the repository into its plugin cache, `~/.claude/plugins/cache/night-shift/night-shift/<version>/`. The skill is the `night-shift` folder in that copy: read its path wherever this page says `~/.claude/skills/night-shift`. A session names the skill `night-shift:night-shift`. The manifest names the version, so `claude plugin update` brings a new copy only when the version changes; a `-dev` version, from a branch not yet released, stays the same across that branch's commits.
+
+What the plugin route changes for the guard: the guard names the skill's files only at `~/.claude/skills/night-shift`. A plugin's copy is outside the repository and temp folders, so a night session's Write, Edit or delete there is refused, but a shell redirect or `cp` into it is not; and a chain whose repository is `~/.claude`, or a folder that holds it, may change it like any file of its repository (so may any chain when `CLAUDE_CODE_PLUGIN_CACHE_DIR` puts the cache in a temp folder). `doctor` marks such a copy `warn` on its `skill` row. For unattended runs, copy the folder.
 
 ## Use
 

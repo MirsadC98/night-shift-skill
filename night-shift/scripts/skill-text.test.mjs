@@ -205,3 +205,38 @@ test("the CI workflow tests Windows as the gate on the Node engines allows, and 
   assert.match(posix, /if: \$\{\{ !cancelled\(\) \}\}/, "the suite runs after a failed self-test too");
   assert.match(fs.readFileSync(readmePath, "utf8"), /`\.github\/workflows\/test\.yml`/);
 });
+
+// C4: the repository is a Claude Code plugin and its own marketplace (.claude-plugin/ at the root), so the skill installs
+// with `claude plugin install` as well as by copying the folder. Paths start with ./ and stay inside the plugin's root,
+// as the plugin docs require; the plugin's skill is this folder, which keeps its place (the port route patches it by
+// that path). The manifest's version wins over a marketplace entry's, so the entry sets none.
+test("the plugin manifest and its marketplace name the version the code knows and point at this skill folder", { skip: !fs.existsSync(readmePath) && "no README beside this copy" }, async () => {
+  const { VERSION } = await import("./version.mjs");
+  const top = path.join(root, "..");
+  const json = (f) => JSON.parse(fs.readFileSync(path.join(top, ".claude-plugin", f), "utf8"));
+  const plugin = json("plugin.json"), market = json("marketplace.json");
+  const known = ["name", "version", "description", "author", "license", "keywords", "skills"];
+  assert.deepEqual(Object.keys(plugin).filter((k) => !known.includes(k)), [], "a key Claude Code would strip");
+  assert.equal(plugin.name, "night-shift");
+  assert.equal(plugin.version, VERSION);
+  assert.ok(plugin.description && plugin.author?.name, "description and author.name");
+  const skills = [plugin.skills].flat();
+  assert.equal(skills.length, 1, "one skill folder");
+  for (const s of skills) {
+    assert.match(s, /^\.\/[^\\]*$/, `a plugin path starts with ./ and has no backslash: ${s}`);
+    assert.ok(!s.split("/").includes(".."), `inside the plugin's root: ${s}`);
+    assert.equal(fs.realpathSync(path.join(top, s)), fs.realpathSync(root), "this skill folder");
+  }
+  assert.match(market.name, /^[A-Za-z0-9][A-Za-z0-9._-]*$/, "a name a plugin id may hold");
+  assert.doesNotMatch(market.name, /^(claude|anthropic|claudeai)-|\.\./i, "a reserved name");
+  assert.ok(market.owner?.name && market.description, "owner.name and description");
+  assert.equal(market.plugins?.length, 1);
+  const [entry] = market.plugins;
+  assert.equal(entry.name, plugin.name);
+  assert.ok(entry.source === "./" || entry.source === ".", `the marketplace's root, which holds plugin.json: ${entry.source}`);
+  for (const k of ["version", "skills", "commands", "agents", "hooks", "mcpServers"]) assert.ok(!(k in entry), `the entry sets no ${k}: plugin.json holds it`);
+  const readme = fs.readFileSync(readmePath, "utf8");
+  assert.ok(readme.includes("claude plugin marketplace add <you>/<this-repo>"), "README: add the marketplace");
+  assert.ok(readme.includes(`claude plugin install ${entry.name}@${market.name}`), "README: install the plugin");
+  assert.ok(readme.includes("`.claude-plugin/plugin.json`"), "README: the manifest");
+});

@@ -91,6 +91,15 @@ test("a written path is read the way Windows resolves it: .., a trailing dot, \\
   assert.equal(write("C:/work/repo/src/./sub/../a.ts"), null);
 });
 
+// C4: a plugin install puts the skill in Claude Code's plugin cache, which the guard does not name as the skill's own
+// files (it names ~/.claude/skills/night-shift). README says what still keeps a night session out of it: Write and Edit,
+// and deletes, are limited to the repository and temp folders; a shell redirect or cp there is not (README says so too).
+test("a plugin install's copy of the skill is refused to Write and to a delete by the folders' limit", () => {
+  const copy = "C:/Users/u/.claude/plugins/cache/night-shift/night-shift/0.3.0-dev/night-shift";
+  assert.match(write(`${copy}/scripts/guard.mjs`) ?? "", /limited to/);
+  for (const c of [`rm -rf ${copy}`, `rm ${copy}/scripts/guard.mjs`]) assert.match(bash(c) ?? "", /limited to/, c);
+});
+
 test("a relative delete target is read from where the command stands", () => {
   assert.equal(bash("cd C:/work/repo/app && rm -rf dist"), null);
   assert.equal(bash("cd app && rm -rf dist"), null);

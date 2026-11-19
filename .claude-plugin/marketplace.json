@@ -1,0 +1,14 @@
+{
+  "name": "night-shift",
+  "owner": {
+    "name": "night-shift contributors"
+  },
+  "description": "The night-shift skill for Claude Code, served from its own repository",
+  "plugins": [
+    {
+      "name": "night-shift",
+      "source": "./",
+      "description": "Keeps work going for hours while you are away: a chain of fresh headless Claude Code sessions behind a guard hook"
+    }
+  ]
+}

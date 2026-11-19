@@ -1,0 +1,11 @@
+{
+  "name": "night-shift",
+  "version": "0.3.0-dev",
+  "description": "Keeps work going for hours while you are away: a chain of fresh headless Claude Code sessions, each doing one piece of an approved plan, behind a guard hook",
+  "author": {
+    "name": "night-shift contributors"
+  },
+  "license": "MIT",
+  "keywords": ["unattended", "overnight", "headless", "chain", "guard"],
+  "skills": ["./night-shift"]
+}
