@@ -203,7 +203,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
   const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
   fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake, maxSessions: null }));
   fs.writeFileSync(path.join(state, "resume.json"), JSON.stringify({ nn: "35", sessionId: "00000000-0000-4000-8000-000000000035", why: "stopped" }));
-  fs.writeFileSync(path.join(state, "night-settings.json"), JSON.stringify({
+  fs.writeFileSync(path.join(state, "night-settings.json"), JSON.stringify({ crossSessionInbound: "accept",
     env: { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0" },
     hooks: { SessionStart: [{ matcher: "startup", hooks: [{ type: "command", command: "cleanup.ps1" }] }], PreToolUse: [] },
     modelSettings: { opus: { effortLevel: "high" }, sonnet: { effortLevel: "medium" } } }));
@@ -227,6 +227,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     "claude-mythos-5-2": { effortLevel: "high" } });
   assert.equal(s.autoContinueAtUsageLimit, true);
   assert.equal(s.outputStyle, "default");
+  assert.equal(s.crossSessionInbound, "refuse", "a resumed session takes no other session's message either");
 });
 
 test("a STOP handover written by the last session --max-sessions allows ends the chain with the STOP reason, not the session cap", async () => {
@@ -2632,4 +2633,52 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
   assert.ok(prompt.startsWith(goalTemplate().split("{{goal}}")[0]), prompt.slice(0, 200));
   assert.ok(prompt.includes("\n> Add a dark theme\n"));
   assert.match(fs.readFileSync(path.join(state, "chain.log"), "utf8"), new RegExp(`session 01 starts: ${goalTemplate().split("\n")[0].slice(0, 40).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+});
+
+// ---------------------------------------------------------------- K3: other sessions' messages
+// A message from another of the user's sessions is not the user's word, and nothing of the chain sends one: the settings
+// layer sets crossSessionInbound to "refuse" in every mode, written over before each session as the guard's hook is.
+test("the settings layer refuses other sessions' messages in every mode, whatever a session wrote there", async () => {
+  for (const patch of [{}, FM, MM]) {
+    const { state, env, root } = setup();
+    const fake = path.join(root, "fake-inbound.mjs");
+    fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path";
+const st = process.env.NIGHT_SHIFT_STATE; for await (const c of process.stdin);
+fs.copyFileSync(path.join(st, "night-settings.json"), path.join(st, "seen-1.json"));
+fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done");
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-1", result: "ok" }));
+`);
+    const run = JSON.parse(fs.readFileSync(path.join(state, "run.json"), "utf8"));
+    fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ ...run, claude: fake, maxSessions: null, ...patch }));
+    fs.writeFileSync(path.join(state, "night-settings.json"), JSON.stringify({ crossSessionInbound: "accept" }));
+    const { code } = await runOnce(["--state", state, "--headless"], env, root);
+    assert.equal(code, 0, fs.readFileSync(path.join(state, "chain.log"), "utf8"));
+    assert.equal(JSON.parse(fs.readFileSync(path.join(state, "seen-1.json"), "utf8")).crossSessionInbound, "refuse", patch.mode || "opus");
+  }
+});
+
+test("a session that sets crossSessionInbound for the next one does not open it, across a reload too", async () => {
+  const { repo, state, env, root } = setup();
+  const fake = path.join(root, "fake-inbound-reload.mjs");
+  fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path"; import { execFileSync } from "node:child_process";
+const st = process.env.NIGHT_SHIFT_STATE, n = Number(process.env.NIGHT_SHIFT_SESSION), f = path.join(st, "night-settings.json");
+for await (const c of process.stdin);
+if (n === 1) {
+  fs.writeFileSync(f, JSON.stringify({ ...JSON.parse(fs.readFileSync(f, "utf8")), crossSessionInbound: "accept" }));
+  execFileSync(process.execPath, [process.env.TEST_CHAIN, "reload", "--repo", process.cwd()], { windowsHide: true });
+  fs.writeFileSync(path.join(st, "next-prompt.md"), "second");
+} else {
+  fs.copyFileSync(f, path.join(st, "seen-2.json"));
+  fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done");
+}
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-" + n, result: "ok" }));
+`);
+  const e = { ...env, NIGHT_SHIFT_CLAUDE: fake };
+  startChain(repo, state, e, root);
+  const done = await waitFor(repo, e, root).done;
+  assert.equal(done.code, 0, done.out);
+  const log = fs.readFileSync(path.join(state, "chain.log"), "utf8");
+  assert.match(log, /runner reloads its code/);
+  assert.match(log, /chain starts in .* \(runner reloaded\), .*from session 2/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(state, "seen-2.json"), "utf8")).crossSessionInbound, "refuse");
 });

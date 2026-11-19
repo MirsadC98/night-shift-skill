@@ -530,7 +530,7 @@ async function runChain(opt) {
   try {
 
   // What was added to an earlier run's settings by hand (an env, another hook) stays;
-  // the guard, the limit wait, the subagent model and the efforts are written over.
+  // the guard, the limit wait, the subagent model, the efforts and crossSessionInbound are written over.
   // Before every session, not once: the file sits in a folder the sessions can write, and one
   // that dropped the guard's hook from it would run every later session without the guard.
   const settings = path.join(state, "night-settings.json");
@@ -545,6 +545,10 @@ async function runChain(opt) {
         hooks: [{ type: "command", command: NODE, args: [GUARD], timeout: 15, onFailure: "block" }] }] },
       // A session that set this to true would turn every hook, the guard's included, off.
       disableAllHooks: false,
+      // K3 (2026-11-19): a message from another of the user's sessions is not the user's word, and nothing of the chain
+      // sends one; a session still gets its own subagents' results with it (CLI 2.1.327). Only managed policy outranks this
+      // layer. Written over like the hook: a session could have set "accept" here for the sessions after it.
+      crossSessionInbound: "refuse",
       autoContinueAtUsageLimit: true,
       // No one reads a headless session's prose: the user's Explanatory style only added insight blocks.
       outputStyle: prev.outputStyle ?? "default",
