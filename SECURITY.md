@@ -18,6 +18,8 @@ A language table (`~/.claude/night-shift/lang/<code>.mjs`, see the README's "Lan
 
 If you find a command or a path the guard should have refused and did not, report it privately: open a private security advisory on this repository (the Security tab, "Report a vulnerability"). Please do not open a public issue for it. Include the command or path, the guard's answer, and what it should have been.
 
-## Telegram token
+## Telegram token and webhook URL
 
 The optional Telegram report keeps its bot token in `~/.claude/night-shift/telegram.json`, outside the skill folder. The runner reads it only to call Telegram and does not write it to `chain.log`, `watch.log` or a card. The file must never be committed.
+
+An optional webhook keeps its URL in `~/.claude/night-shift/webhook.json`. The URL is a secret too: anyone who knows an ntfy topic can read it, and a Slack or Discord webhook URL lets anyone post to its channel. The watcher reads it only to post the cards and does not write it to `watch.log` or a card; an error that names it has it replaced by `<webhook>`, and an answer is logged by its status alone. The file must never be committed.

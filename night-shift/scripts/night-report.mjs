@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // night-shift report: how a run is going, what it cost and what went wrong,
 // read from the state folder and the session transcripts without a model call.
-// Sent to Telegram when ~/.claude/night-shift/telegram.json holds a bot token.
+// Sent to Telegram when ~/.claude/night-shift/telegram.json holds a bot token, and posted to a webhook (ntfy, Slack
+// or Discord) when ~/.claude/night-shift/webhook.json holds { "url": …, "kind": … } (webhook.mjs); to each that is set up.
 //
 //   node night-report.mjs show   --state <dir>
 //   node night-report.mjs notify --state <dir> [--headline <text>] [--dry]
@@ -29,6 +30,7 @@ import { strings, langOf, loadLang } from "./lang/index.mjs";
 import { isMain, claudeHome, readGlobalConfig, globalConfigFile } from "./config.mjs";
 import { stopRun } from "./runs.mjs";
 import { platform } from "./platform.mjs";
+import { sendWebhook, webhookFile, plainText } from "./webhook.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 // A function: the runner sets CLAUDE_CONFIG_DIR from run.json after this module has loaded (claudeHome).
@@ -774,11 +776,28 @@ async function send(messages) {
   } catch (e) { return `retry: ${e.message}`; }
 }
 
+// Where the cards go (C6): Telegram when telegram.json exists, the webhook when webhook.json does, each that does. With
+// neither it is Telegram alone, whose "no telegram.json" says why no card went, as before. The bot's own answers (/status,
+// /report, /stop, /inbox) are Telegram's and go through send() alone. done: a notifier's own state for one card's tries.
+const notifiers = () => {
+  const list = [];
+  if (fs.existsSync(telegramFile())) list.push({ name: "telegram", send: (messages) => send(messages) });
+  if (fs.existsSync(webhookFile())) list.push({ name: "webhook", send: (messages, done) => sendWebhook(messages, done) });
+  return list.length ? list : [{ name: "telegram", send: (messages) => send(messages) }];
+};
+
+// notify and card --send: once to each notifier; "sent" when every one took it, else the other outcomes.
+async function deliver(messages) {
+  const outcomes = await Promise.all(notifiers().map((n) => n.send(messages, { parts: 0 })));
+  const off = outcomes.filter((o) => o !== "sent");
+  return off.length ? off.join("; ") : "sent";
+}
+
 export async function notify(state, headline, opt = {}) {
   const report = buildReport(state, { headline, focus: opt.focus, pid: opt.pid });
   fs.writeFileSync(path.join(state, "status.md"), report.plain);
   if (opt.dry) { console.log(`----- ${headline}\n${report.plain}`); return "dry"; }
-  const outcome = await send(report.messages);
+  const outcome = await deliver(report.messages);
   if (outcome !== "sent") console.error(`night-report: ${outcome}`);
   return outcome;
 }
@@ -806,28 +825,38 @@ async function watch(opt) {
   const mark = { lines: 0, quiet: {}, ...readJson(markFile) };
   const save = () => fs.writeFileSync(markFile, JSON.stringify(mark));
   // Each event is one short card; status.md keeps the full report for `status` and /report.
-  // A card is sent until Telegram takes it or the give-up time passes; the caller counts its log line after that.
+  // A card is sent until each notifier takes it or the give-up time passes; the caller counts its log line after that.
+  // Each notifier has a loop of its own, all at once, so an outage of one never sends the other's card twice. Once one
+  // has the card, another still failing tries once more and gives it up: a dead webhook must not hold Telegram's cards,
+  // and the /stop behind them, for the whole give-up time.
   const retryMs = Number(process.env.NIGHT_SHIFT_SEND_RETRY_MS) || 30_000, giveUpMs = Number(process.env.NIGHT_SHIFT_SEND_GIVEUP_MS) || 1_800_000;
   const say = async (message) => {
     fs.writeFileSync(path.join(state, "status.md"), buildReport(state, { pid }).plain);
     if (!message) return;
     if (opt.dry) return console.log(`----- ${message.silent ? `(${T.silent})` : ""}\n${message.text}`);
     const began = Date.now();
-    let outcome, tries = 0;
-    for (;;) {
-      outcome = await send([message]);
-      tries++;
-      // Unreadable HTML (a stray "<" in a title) must not lose the card: once more, tags stripped.
-      if (/^telegram: .*can't parse entities/.test(outcome) && !message.plain) {
-        message = { ...message, plain: true, text: message.text.replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&") };
-        continue;
+    let taken = false;
+    const sendTo = async (n) => {
+      let card = message, outcome, tries = 0;
+      const done = { parts: 0 };
+      for (;;) {
+        const after = taken; // another notifier had the card before this try began
+        outcome = await n.send([card], done);
+        tries++;
+        // Unreadable HTML (a stray "<" in a title) must not lose the card: once more, tags stripped.
+        if (/^telegram: .*can't parse entities/.test(outcome) && !card.plain) {
+          card = { ...card, plain: true, text: plainText(card.text) };
+          continue;
+        }
+        if (outcome === "sent") taken = true;
+        if (!outcome.startsWith("retry:")) break;
+        if (tries === 1) watchLog(state, `card not taken, trying again: ${outcome}`);
+        if (after || Date.now() - began >= giveUpMs) { outcome = `gave up on a card after ${tries} tries${after ? " (another notifier has it)" : ""}: ${outcome}`; break; }
+        await sleep(retryMs);
       }
-      if (!outcome.startsWith("retry:")) break;
-      if (tries === 1) watchLog(state, `card not taken, trying again: ${outcome}`);
-      if (Date.now() - began >= giveUpMs) { outcome = `gave up on a card after ${tries} tries: ${outcome}`; break; }
-      await sleep(retryMs);
-    }
-    if (outcome !== "sent") watchLog(state, outcome);
+      if (outcome !== "sent") watchLog(state, outcome);
+    };
+    await Promise.all(notifiers().map(sendTo));
   };
   const cfg = readJson(telegramFile());
   if (cfg.token && !opt.dry) {
@@ -1053,7 +1082,7 @@ if (isMain(import.meta)) {
     const state = path.resolve(opt.state);
     const card = opt.chain ? chainMessage(state, typeof opt.chain === "string" ? opt.chain : stateStrings(state).preview)
       : opt.nn ? sessionMessage(state, String(opt.nn).padStart(2, "0")) : statusMessage(state);
-    console.log(opt.send ? await send([card]) : `${card.silent ? `(${stateStrings(state).silent})\n` : ""}${card.text}`);
+    console.log(opt.send ? await deliver([card]) : `${card.silent ? `(${stateStrings(state).silent})\n` : ""}${card.text}`);
   } else if (opt.cmd === "watch") await watch(opt);
   else if (opt.cmd === "telegram-setup") {
     const cfg = JSON.parse(read(telegramFile()) || "{}");

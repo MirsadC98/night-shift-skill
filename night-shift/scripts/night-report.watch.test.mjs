@@ -47,12 +47,31 @@ async function bot(answer) {
   return { url: `http://127.0.0.1:${server.address().port}`, calls, sends: () => calls.filter((c) => c.method === "sendMessage"), close: () => server.close() };
 }
 
+// A stand-in webhook receiver (C6): answer(n) -> a status, 200 when it gives none; keeps each request's path, headers and body.
+async function receiver(answer = () => 200) {
+  const calls = [];
+  const server = http.createServer((req, res) => {
+    let raw = "";
+    req.setEncoding("utf8");
+    req.on("data", (c) => (raw += c));
+    req.on("end", () => {
+      calls.push({ url: req.url, headers: req.headers, raw });
+      const status = answer(calls.length - 1) || 200;
+      res.writeHead(status, { "content-type": "text/plain" });
+      res.end(status < 300 ? "ok" : "no");
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  return { url: `http://127.0.0.1:${server.address().port}`, calls, close: () => new Promise((r) => server.close(r)) };
+}
+
 // A throwaway home and state folder, a helper process standing in for the runner, the watcher itself.
 // lang: null writes a run.json from before the language was a setting; lang "xx" puts the made-up table in the home
 // unless table is false. configDir: the user set CLAUDE_CONFIG_DIR, so the night-shift folder sits there instead of in ~/.claude.
 // runner: the helper looks like a runner (its command line names a night-chain.mjs) and the repository's pointer names it
 // (a string is the pointer's own text). config: the user's global config.json. files: name -> text, in the state folder (null: a folder).
-async function scene(answer, { chatId = 42, notified, env = {}, token = "T", lang = "en", table = true, configDir = false, runner = false, config, files = {} } = {}, body) {
+// telegram: false leaves telegram.json out; hook: the user's webhook.json (an object, or a string as the file's own text).
+async function scene(answer, { chatId = 42, notified, env = {}, token = "T", lang = "en", table = true, configDir = false, runner = false, config, files = {}, telegram = true, hook } = {}, body) {
   const api = await bot(answer);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ns-watch-"));
   const home = path.join(dir, "home"), state = path.join(dir, "state"), root = path.join(dir, "repo");
@@ -61,7 +80,8 @@ async function scene(answer, { chatId = 42, notified, env = {}, token = "T", lan
   fs.mkdirSync(home, { recursive: true });
   fs.mkdirSync(state);
   fs.mkdirSync(root);
-  fs.writeFileSync(path.join(claude, "night-shift", "telegram.json"), JSON.stringify({ token, chatId }));
+  if (telegram) fs.writeFileSync(path.join(claude, "night-shift", "telegram.json"), JSON.stringify({ token, chatId }));
+  if (hook !== undefined) fs.writeFileSync(path.join(claude, "night-shift", "webhook.json"), typeof hook === "string" ? hook : JSON.stringify(hook));
   if (lang === "xx" && table) {
     fs.mkdirSync(path.join(claude, "night-shift", "lang"));
     const file = path.join(claude, "night-shift", "lang", "xx.mjs");
@@ -94,7 +114,7 @@ async function scene(answer, { chatId = 42, notified, env = {}, token = "T", lan
     });
     watcher.on("exit", (c) => { code = c ?? -1; onExit(code); });
     const chain = (line) => fs.appendFileSync(path.join(state, "chain.log"), stamp(line));
-    await body({ api, state, home, repo: root, chain, exited, watcher, helper, ended: () => code !== undefined });
+    await body({ api, state, home, repo: root, chain, exited, watcher, helper, ended: () => code !== undefined, ns: path.join(claude, "night-shift") });
   } finally {
     watcher?.kill();
     helper.kill();
@@ -675,4 +695,107 @@ test("the table's own name answers /inbox, in the run's language", async () => {
     assert.match(inboxOf(state), /· Telegram\] hello\n$/);
     assert.deepEqual(menu(api), ["xxstatus", "xxreport", "xxstop", "xxinbox"]);
   });
+});
+
+// ---------------------------------------------------------------- the webhook (C6)
+const linesOf = (state) => { try { return JSON.parse(fs.readFileSync(path.join(state, "notified.json"), "utf8")).lines; } catch { return 0; } };
+const SECRET = "s3cret-topic";
+// The CLI as the user runs it, asynchronously: the stand-ins answer from this process, which a spawnSync would block.
+const report = (args, env) => new Promise((resolve) => {
+  const p = spawn(process.execPath, [REPORT, ...args], { env: { ...process.env, ...env }, windowsHide: true });
+  let out = "";
+  p.stdout.on("data", (c) => (out += c));
+  p.stderr.on("data", (c) => (out += c));
+  p.on("exit", () => resolve(out.trim()));
+});
+
+test("a webhook alone gets each card as plain text, a silent one at low priority; Telegram is not asked, and nothing says it is missing", async () => {
+  const rx = await receiver();
+  try {
+    await scene(() => undefined, { telegram: false, hook: { url: `${rx.url}/${SECRET}` } }, async ({ api, state, home, chain }) => {
+      chain("session 02 resumes after the limit");
+      chain(RETRY);
+      await until(() => linesOf(state) === 2, 10_000, "both lines counted");
+      assert.equal(rx.calls.length, 2);
+      assert.equal(rx.calls[0].url, `/${SECRET}`);
+      assert.match(rx.calls[0].raw, /#02 is going on/);
+      assert.equal(rx.calls[0].headers.priority, "low");
+      assert.match(rx.calls[1].raw, /#02 left no continuation prompt/);
+      assert.equal(rx.calls[1].headers.priority, undefined);
+      for (const c of rx.calls) assert.doesNotMatch(c.raw, /<\/?[a-z]/);
+      assert.equal(api.calls.length, 0, "no telegram.json: Telegram is not asked");
+      assert.doesNotMatch(logOf(state), /telegram/i);
+      assert.equal(await report(["card", "--state", state, "--send"], { USERPROFILE: home, HOME: home, NIGHT_SHIFT_TELEGRAM_API: api.url }), "sent");
+      assert.equal(rx.calls.length, 3);
+      assert.equal(api.calls.length, 0);
+    });
+  } finally { await rx.close(); }
+});
+
+test("with Telegram down the webhook gets the card once, and the line counts once Telegram took it too", async () => {
+  const down = [500, { ok: false, error_code: 500, description: "Internal Server Error" }];
+  const rx = await receiver();
+  try {
+    await scene((m, b, n) => (m === "sendMessage" ? (n < 1 ? down : [200, { ok: true }]) : undefined), { hook: { url: `${rx.url}/${SECRET}`, kind: "slack" }, env: { NIGHT_SHIFT_SEND_RETRY_MS: "1500" } }, async ({ api, state, chain }) => {
+      chain(RETRY);
+      await until(() => api.sends().length >= 1 && rx.calls.length >= 1, 10_000, "both notifiers asked");
+      assert.equal(linesOf(state), 0, "Telegram does not have it yet");
+      // Telegram's next try, which the webhook's card makes its last, is taken.
+      await until(() => linesOf(state) === 1, 10_000, "the line counted");
+      assert.equal(api.sends().length, 2);
+      assert.equal(rx.calls.length, 1);
+      assert.match(JSON.parse(rx.calls[0].raw).text, /#02 left no continuation prompt/);
+    });
+  } finally { await rx.close(); }
+});
+
+test("a dead webhook gives a card up one retry after Telegram took it, not at the give-up time, and watch.log never names its URL", async () => {
+  const rx = await receiver();
+  await rx.close();
+  await scene((m) => (m === "sendMessage" ? [200, { ok: true }] : undefined), { hook: { url: `${rx.url}/${SECRET}` } }, async ({ api, state, chain }) => {
+    chain(RETRY);
+    chain("session 03 resumes after the limit");
+    await until(() => linesOf(state) === 2, 10_000, "both lines counted, with the 30-minute give-up left as it is");
+    assert.equal(api.sends().length, 2);
+    await until(() => (logOf(state).match(/gave up on a card after 2 tries/g) || []).length === 2, 5_000, "both give-ups in watch.log");
+    assert.match(logOf(state), /retry: webhook: /);
+    assert.equal(logOf(state).includes(SECRET), false, logOf(state));
+  });
+});
+
+test("a webhook's refusal is logged once and not tried again; a webhook.json that is no JSON is logged, and Telegram's card still goes", async () => {
+  const rx = await receiver(() => 404);
+  try {
+    await scene((m) => (m === "sendMessage" ? [200, { ok: true }] : undefined), { hook: { url: `${rx.url}/${SECRET}`, kind: "discord" } }, async ({ api, state, chain, ns }) => {
+      chain(RETRY);
+      await until(() => linesOf(state) === 1, 10_000, "the line counted");
+      await until(() => /webhook: 404 Not Found/.test(logOf(state)), 5_000, "the refusal in watch.log");
+      assert.equal(rx.calls.length, 1);
+      fs.writeFileSync(path.join(ns, "webhook.json"), "{");
+      chain(RETRY);
+      await until(() => linesOf(state) === 2, 10_000, "the second line counted");
+      await until(() => /webhook\.json: not JSON/.test(logOf(state)), 5_000, "the broken file in watch.log");
+      assert.equal(api.sends().length, 2);
+      assert.equal(rx.calls.length, 1);
+      assert.equal(logOf(state).includes(SECRET), false);
+    });
+  } finally { await rx.close(); }
+});
+
+test("card --send and notify go to Telegram and the webhook, and print sent only when both took it", async () => {
+  let status = 200;
+  const rx = await receiver(() => status);
+  try {
+    await scene((m) => (m === "sendMessage" ? [200, { ok: true }] : undefined), { hook: { url: `${rx.url}/${SECRET}` } }, async ({ api, state, home }) => {
+      const env = { USERPROFILE: home, HOME: home, NIGHT_SHIFT_TELEGRAM_API: api.url };
+      assert.equal(await report(["card", "--state", state, "--send"], env), "sent");
+      assert.equal(api.sends().length, 1);
+      assert.equal(rx.calls.length, 1);
+      assert.equal(rx.calls[0].raw, rx.calls[0].raw.trim());
+      assert.match(await report(["notify", "--state", state, "--headline", "test"], env), /^sent$/m);
+      assert.ok(rx.calls.length >= 2);
+      status = 404;
+      assert.equal(await report(["card", "--state", state, "--send"], env), "webhook: 404 Not Found");
+    });
+  } finally { await rx.close(); }
 });

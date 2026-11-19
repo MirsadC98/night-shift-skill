@@ -11,6 +11,7 @@ Not on `main` yet: the commits after `2c14b8b`.
 - `--mode mythos` and `MODEL: mythos`: Mythos on Fable's seat, sharing its weekly allowance and ceiling.
 - `start --goal <text>` and `--goal-file <file>`: a chain from a goal with no roadmap; its first session writes the roadmap, has it reviewed and approves it, and the work starts in the session after it.
 - `start --attended` (`"attended": true`): for a job by day. Sessions write a question that needs you to `<state>/questions.md` and go on; the watcher sends each as a card, and `wait` wakes on it with exit 3.
+- A webhook for the cards, beside Telegram or instead of it: `~/.claude/night-shift/webhook.json` holds a URL and, when the URL does not say, its kind (`ntfy`, `slack` or `discord`); the watcher, `notify` and `card --send` post each card there as plain text (ntfy's body, Slack's `text`, Discord's `content`), and the bot's commands stay Telegram's.
 - Phone commands in the Telegram bot's chat: `/stop` and `/stop now`, and `/inbox <text>`, which is off until the global config sets `"telegramInbox": true`.
 - Caps: `weeklyCeiling` (`--weekly-ceiling`) for the seven-day window and `maxUsd` (`--max-usd`) for a start's dollars, each ending the chain with `next-prompt.md` kept; no session starts at or over 90 % of the five-hour window, the chain waits for its reset.
 - `"mcp"` as a list of server names: a session starts only those servers, each from its own config.
