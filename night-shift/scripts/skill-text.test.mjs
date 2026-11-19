@@ -370,7 +370,7 @@ test("the README's Systems part says what differs by system and that macOS and L
 test("README says how to set up a webhook and try it; the report's help and interactive.md name webhook.json", { skip: !fs.existsSync(readmePath) && "no README beside this copy" }, () => {
   const readme = fs.readFileSync(readmePath, "utf8").replace(/\r\n/g, "\n");
   const part = readme.split("\n## Telegram and webhooks (optional)\n")[1]?.split("\n## ")[0] ?? "";
-  for (const w of ["`~/.claude/night-shift/webhook.json`", "`\"kind\": \"ntfy\"`", "`\"slack\"`", "`\"discord\"`", "`hooks.slack.com`", "`discord.com/api/webhooks/`",
+  for (const w of ["`~/.claude/night-shift/webhook.json`", "`\"kind\": \"ntfy\"`", "`\"slack\"`", "`\"discord\"`", "`hooks.slack.com`", "`/api/webhooks/`", "`discordapp.com`", "`.localhost`",
     "secret", "never committed", "card --state <state folder> --send", "stay Telegram's"]) assert.ok(part.includes(w), `README's part: ${w}`);
   const help = fs.readFileSync(path.join(root, "scripts", "night-report.mjs"), "utf8").split(/^import /m)[0];
   assert.match(help, /webhook\.json/);

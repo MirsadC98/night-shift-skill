@@ -36,6 +36,22 @@ function scene() {
   return { root, home, repo, ctx, gh, steam, env: {} };
 }
 
+// Session 32's final review: an installed_plugins.json entry that is one object, not a list, and a plugin id that names
+// no marketplace (no @), whose data folder is then plugins/data/<plugin>.
+test("a plugin installed as one object, and one whose id names no marketplace, are found with their folders", () => {
+  const s = scene();
+  const plugins = path.join(s.home, ".claude", "plugins"), file = path.join(plugins, "installed_plugins.json");
+  const one = path.join(plugins, "cache", "m", "one", "1.0.0"), bare = path.join(plugins, "cache", "local", "bare");
+  const list = JSON.parse(fs.readFileSync(file, "utf8"));
+  put(file, { ...list, plugins: { ...list.plugins, "one@m": { scope: "user", installPath: one }, bare: [{ scope: "user", installPath: bare }] } });
+  put(path.join(one, ".mcp.json"), { mcpServers: { srv: { command: "one-mcp" } } });
+  put(path.join(bare, ".mcp.json"), { mcpServers: { srv: { command: "bare-mcp" } } });
+  const r = listedServers(["plugin:one:srv", "plugin:bare:srv"], s);
+  assert.deepEqual(r.missing, []);
+  assert.deepEqual(r.servers.plugin_one_srv, { command: "one-mcp", env: { CLAUDE_PLUGIN_ROOT: one, CLAUDE_PLUGIN_DATA: path.join(plugins, "data", "one-m") } });
+  assert.deepEqual(r.servers.plugin_bare_srv, { command: "bare-mcp", env: { CLAUDE_PLUGIN_ROOT: bare, CLAUDE_PLUGIN_DATA: path.join(plugins, "data", "bare") } });
+});
+
 test("a server's part of its tools' names: what is not a letter, a digit, _ or - becomes _", () => {
   assert.equal(mcpToolName("github"), "github");
   assert.equal(mcpToolName("plugin:context7:context7"), "plugin_context7_context7");

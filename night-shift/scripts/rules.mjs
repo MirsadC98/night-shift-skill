@@ -1,6 +1,6 @@
 // The user's rule files: free text in ~/.claude/night-shift/rules.md (global) and
 // <repo>/.claude/night-shift-rules.md (project), which the runner puts into every session's header
-// where they win over the skill's defaults. Imports only node.
+// where they win over the skill's defaults. Imports node and config.mjs (claudeHome, the Claude folder).
 //   ruleFiles(repo, home)  -> { global, project }   the two paths
 //   readRuleFile(file)     -> { text } | { error }  never throws; text is "" for a missing or blank file, and a
 //                                                    comment (a line that starts with <!--, up to -->) reaches no session
@@ -45,19 +45,28 @@ export function readRuleFile(file) {
 }
 
 // C4: a comment is the user's note to themselves, and init's skeleton is one: an untouched file adds nothing to a header.
-// A comment starts at a line that begins with <!-- and ends at the first --> after it; the text after that --> stays. A
-// <!-- inside a line or inside a ``` or ~~~ code block is text (a rule may be about HTML), and so is one never closed.
+// A comment starts at a line that begins with <!-- and ends at the first --> after it; the text after that --> stays,
+// and is read again: one more comment right after it goes too. A <!-- inside a line or inside a ``` or ~~~ code block is
+// text (a rule may be about HTML), and so is one never closed. A code block ends at a bare fence of its character at
+// least as long as the one that opened it (CommonMark): a fence with an info string, or a shorter one, is its text.
 function dropComments(text) {
   const lines = text.split("\n"), out = [];
   let fence = null;
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i], mark = /^\s*(`{3,}|~{3,})/.exec(line);
-    if (mark) { if (fence === null) fence = mark[1][0]; else if (mark[1][0] === fence) fence = null; out.push(line); continue; }
+    const line = lines[i], mark = /^\s*(`{3,}|~{3,})(.*)$/.exec(line);
+    if (mark) {
+      if (fence === null) fence = mark[1];
+      else if (mark[1][0] === fence[0] && mark[1].length >= fence.length && !mark[2].trim()) fence = null;
+      out.push(line);
+      continue;
+    }
     if (fence === null && /^\s*<!--/.test(line)) {
       let end = i, at = line.indexOf("-->", line.indexOf("<!--") + 4);
       while (at < 0 && ++end < lines.length) at = lines[end].indexOf("-->");
       if (at >= 0) {
         const rest = lines[end].slice(at + 3);
+        // Another comment on the same line: read the rest again, as a line of its own.
+        if (/^\s*<!--/.test(rest)) { lines[end] = rest; i = end - 1; continue; }
         if (rest.trim()) out.push(rest);
         i = end;
         continue;

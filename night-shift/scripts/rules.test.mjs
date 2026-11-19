@@ -30,9 +30,22 @@ test("a comment that starts a line with <!-- reaches no session; the text around
   assert.equal(readRuleFile(fileOf("<!-- never closed\nA rule.")).text, "<!-- never closed\nA rule.", "an unclosed mark is text");
 });
 
+// Session 32's final review: the text after a comment's --> was not read again, so a second comment on that line stayed.
+test("a second comment right after a comment's --> goes too, on one line or over several", () => {
+  assert.equal(readRuleFile(fileOf("<!-- a --> <!-- b -->\nA rule.\n")).text, "A rule.");
+  assert.equal(readRuleFile(fileOf("<!-- a --><!-- b --> <!-- c --> Never push.\n")).text, "Never push.");
+  assert.equal(readRuleFile(fileOf("<!-- a --> <!-- b\nstill b -->\nA rule.\n")).text, "A rule.");
+  // After a comment's --> other text first: the <!-- after it is inside a line, so text.
+  assert.equal(readRuleFile(fileOf("<!-- a --> Keep <!-- this -->.\n")).text, "Keep <!-- this -->.");
+});
+
 test("a <!-- inside a line or a code block is text: a rule may be about HTML", () => {
   for (const t of ["Keep <!-- this --> line.", "Never write `<!--` in HTML.\nUse `-->` to close.", "a <!-- b <!-- c --> d -->",
-    "Put this at the top of a generated file:\n```html\n<!-- generated -->\n```", "~~~\n<!-- kept\n```\n-->\n~~~"]) assert.equal(readRuleFile(fileOf(t)).text, t);
+    "Put this at the top of a generated file:\n```html\n<!-- generated -->\n```", "~~~\n<!-- kept\n```\n-->\n~~~",
+    // A block ends only at a bare fence of its character at least as long as the one that opened it (CommonMark):
+    // a fence with an info string, or a shorter one, is the block's text (session 32's final review).
+    "```\n```js\n<!-- kept -->\n```", "````\n```\n<!-- kept -->\n````", "~~~\n~~~ x\n<!-- kept -->\n~~~"]) assert.equal(readRuleFile(fileOf(t)).text, t);
+  assert.equal(readRuleFile(fileOf("````md\n```\n<!-- kept -->\n```` \n<!-- a note -->\nA rule.")).text, "````md\n```\n<!-- kept -->\n```` \nA rule.");
 });
 
 test("the limit counts bytes, and exactly 8192 passes", () => {

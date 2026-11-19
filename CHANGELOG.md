@@ -11,6 +11,9 @@ Not on `main` yet: the commits after `2c14b8b`.
 - `--mode mythos` and `MODEL: mythos`: Mythos on Fable's seat, sharing its weekly allowance and ceiling.
 - `start --goal <text>` and `--goal-file <file>`: a chain from a goal with no roadmap; its first session writes the roadmap, has it reviewed and approves it, and the work starts in the session after it.
 - `start --worktree` (`"worktree": true`): the chain works in its own git worktree, `<parent>/<repo>-night` on the branch `night-shift`, made by the first such start and kept for the next, so the main tree stays yours while it runs. The guard reads the project's file in the main tree, protects its rule files and `.git`, and refuses Write, Edit, deletes and moves anywhere in it; the runner checks the worktree before each session, and never merges the branch or removes the worktree. `status`, `wait` and the end card name the worktree and, once the chain has ended, `git merge night-shift` and `git worktree remove <dir>`; given the worktree's folder, `start`, `status`, `wait`, `stop` and `reload` find the chain, and `init` and `doctor` take the main tree. `"worktreeCopy"` (a project's key) copies the ignored paths it lists into the worktree when it is made, never back; `start` names the ignored top-level folders it did not copy, a new session's header names both trees, and `start` warns when a new prompt names the main tree's path.
+- `doctor`: checks what a start needs without starting anything, one line a check, and exits 1 on a `FAIL`. `init --repo <dir>`: writes a starter `.claude/night-shift.json` and a rules file skeleton, never over a file that exists.
+- A rule file may hold comments: a `<!--` … `-->` whose `<!--` starts a line or follows another comment's `-->`, outside a code block, reaches no session.
+- `start` refuses a flag of the wrong shape (a number or a time it cannot read, a flag with no value, a mode or language it does not know, `--attended` or `--worktree` other than `true` or `false`) instead of dropping it or reading it as something else.
 - `start --attended` (`"attended": true`): for a job by day. Sessions write a question that needs you to `<state>/questions.md` and go on; the watcher sends each as a card, and `wait` wakes on it with exit 3.
 - A webhook for the cards, beside Telegram or instead of it: `~/.claude/night-shift/webhook.json` holds a URL and, when the URL does not say, its kind (`ntfy`, `slack` or `discord`); the watcher, `notify` and `card --send` post each card there as plain text (ntfy's body, Slack's `text`, Discord's `content`), and the bot's commands stay Telegram's. `doctor` shows its kind and host, and warns for a file it cannot use or for plain `http:` to a host that is not private or local.
 - Phone commands in the Telegram bot's chat: `/stop` and `/stop now`, and `/inbox <text>`, which is off until the global config sets `"telegramInbox": true`.
@@ -40,7 +43,7 @@ Not on `main` yet: the commits after `2c14b8b`.
 
 - A session that writes STOP after `--until` ends the chain with its reason; a killed or crashed session counts against `--max-usd`; the report counts only real guard denials; `start` refuses a state folder whose run belongs to another repository; many smaller fixes (`git log 2c14b8b..`).
 
-## 0.2.0 (2026-11-16 to 2026-11-18, `c83fae8..2c14b8b`)
+## 0.2.0 (2026-11-16 to 2026-11-18, `c2f071d..2c14b8b`)
 
 - A usage limit whose reset is too far away ends the chain (`--max-wait-hours`), a limit an empty result line follows is read, and a session the limit cut off after it wrote STOP finishes the chain; API and network failures are waited out; a session the timer killed and a runner crash are named.
 - The guard reads commands by their words: wrappers (`bash -c`, `powershell -c`, `eval`, `xargs`, `find -exec`), git's abbreviations, aliases and its config, include and transport routes, deletes through globs, braces and pipes, stream and short paths; a call it cannot check is denied.
@@ -50,7 +53,7 @@ Not on `main` yet: the commits after `2c14b8b`.
 - A STOP written by the last session `--max-sessions` allows ends the chain with its reason.
 - The skill's texts say nothing of one person's setup.
 
-## 0.1.0 (2026-11-15, `ca5fb74..c2f071d`)
+## 0.1.0 (2026-11-15, `ca5fb74` to `c2f071d`)
 
 - The first public version: `night-chain.mjs` chains fresh headless sessions through `<state>/next-prompt.md`, started through Task Scheduler (`start`, `status`, `wait`, `stop`, `reload`, `run`), waiting out a usage limit and resuming the session it cut off; the guard hook; the night report and its Telegram cards.
 - Hardening after a security review, and `MODEL: fable` for one hard piece, behind a gate on Fable's weekly allowance.
