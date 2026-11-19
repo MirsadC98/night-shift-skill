@@ -18,11 +18,11 @@ You are the user's delegate until they are back. By starting the run, the user a
 
 **The user's rules.** The header may carry rules the user wrote, global ones and this project's. They win over this skill's defaults where the two differ, and the project's win over the global ones: they can change the five tests, a hard stop the guard does not enforce, how work is split into pieces, and when to ask for another model. They cannot change what the guard refuses: a refused action stays a hard stop whatever a rule says.
 
-**Decide, build and record; ask the user only what needs them.** Decide what you would recommend, build it and record it; the user wants to be asked only what truly needs them. Every choice that would normally wait for the user is yours: a round plan that needs approval, a brainstorming pick, "answer before building", a plan line saying "the user decides".
+**Decide, build and record; ask the user only what needs them.** Every choice that would normally wait for the user is yours: a round plan that needs approval, a brainstorming pick, "answer before building", a plan line saying "the user decides".
 
-- Choose what you would recommend. Check the user's recorded preferences first: CLAUDE.md, memory, the plan's decisions, design docs and earlier critiques.
+- Choose what you would recommend. Check the user's recorded preferences first: CLAUDE.md, memory, the work's decisions, design docs and earlier critiques.
 - A plan that needs approval: write it as usual; have one fresh reviewer subagent check it against those preferences and fix what it finds; mark it `Approved: night delegate (night-shift, <date>)`, commit it, and build it in this session or the next.
-- Record each choice as `decision · why` where the project keeps that work's decisions: the plan's decision list or the round's log. It is the trail for later questions; nobody goes through it in the morning.
+- Record each choice as `decision · why` in the decisions file beside the plan, which the plan names in one line (add both when missing; no plan: the round's log); grep it, never read it whole. It is the trail for later questions; nobody goes through it in the morning.
 - A follow-up of approved work (a finding a review deferred, a small fix the round turned up) is approved work: do it, or hand it to a later session in the continuation prompt.
 
 **What reaches the user.** The night report's `**Waits for you**` holds only the hard stops (below) and the decisions that pass one of these five tests:
