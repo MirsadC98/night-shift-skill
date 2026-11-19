@@ -9,11 +9,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { claudeHome } from "./config.mjs";
+import { platform } from "./platform.mjs";
 
 const read = (f) => (fs.existsSync(f) ? fs.readFileSync(f, "utf8") : "");
 const now = () => new Date().toLocaleString("sv-SE");
-const alive = (pid) => { if (!pid) return false; try { process.kill(pid, 0); return true; } catch { return false; } };
-const same = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+const { alive, samePath: same } = platform;
 
 // Also the name of the repository's scheduled task (night-chain.mjs, scheduleRun).
 export const slug = (repo) => `${path.basename(repo)}-${crypto.createHash("sha1").update(repo.toLowerCase()).digest("hex").slice(0, 8)}`;

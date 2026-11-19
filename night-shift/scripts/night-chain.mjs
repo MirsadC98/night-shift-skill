@@ -82,6 +82,7 @@ import { sessionOutcome, windowSpan, fieldsGone } from "./session-outcome.mjs";
 import { listedServers, mcpArgs, claudeJson, mcpConfigArg, MCP_ARG_MAX } from "./mcp.mjs";
 import { ruleFiles, readRuleFile, rulesBlock } from "./rules.mjs";
 import { VERSION, NODE_FLOOR } from "./version.mjs";
+import { platform } from "./platform.mjs";
 import { MAIN_MODEL, SUB_MODEL, MAIN_EFFORT, subEffortText, MAX_NOTE, nightModelSettings, sessionPlan, promptDirectives,
   directiveLines, fableGate, mainGate, fallbackNote, resolveMode, familyOf, isPremium, modelName, runModelIds, premiumNote,
   deniedNote, runsOn } from "./effort.mjs";
@@ -126,7 +127,7 @@ const lowerSettings = (repo) => [path.join(claudeHome(), "settings.json"), path.
   path.join(repo, ".claude", "settings.local.json")].map((f) => parseOr(read(f), {}));
 // CLAUDE_CODE_EFFORT_LEVEL would set every level, the subagents' included.
 const withoutEffortEnv = (env) => { const { CLAUDE_CODE_EFFORT_LEVEL, ...rest } = env; return rest; };
-const alive = (pid) => { if (!pid) return false; try { process.kill(pid, 0); return true; } catch { return false; } };
+const { alive } = platform;
 const cap = (s) => s[0].toUpperCase() + s.slice(1);
 // "Opus", or "Opus (claude-opus-5-5)" for a full model id: night-report.mjs reads the runs line back.
 const modelText = (p) => `${cap(p.family)}${p.model !== p.family ? ` (${p.model})` : ""}`;
@@ -1073,7 +1074,7 @@ async function waitChain(opt) {
   const repo = repoRoot(opt.repo || process.cwd());
   const first = pointerOr(repo) || fail("no night-shift run recorded for this repository");
   const state = path.resolve(first.state);
-  const same = (a) => path.resolve(a).toLowerCase() === state.toLowerCase();
+  const same = (a) => platform.samePath(a, state);
   if (typeof opt.state === "string" && !same(opt.state)) fail(`${path.resolve(opt.state)} is not this repository's last run (${state})`);
   const runner = (not) => (p) => Boolean(p.state && same(p.state) && p.pid && p.pid !== not && alive(p.pid));
   const run = JSON.parse(read(path.join(state, "run.json")) || "{}");
@@ -1206,7 +1207,7 @@ async function doctor(opt) {
   const rows = [];
   const row = (verdict, what, text) => rows.push({ verdict, line: `  ${verdict.padEnd(4)}  ${what}: ${text}` });
   const real = (p) => { try { return fs.realpathSync.native(p); } catch { return path.resolve(p); } };
-  const same = (a, b) => (process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b);
+  const same = platform.samePath;
 
   // The skill: a whole copy, at the path whose files the guard protects.
   const installed = path.join(claudeHome(), "skills", "night-shift");

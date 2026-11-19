@@ -17,6 +17,7 @@ Exit: 0 ready, 1 not ready (timeout, a --fail line, the writer ended), 2 refused
 
 import fs from "node:fs";
 import path from "node:path";
+import { platform } from "./platform.mjs";
 
 const POLL_MS = 250;
 const refuse = (msg) => { console.error(`wait-for: ${msg}`); process.exit(2); };
@@ -36,9 +37,8 @@ function parse(argv) {
   return o;
 }
 
-const alive = (pid) => {
-  try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
-};
+// A process it may not signal still runs: a wait must not end early on one.
+const alive = (pid) => platform.alive(pid, { denied: true });
 const regex = (src, flag) => { try { return new RegExp(src); } catch (e) { refuse(`${flag} is not a valid regex: ${e.message}`); } };
 const clip = (s) => (s.length > 200 ? `${s.slice(0, 200)}…` : s);
 

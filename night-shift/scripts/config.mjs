@@ -14,6 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
+import { platform } from "./platform.mjs";
 
 // Whether node was started with the module whose import.meta this is, or imported it. import.meta.main
 // where Node has it (22.18, 24.2 on); else the real paths of process.argv[1] and the module compared,
@@ -29,36 +30,10 @@ export function isMain(meta, argv1 = process.argv[1], { unknown = false } = {}) 
   try { return same(fs.realpathSync.native(started), fs.realpathSync.native(self)); } catch { return unknown; }
 }
 
-// The temp folder in long form. %TEMP% is often written as an 8.3 short name (C:\Users\JOHNSM~1\…),
-// which the guard refuses in any path, so the tool's own temp paths all come from this one spelling.
-// A folder that cannot be resolved is kept as it is.
-export const tempRoot = () => {
-  const t = os.tmpdir();
-  try { return fs.realpathSync.native(t); } catch { return t; }
-};
-
-// A path the way Windows resolves it, so that two spellings of one file compare equal: one kind
-// of slash, lower case, an MSYS drive (/c/…) and \\?\C:\… as a drive path, Git Bash's /tmp as the
-// temp folder, . and .. resolved, and a segment's trailing dots and spaces dropped (Windows opens
-// "settings.json." as settings.json). The 2026-11-15 review wrote the guard itself through
-// C:/temp/../Users/….
-export const norm = (p) => {
-  let s = String(p || "").trim().replace(/^["']|["']$/g, "").replace(/\\/g, "/").toLowerCase();
-  s = s.replace(/^\/\/[?.]\/(?=[a-z]:)/, "");
-  const msys = /^\/([a-z])\//.exec(s);
-  if (msys) s = `${msys[1]}:/${s.slice(3)}`;
-  else if (process.platform === "win32" && /^\/tmp(\/|$)/.test(s)) s = `${tempRoot().replace(/\\/g, "/").toLowerCase()}${s.slice(4)}`;
-  const lead = /^\/{0,2}/.exec(s)[0].slice(0, 2);
-  const out = [];
-  for (const raw of s.slice(lead.length).split("/")) {
-    const seg = /^\.\.?$/.test(raw) ? raw : raw.replace(/[. ]+$/, "");
-    if (!seg || seg === ".") continue;
-    if (seg !== "..") out.push(seg);
-    else if (out.length && out.at(-1) !== "..") { if (!/^[a-z]:$/.test(out.at(-1))) out.pop(); }
-    else if (!lead) out.push(seg);
-  }
-  return lead + out.join("/");
-};
+// The temp folder in long form, and a path the way the system resolves it (platform.mjs, which says how): the
+// runner, the guard and the tests take both from here.
+export const tempRoot = platform.tempRoot;
+export const norm = platform.norm;
 const under = (p, root) => root && (p === root || p.startsWith(root + "/"));
 
 const isStr = (v) => typeof v === "string";
@@ -181,15 +156,12 @@ export function stateDirProblem(dir, { home = os.homedir(), repo = "", temp = te
   if (d.replace(/^\/\/|^[a-z]:/, "").split("/").filter(Boolean).length < 2) return "is a drive root or sits directly below one";
   // CLAUDE_CONFIG_DIR's folder, wherever it is (claudeHome); null when it is ~/.claude, which the lines below cover.
   const claude = home && env.CLAUDE_CONFIG_DIR ? claudeHome(home, env) : null;
-  for (const [name, p] of [["the home folder", home], ["the repository", repo], ["the temp folder", temp], ["C:/temp", "c:/temp"], ["the Claude folder", claude]]) {
+  for (const [name, p] of [["the home folder", home], ["the repository", repo], ["the temp folder", temp], ...platform.sharedTemps, ["the Claude folder", claude]]) {
     if (p && under(norm(p), d)) return `is, or holds, ${name}`;
   }
   if (repo && under(d, `${norm(repo)}/.git`)) return "is inside .git";
   if (home && under(d, `${norm(home)}/.claude`)) return "is inside ~/.claude";
   if (claude && under(d, norm(claude))) return "is inside the Claude folder (CLAUDE_CONFIG_DIR)";
-  // The guard lets a night session write into the state folder, so not where Windows runs things from:
-  // the Startup folder lives in AppData\Roaming, and the system's own folders hold programs.
-  if (home && under(d, `${norm(home)}/appdata`) && !under(d, norm(temp))) return "is inside AppData, outside the temp folder";
-  if (/^c:\/(windows|program files[^/]*|programdata)(\/|$)/.test(d)) return "is inside a system or program folder";
-  return null;
+  // The guard lets a night session write into the state folder, so not where the system runs things from.
+  return platform.systemDirProblem(d, { home, temp });
 }

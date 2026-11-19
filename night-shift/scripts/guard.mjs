@@ -11,9 +11,9 @@
 
 import { spawnSync } from "node:child_process";
 import { readFileSync, realpathSync, mkdtempSync, mkdirSync, symlinkSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { norm, readProjectConfig, stateDirProblem, tempRoot, isMain, mcpToolName } from "./config.mjs";
+import { platform } from "./platform.mjs";
 
 const under = (p, root) => root && (p === root || p.startsWith(root + "/"));
 
@@ -25,9 +25,8 @@ const RUNNER_FILES = /^(night-settings\.json|run\.json|launch\.cmd|resume\.json|
 // ~/.claude may be a link (a junction to a folder elsewhere): a shell write can then name the files the
 // guard protects there by the link's target, a spelling norm() cannot know (on 2026-11-18 `echo x >
 // <target>/settings.json` passed). Each spelling of the folder, the home one first.
-// The home as the file system resolves it: on Windows an MSYS drive (Git Bash's HOME, /c/Users/u) is a drive path.
-// Not norm(): it lowercases, and a case-sensitive file system resolves a path only as typed.
-const fsHome = (home) => (process.platform === "win32" ? String(home).replace(/^\/([a-zA-Z])(?=\/)/, "$1:") : String(home));
+// The home as the file system resolves it (platform.mjs: on Windows an MSYS drive is a drive path), not norm()'s.
+const { fsHome } = platform;
 // A folder named by CLAUDE_CONFIG_DIR is where Claude Code keeps them instead: one more spelling (with its own
 // link's target), so it is protected as ~/.claude is, and ~/.claude stays protected too.
 function claudeSpellings(home, configDir) {
@@ -47,7 +46,7 @@ const spellings = (p, r) => {
 };
 
 function roots(env) {
-  const home = norm(env.USERPROFILE || env.HOME || homedir());
+  const home = norm(platform.home(env));
   const repo = norm(env.NIGHT_SHIFT_REPO || "");
   // A state folder that is a drive, the home folder or the like (a typo in stateDir) would make
   // all of it writable: it adds nothing, and the runner refuses to start with one.
@@ -55,26 +54,16 @@ function roots(env) {
   return {
     repo,
     state,
-    writable: [
-      repo,
-      "c:/temp",
-      state,
-      norm(tempRoot()),
-      `${home}/appdata/local/temp`,
-    ].filter(Boolean),
+    // Besides these, the system's temp folders (platform.mjs).
+    writable: [repo, state, ...platform.tempRoots(home)].filter(Boolean),
     home,
-    claude: claudeSpellings(env.USERPROFILE || env.HOME || homedir(), env.CLAUDE_CONFIG_DIR),
+    claude: claudeSpellings(platform.home(env), env.CLAUDE_CONFIG_DIR),
   };
 }
 
-// Windows opens a path through a stream name (a.ts:x, .git::$INDEX_ALLOCATION) or an 8.3 short
-// name (SETTIN~1.JSO) as a file the rules below never named, so these are refused outright
-// rather than resolved. p is already normalized.
-export function oddPath(p) {
-  if (p.replace(/^[a-z]:(?=\/|$)/, "").includes(":")) return "an NTFS stream name";
-  if (p.split("/").some((s) => /~\d/.test(s))) return "a short (8.3) name";
-  return null;
-}
+// A path that names a file the rules below never named, by a stream or a short name (platform.mjs), is refused
+// outright rather than resolved. p is already normalized.
+export const oddPath = platform.oddPath;
 // PowerShell's own drives (Env:FOO, Alias:ll) are no files: the colon after their name is not a stream.
 const PS_DRIVE = /^(env|alias|variable|function):(?!:)/i;
 const oddReason = (p, shown) => {

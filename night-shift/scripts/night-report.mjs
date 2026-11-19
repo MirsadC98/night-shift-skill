@@ -28,6 +28,7 @@ import { sessionPlan, resolveMode, isPremium, modelName as familyName } from "./
 import { strings, langOf, loadLang } from "./lang/index.mjs";
 import { isMain, claudeHome, readGlobalConfig, globalConfigFile } from "./config.mjs";
 import { stopRun } from "./runs.mjs";
+import { platform } from "./platform.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 // A function: the runner sets CLAUDE_CONFIG_DIR from run.json after this module has loaded (claudeHome).
@@ -40,7 +41,7 @@ const WEIGHT = { input: 1, read: 0.1, write5m: 1.25, write1h: 2, output: 5 };
 const read = (f) => (fs.existsSync(f) ? fs.readFileSync(f, "utf8") : "");
 // A file caught half-written (or by a crash) reads as its default: the watcher must outlive it.
 const readJson = (f, dflt = {}) => { try { const v = JSON.parse(read(f)); return v && typeof v === "object" ? v : dflt; } catch { return dflt; } };
-const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const { alive } = platform;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jsonl = (f) => read(f).split("\n").flatMap((l) => { try { return l ? [JSON.parse(l)] : []; } catch { return []; } });
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
