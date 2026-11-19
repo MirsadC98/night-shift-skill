@@ -40,7 +40,9 @@
 //   node night-chain.mjs status --repo <dir>
 //   node night-chain.mjs wait   --repo <dir> [--state <dir>]  (returns once the chain is over: exit 0
 //                               with status's first lines and what waits for the user, 2 if it died;
-//                               it follows a reload, and a usage-limit wait does not end it)
+//                               it follows a reload, and a usage-limit wait does not end it; in an attended
+//                               run also on a new question in <state>/questions.md: exit 3 with the question
+//                               and how to answer, while the chain goes on; run it again to wait on)
 //   node night-chain.mjs stop   --repo <dir> [--now]
 //   node night-chain.mjs reload --repo <dir>       (a running chain takes up this code after
 //                                                   the session in progress, watcher included)
@@ -62,7 +64,7 @@ import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { buildReport, userWaits, stateLang } from "./night-report.mjs";
+import { buildReport, userWaits, stateLang, questionLines } from "./night-report.mjs";
 import { strings, langOf, loadLang } from "./lang/index.mjs";
 import { mergedConfig, isLangCode, MODES, CONFIG_KEYS, stateDirProblem, tempRoot, isMain, claudeHome } from "./config.mjs";
 import { sessionOutcome, windowSpan, fieldsGone } from "./session-outcome.mjs";
@@ -1014,14 +1016,15 @@ async function status(opt) {
 const pointerOr = (repo) => { try { return readPointer(repo); } catch { return null; } }; // mid-write
 
 // Resolves with the PowerShell's exit code once the process is gone; 3: the pid now belongs to a
-// program that is no runner (Windows reused it), so the runner is gone too.
-const exitOf = (pid) => new Promise((resolve, reject) => {
+// program that is no runner (Windows reused it), so the runner is gone too (not wait's own exit 3).
+// signal: aborting it kills the PowerShell and resolves "woken", so a wait woken by a question leaves none behind.
+const exitOf = (pid, signal) => new Promise((resolve, reject) => {
   const ps = spawn("powershell", ["-NoProfile", "-NonInteractive", "-Command",
     `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if (-not $p) { exit 0 }; ` +
     `$c = (Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine; ` +
     "if ($c -and $c -notmatch 'night-chain\\.mjs') { exit 3 }; $p.WaitForExit(); exit 0"],
-  { stdio: "ignore", windowsHide: true });
-  ps.on("error", reject);
+  { stdio: "ignore", windowsHide: true, signal });
+  ps.on("error", (e) => (e.name === "AbortError" ? resolve("woken") : reject(e)));
   ps.on("exit", resolve);
 });
 
@@ -1051,18 +1054,62 @@ async function waitChain(opt) {
   const run = JSON.parse(read(path.join(state, "run.json")) || "{}");
   const T = await readLang(stateLang(state, repo));
   const report = (head) => [...head, "", ...buildReport(state, { pid: 0 }).plain.split("\n\n").slice(0, 2).flatMap((b) => [b, ""])];
+  // C3 (B4 item 2, K7): an attended run's questions (questionLines). What a wait reported is kept by its text in
+  // <state>/wait.json, saved before it prints, so a waiter started again reports only what is new; one per state folder.
+  const markFile = path.join(state, "wait.json");
+  const reported = () => parseOr(read(markFile), {}).questions || [];
+  const unseen = () => (run.attended ? questionLines(state).filter((q) => !reported().includes(q)) : []);
+  // Through a rename, so a second waiter never reads half a file; a mark that cannot be saved only means that a question
+  // may be reported again, never that one is lost.
+  const keep = (qs) => {
+    if (!qs.length) return;
+    const tmp = `${markFile}.${process.pid}`;
+    try { fs.writeFileSync(tmp, JSON.stringify({ questions: [...reported(), ...qs] }, null, 2)); fs.renameSync(tmp, markFile); } catch {}
+  };
   const over = () => {
     const waits = userWaits(state);
+    const asked = unseen();
+    keep(asked);
     console.log([...report(statusHead(pointerOr(repo) || first, false, T)),
       T.cli.userWaits(waits), "",
+      ...(asked.length ? [T.cli.asked, ...asked, ""] : []),
       T.cli.reportLine(path.resolve(repo, run.report || "NIGHT_RUNS.md"), `node "${SELF}" status --repo "${repo}"`)].join("\n"));
   };
   const crashed = (why) => {
     const tail = read(path.join(state, "chain.log")).trim().split("\n").slice(-3).map((l) => `  ${l}`);
+    const asked = unseen();
+    keep(asked);
     console.log([...report([T.cli.crashed(why), T.cli.statusState(state)]), T.cli.logTail, ...tail, "",
+      ...(asked.length ? [T.cli.asked, ...asked, ""] : []),
       T.cli.resumeHint(`node "${SELF}" start --repo "${repo}" --state "${state}"`)].join("\n"));
     process.exitCode = 2;
   };
+
+  // The wake is armed for the whole wait, the runner's start and a hand-over included: a watch on the state folder (the
+  // file may not exist yet) and a poll beside it. It kills the PowerShell that waits for the runner and exits 3.
+  const stopWaiting = new AbortController();
+  if (run.attended && !first.finished) {
+    let woken = false;
+    // A chain that is down (its end logged, or the pointer's runner gone with no hand-over logged) does not go on:
+    // over() or crashed() lists what is left, never an exit 3 that says it goes on.
+    const down = () => {
+      const event = lastRunnerEvent(state), p = pointerOr(repo);
+      return event === "chain ends: " || Boolean(p?.pid && !alive(p.pid) && !event.startsWith("runner "));
+    };
+    const look = () => {
+      if (woken || down()) return;
+      const qs = unseen();
+      if (!qs.length) return;
+      woken = true;
+      keep(qs);
+      stopWaiting.abort();
+      // The exit waits for the text: a write to a pipe may still be pending.
+      process.stdout.write(`${[T.cli.asks, ...qs, "", T.cli.answerHint(path.join(state, "inbox.md"), `node "${SELF}" wait --repo "${repo}"`)].join("\n")}\n`, () => process.exit(3));
+    };
+    try { fs.watch(state, (ev, name) => { if (!name || name === "questions.md") look(); }).unref(); } catch {}
+    setInterval(look, 2_000).unref();
+    look();
+  }
 
   let pid = first.pid;
   if (!pid && !first.finished) {
@@ -1074,7 +1121,8 @@ async function waitChain(opt) {
   if (pid && alive(pid)) console.log(T.cli.waiting(pid, state));
   for (;;) {
     if (pid && alive(pid)) {
-      const code = await exitOf(pid).catch((e) => fail(`could not wait for runner pid ${pid}: ${e.message}`));
+      const code = await exitOf(pid, stopWaiting.signal).catch((e) => fail(`could not wait for runner pid ${pid}: ${e.message}`));
+      if (stopWaiting.signal.aborted) return; // woken by a question: its text is going out, and the exit follows it
       if (code !== 3 && alive(pid)) fail(`could not wait for runner pid ${pid} (PowerShell exit ${code})`);
     }
     let next = pointerOr(repo);

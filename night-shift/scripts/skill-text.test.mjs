@@ -140,3 +140,11 @@ test("the help, interactive.md and the README name --attended", { skip: !fs.exis
   }
   assert.match(fs.readFileSync(readmePath, "utf8"), /^- `attended`: /m);
 });
+// B4 item 2, K7: the starting chat's waiter wakes on a question, the chat writes the answer into the inbox, and Remote
+// Control is the phone path for a user without Telegram.
+test("interactive.md says what wait's exit 3 asks of the chat, and names Remote Control as the phone path", () => {
+  assert.match(interactive, /exit 3/);
+  assert.ok(interactive.includes("`A<n>: <answer>`") && interactive.includes("`<state>/inbox.md`"));
+  assert.match(interactive, /`\/remote-control`/);
+  assert.match(attended, /the starting chat's waiter wakes on it/);
+});

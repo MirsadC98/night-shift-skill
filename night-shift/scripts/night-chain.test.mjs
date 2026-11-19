@@ -2746,3 +2746,84 @@ test("an unattended run's header is as it was: the user is away, and no attended
   assert.ok(one.input.includes(`Mode: opus.\n${modeText("opus")}\nSkill folder: `));
   assert.ok(!one.input.includes("**Attended run.**"));
 });
+
+// C3 (B4 item 2, K7): in an attended run the starting chat's waiter wakes on a new question as well as at the chain's end.
+// It saves what it reported in <state>/wait.json, prints the new lines and how to answer, and exits 3; the chain goes on.
+test("wait wakes on an attended run's new question with exit 3 while the chain goes on, and the end lists what no wait reported", async () => {
+  const { repo, state, env, root } = setup();
+  const fake = path.join(root, "fake-ask.mjs");
+  fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path";
+const st = process.env.NIGHT_SHIFT_STATE; for await (const c of process.stdin);
+const q = path.join(st, "questions.md"), go = (n) => path.join(st, "go-" + n);
+const hold = async (n) => { for (let i = 0; i < 600 && !fs.existsSync(go(n)); i++) await new Promise((r) => setTimeout(r, 100)); };
+fs.appendFileSync(q, "Q1 · 10:12 · Push the branch? · yes: the suite passes · otherwise it stays local\\n");
+await hold(1);
+fs.appendFileSync(q, "Q2 · 10:20 · Merge it? · no · otherwise merged\\n");
+await hold(2);
+fs.appendFileSync(q, "Q3 · 10:30 · Tag it? · no · otherwise tagged\\n");
+fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done");
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-1", result: "ok" }));
+`);
+  const e = { ...env, NIGHT_SHIFT_CLAUDE: fake };
+  execFileSync(process.execPath, [CHAIN, "start", "--repo", repo, "--state", state, "--prompt", "first", "--attended"], { env: e, cwd: root, encoding: "utf8" });
+  const one = await waitFor(repo, e, root).done;
+  assert.equal(one.code, 3, one.out);
+  assert.match(one.out, /^The chain asks \(it goes on meanwhile\):\nQ1 · 10:12 · Push the branch\? · yes: the suite passes · otherwise it stays local$/m);
+  assert.ok(one.out.includes(`append a line A<n>: <answer> to ${path.join(state, "inbox.md")}`), one.out);
+  assert.match(one.out, new RegExp(`wait --repo "${lit(repo)}"`));
+  // A waiter started again reports only what is new; the chain still runs.
+  fs.writeFileSync(path.join(state, "go-1"), "");
+  const two = await waitFor(repo, e, root).done;
+  assert.equal(two.code, 3, two.out);
+  assert.doesNotMatch(two.out, /Q1 /);
+  assert.match(two.out, /^Q2 · 10:20 · Merge it\?/m);
+  assert.doesNotMatch(fs.readFileSync(path.join(state, "chain.log"), "utf8"), /chain ends: /);
+  // The last session's question, once the chain is over: the end lists it, without the answer line, and only once.
+  fs.writeFileSync(path.join(state, "go-2"), "");
+  // Started as soon as chain.log says the chain ended, maybe before the pointer does: never an exit 3 that says it goes on.
+  await waitForLog(state, /chain ends: /);
+  const three = await waitFor(repo, e, root).done;
+  assert.equal(three.code, 0, three.out);
+  assert.match(three.out, /^finished .*: STOP: done$/m);
+  assert.match(three.out, /^Questions the chain asked that no wait reported:\nQ3 · 10:30 · Tag it\?/m);
+  assert.doesNotMatch(three.out, /Q1 |Q2 |A<n>/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(state, "wait.json"), "utf8")).questions.map((l) => l.slice(0, 2)), ["Q1", "Q2", "Q3"]);
+  assert.doesNotMatch(execFileSync(process.execPath, [CHAIN, "wait", "--repo", repo], { env: e, cwd: root, encoding: "utf8" }), /Q3 /);
+});
+
+test("an unattended run's wait reads no questions.md", async () => {
+  const { repo, state, env, root } = setup();
+  const fake = path.join(root, "fake-ask-away.mjs");
+  fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path";
+const st = process.env.NIGHT_SHIFT_STATE; for await (const c of process.stdin);
+fs.appendFileSync(path.join(st, "questions.md"), "Q1 · 10:12 · Push? · yes · otherwise local\\n");
+fs.writeFileSync(path.join(st, "next-prompt.md"), "STOP: done");
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-1", result: "ok" }));
+`);
+  const e = { ...env, NIGHT_SHIFT_CLAUDE: fake };
+  startChain(repo, state, e, root);
+  const { code, out } = await waitFor(repo, e, root).done;
+  assert.equal(code, 0, out);
+  assert.doesNotMatch(out, /Q1 |The chain asks|Questions the chain asked/);
+  assert.equal(fs.existsSync(path.join(state, "wait.json")), false);
+});
+
+test("an attended chain whose runner died lists its unreported question with exit 2, never an exit 3 that says it goes on", async () => {
+  const { repo, state, env, root } = setup();
+  const fake = path.join(root, "fake-ask-crash.mjs");
+  fs.writeFileSync(fake, `import fs from "node:fs"; import path from "node:path";
+fs.appendFileSync(path.join(process.env.NIGHT_SHIFT_STATE, "questions.md"), "Q1 · 10:12 · Push? · yes · otherwise local\\n");
+process.kill(process.ppid);
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, session_id: "fake-1", result: "ok" }));
+`);
+  const e = { ...env, NIGHT_SHIFT_CLAUDE: fake };
+  execFileSync(process.execPath, [CHAIN, "start", "--repo", repo, "--state", state, "--prompt", "first", "--attended"], { env: e, cwd: root, encoding: "utf8" });
+  await waitForLog(state, /session 01 starts/);
+  for (let i = 0; i < 100 && !fs.existsSync(path.join(state, "questions.md")); i++) await sleep(100);
+  await sleep(500);
+  const { code, out } = await waitFor(repo, e, root).done;
+  assert.equal(code, 2, out);
+  assert.match(out, /^the chain crashed: /m);
+  assert.match(out, /^Questions the chain asked that no wait reported:\nQ1 · 10:12 · Push\?/m);
+  assert.doesNotMatch(out, /The chain asks/);
+});

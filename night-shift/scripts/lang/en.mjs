@@ -147,6 +147,10 @@ export default {
     waiting: (pid, state) => `waiting: runner pid ${pid} (${state})`,
     handedOver: (from, to) => `runner handed over: pid ${from} → ${to}`,
     userWaits: (lines) => (lines.length ? `Waiting for the user:\n${lines.join("\n")}` : "Waiting for the user: no items listed"),
+    // an attended run's questions (questions.md): wait's wake (exit 3), and the end's list of what no wait reported
+    asks: "The chain asks (it goes on meanwhile):",
+    answerHint: (inbox, cmd) => `Answer: append a line A<n>: <answer> to ${inbox}; the next session reads it first.\nWait again: ${cmd}`,
+    asked: "Questions the chain asked that no wait reported:",
     reportLine: (report, cmd) => `Report: ${report} · full status: ${cmd}`,
     crashed: (why) => `the chain crashed: ${why}`,
     logTail: "end of chain.log:",

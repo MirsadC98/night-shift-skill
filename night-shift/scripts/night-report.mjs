@@ -766,8 +766,8 @@ export async function notify(state, headline, opt = {}) {
 
 // C3 (2026-11-19): an attended run's questions, <state>/questions.md: the lines that open with "Q<n> · ", each once, in the
 // order written. A line counts once it ends in a newline, so one still being written, or cut off by stop --now, is not
-// read half. The watcher keeps what it sent by the line's text, not by a count: a line a session rewrote or removed then
-// neither hides a later question nor sends the rest again.
+// read half. The watcher and `wait` (night-chain.mjs) keep what they reported by the line's text, not by a count: a line a
+// session rewrote or removed then neither hides a later question nor reports the rest again.
 export function questionLines(state) {
   const lines = read(path.join(state, "questions.md")).replace(/\r\n/g, "\n").split("\n").slice(0, -1).map((l) => l.trimEnd());
   return [...new Set(lines.filter((l) => /^Q\d+ · /.test(l)))];
