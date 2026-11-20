@@ -14,6 +14,10 @@ A project's `.claude/night-shift-rules.md` is trusted like its `CLAUDE.md`, and 
 
 A language table (`~/.claude/night-shift/lang/<code>.mjs`, see the README's "Language") is a JavaScript module that the runner and the watcher import and run with your rights, as Claude Code runs a hook, so install only a table you wrote or have read; a night session cannot write it.
 
+## The dashboard
+
+The dashboard's files in a state folder (`dashboard.json`, `dashboard-data.js`, `dashboard.html`, an earlier chain's dated page, and their temporary names while they are written) are among the runner's own files, which the guard keeps a night session from writing or deleting, so a session cannot change the page you open. A session's text (a title, a commit subject, a prompt's first line) reaches the page as text, never as markup, and the data embedded in the page cannot close its script block. The page's `Content-Security-Policy` lets it load nothing from the network and send nothing anywhere; it reads only `dashboard-data.js` beside it. The data is not redacted: the README's "Dashboard" says what it holds before you share an `--out` copy.
+
 ## Reporting a bypass
 
 If you find a command or a path the guard should have refused and did not, report it privately: open a private security advisory on this repository (the Security tab, "Report a vulnerability"). Please do not open a public issue for it. Include the command or path, the guard's answer, and what it should have been.

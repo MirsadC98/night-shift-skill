@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { MODES } from "./config.mjs";
+import { demoData } from "./dashboard.mjs";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const skill = fs.readFileSync(path.join(root, "SKILL.md"), "utf8");
@@ -201,6 +202,26 @@ test("the help, interactive.md and the README name doctor, and the help and the 
   assert.match(readme, /`<!--` and `-->`/, "README: a rule file's comments");
 });
 
+// The dashboard: named where a user or the starting chat looks for the runner's commands; the README says what it
+// writes, how far it is measured and what the data file holds, SECURITY.md what keeps the page safe, CONTRIBUTING.md how
+// the README's image is taken.
+test("the help, interactive.md and the README name the dashboard, and the README what it writes", { skip: !fs.existsSync(readmePath) && "no README beside this copy" }, () => {
+  const help = fs.readFileSync(path.join(root, "scripts", "night-chain.mjs"), "utf8"), readme = fs.readFileSync(readmePath, "utf8").replace(/\r\n/g, "\n");
+  for (const [name, t] of [["night-chain.mjs", help], ["interactive.md", interactive], ["README.md", readme]]) assert.ok(t.includes("night-chain.mjs dashboard"), `${name}: dashboard`);
+  assert.ok(readme.includes("\n## Dashboard\n"), "README: a Dashboard section");
+  const part = readme.slice(readme.indexOf("\n## Dashboard\n"), readme.indexOf("\n## The guard\n"));
+  for (const w of ["dashboard.json", "dashboard-data.js", "dashboard.html", "--demo", "--out", "--state", "no server", "Chromium", "before 1.0"]) {
+    assert.ok(part.includes(w), `README's Dashboard: ${w}`);
+  }
+  for (const key of Object.keys(demoData())) assert.ok(part.includes(`\`${key}\``), `README's Dashboard: the key ${key}`);
+  const security = fs.readFileSync(path.join(root, "..", "SECURITY.md"), "utf8");
+  for (const w of ["Content-Security-Policy", "dashboard.json"]) assert.ok(security.includes(w), `SECURITY.md: ${w}`);
+  const changelog = fs.readFileSync(path.join(root, "..", "CHANGELOG.md"), "utf8").replace(/\r\n/g, "\n");
+  const from = changelog.indexOf("\n## 0.3.0"), current = changelog.slice(from, changelog.indexOf("\n## ", from + 1));
+  assert.match(current, /dashboard/, "CHANGELOG: 0.3.0 names the dashboard");
+  assert.match(fs.readFileSync(path.join(root, "..", "CONTRIBUTING.md"), "utf8"), /dashboard --demo/, "CONTRIBUTING.md: the README's image");
+});
+
 // C4: CI runs the suite and the guard's self-test on Windows, the gate, on the oldest Node package.json's engines allows
 // and the newest LTS; macOS and Linux run them too but do not fail the workflow until the code has a seam for what
 // differs by system. README says which.
@@ -292,7 +313,7 @@ test("examples/ holds a roadmap, a first prompt and a rules file README links, t
 // the old opening said about how a chain runs is said once, under "Use".
 test("README opens with what the skill is for, then the warnings and a five-step quick start", { skip: !fs.existsSync(readmePath) && "no README beside this copy" }, () => {
   const readme = fs.readFileSync(readmePath, "utf8").replace(/\r\n/g, "\n");
-  assert.deepEqual(readme.match(/^## .*/gm), ["## Read this first", "## Quick start", "## Requirements", "## Install", "## Use", "## The guard",
+  assert.deepEqual(readme.match(/^## .*/gm), ["## Read this first", "## Quick start", "## Requirements", "## Install", "## Use", "## Dashboard", "## The guard",
     "## When a session fails", "## Telegram and webhooks (optional)", "## Tests", "## Versions", "## License"]);
   const opening = readme.slice(0, readme.indexOf("\n## "));
   for (const w of ["a plan", "a goal", "overnight", "a day", "`--attended`", "phone", "guard"]) assert.ok(opening.includes(w), `the opening: ${w}`);

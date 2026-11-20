@@ -24,6 +24,10 @@ Both must pass on Windows before a change is merged. CI runs them on every push 
 - **No private data.** Tests and fixtures use made-up names and ids (`demo-app`, `00000000-0000-4000-8000-000000000001`), never a real user's name, path, session id or token.
 - **The version.** `night-shift/scripts/version.mjs` holds it; `package.json`, `.claude-plugin/plugin.json` and `CHANGELOG.md` name it too, and a test checks that they agree. Add what your change brings under the changelog's unreleased part.
 
+## The dashboard's image
+
+The README's picture of the dashboard is the demo page: run `node night-shift/scripts/night-chain.mjs dashboard --demo --no-open --out <file>`, open the file in a Chromium browser (Edge, Chrome) at 1280 pixels wide, and take it once in light and once in dark (the page follows the system's or the browser's color scheme). Take it again when the page's look changes. The demo's data (`night-shift/assets/dashboard-demo.json`) is made up, every name and number in it, and stays so; a test compares its keys with the data a run builds, so a change to the data's shape changes the demo too.
+
 ## Reporting a bug
 
 Open an issue with the bug report form: it asks for `night-chain.mjs --version` and `doctor`'s output, which answer most first questions. A security problem goes by [SECURITY.md](SECURITY.md) instead, not a public issue.
