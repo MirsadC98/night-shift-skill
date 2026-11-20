@@ -277,6 +277,8 @@ export default {
     logNone: "Nothing logged yet.",
     logDown: "Nothing ran for {dur}, until {time}",
     logNote: "You left a note for session {n}",
+    // a line's kind, on a badge (yourNote is one too): the badge column is as wide as the longest of them, and a
+    // label of more than about 20 letters is cut with an ellipsis
     kindStart: "start",
     kindReload: "reload",
     kindLimit: "limit",

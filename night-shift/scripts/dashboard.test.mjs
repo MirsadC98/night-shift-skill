@@ -838,6 +838,17 @@ test("a run in another language carries both sets", async () => {
   assert.deepEqual(l.sets.xx.words, { ...en.dash, waitsHead: "xx·waits for you", stateRunning: "xx·running" });
 });
 
+test("the chain log's badge column fits its longest label", () => {
+  // 2026-11-20: each line was a grid of its own with a 68px badge column, and "yeniden yükleme" (reload, in the
+  // user's Turkish) read "yeniden …". The list is the grid now and its lines share its columns, so the badge column
+  // grows to the longest label there, never under the old width; a badge stops at 150px, where its ellipsis shows.
+  const css = /<style>([\s\S]*?)<\/style>/.exec(template())[1];
+  const rule = (selector) => css.split("\n").find((l) => l.startsWith(`${selector} {`)) ?? "";
+  assert.match(rule(".log ol"), /display: grid; grid-template-columns: 40px minmax\(68px, max-content\) minmax\(0, 1fr\); column-gap: 8px; align-content: start;/);
+  assert.match(rule(".log li"), /display: grid; grid-column: 1 \/ -1; grid-template-columns: subgrid;/);
+  assert.match(rule(".kind"), /max-width: 150px;.*text-overflow: ellipsis;/);
+});
+
 test("a limit span's two ends are both percentages", () => {
   // 2026-11-20: {a} was the bare number and {b} a percentage, "5 h 12 → 31%" in English and "5s 12 → %31" in Turkish
   for (const [key, field] of [["span5", "h5"], ["span7", "d7"]]) {
