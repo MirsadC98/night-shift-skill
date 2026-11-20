@@ -2404,7 +2404,7 @@ test("doctor names each check that fails, with start's own messages, and exits 1
 
 test("doctor runs the guard as the hook the runner writes, and finds a broken one and an incomplete copy of the skill", () => {
   const skill = path.dirname(path.dirname(CHAIN)), copy = fs.mkdtempSync(path.join(tempRoot(), "night-skill-copy-"));
-  for (const d of ["scripts", "references"]) fs.cpSync(path.join(skill, d), path.join(copy, d), { recursive: true });
+  for (const d of ["scripts", "references", "assets"]) fs.cpSync(path.join(skill, d), path.join(copy, d), { recursive: true });
   // A guard that allows every call and fails its self-test.
   fs.writeFileSync(path.join(copy, "scripts", "guard.mjs"), 'if (process.argv.includes("--self-test")) { console.log("1 of 1 failed"); process.exitCode = 1; }\n');
   const c = pointerCase();
@@ -3906,4 +3906,105 @@ test("start warns when a worktree run's new prompt names the main tree, in its s
   }
   assert.ok(!(await go("fix src/a.js")).includes(warning), "a relative path");
   assert.ok(!(await go(`fix ${path.join(s.repo, "src")}`, ["--worktree", "false"])).includes("the prompt names"), "no worktree");
+});
+
+// ---------------------------------------------------------------- the dashboard command
+// Every run here passes --no-open: no test opens a browser.
+const DASH_FILES = ["dashboard.json", "dashboard-data.js", "dashboard.html"];
+const dashFiles = (state) => DASH_FILES.filter((f) => fs.existsSync(path.join(state, f)));
+// The data a page carries, as the page reads it.
+const pageData = (file) => JSON.parse(/<script type="application\/json" id="chain-data">(.*?)<\/script>/s.exec(fs.readFileSync(file, "utf8"))[1]);
+
+test("dashboard builds a run's page and says where", () => {
+  const c = finishedRun("en");
+  const r = c.run("dashboard", ["--no-open"]);
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.split("\n");
+  assert.equal(lines[0], `dashboard: ${path.join(c.state, "dashboard.html")}`);
+  assert.match(lines[1], /^not live: the run is ended; this page is its last state$/);
+  assert.deepEqual(dashFiles(c.state), DASH_FILES);
+  assert.equal(pageData(path.join(c.state, "dashboard.html")).chain.state, "ended");
+});
+
+test("dashboard --state takes a folder from before the dashboard", () => {
+  const c = pointerCase();
+  const dir = fs.mkdtempSync(path.join(tempRoot(), "night-dash-state-"));
+  fs.writeFileSync(path.join(dir, "run.json"), JSON.stringify({ repo: c.repo, lang: "en", startedAt: "2026-11-16 03:00:00" }));
+  fs.writeFileSync(path.join(dir, "chain.log"), "[2026-11-16 03:00:00] chain starts\n[2026-11-16 03:30:00] chain ends: STOP: done\n");
+  const r = c.run("dashboard", ["--state", dir, "--no-open"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.split("\n")[0], `dashboard: ${path.join(dir, "dashboard.html")}`);
+  assert.deepEqual(dashFiles(dir), DASH_FILES);
+  assert.deepEqual(dashFiles(c.state), [], "the repository's own run is not touched");
+});
+
+test("dashboard --state on a folder that holds no run says so", () => {
+  const c = pointerCase();
+  const dir = fs.mkdtempSync(path.join(tempRoot(), "night-dash-empty-"));
+  const r = c.run("dashboard", ["--state", dir, "--no-open"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /holds no run\.json/);
+  assert.deepEqual(dashFiles(dir), []);
+});
+
+test("dashboard --out writes a copy that stands alone", () => {
+  const c = finishedRun("en");
+  const out = path.join(path.dirname(c.state), "out ü & co", "run page.html");
+  const r = c.run("dashboard", ["--no-open", "--out", out]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(pageData(out), pageData(path.join(c.state, "dashboard.html")));
+  assert.match(r.stdout, new RegExp(`^copy: {6}${lit(out)}$`, "m"));
+});
+
+test("dashboard --demo reads no run", () => {
+  const c = pointerCase();
+  const root = path.dirname(c.state);
+  const out = path.join(root, "demo page.html");
+  const r = c.run("dashboard", ["--demo", "--no-open", "--out", out]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(fs.readFileSync(out, "utf8"), /"demo":true/);
+  assert.deepEqual(r.stdout.split("\n").filter(Boolean), [`dashboard: ${out}`]);
+  // Without --out, in a folder of its own under the temp root (the run's TEMP is the test's root).
+  const d = c.run("dashboard", ["--demo", "--no-open"]);
+  assert.equal(d.status, 0, d.stderr);
+  const page = d.stdout.split("\n")[0].replace(/^dashboard: /, "");
+  assert.equal(path.basename(path.dirname(page)), "night-shift-dashboard-demo");
+  assert.match(fs.readFileSync(page, "utf8"), /"demo":true/);
+  const written = [root, c.home].flatMap((dir) => fs.readdirSync(dir, { recursive: true })).filter((f) => path.basename(String(f)) === "dashboard.json");
+  assert.deepEqual(written, []);
+});
+
+test("dashboard with no run points to the demo", () => {
+  const c = pointerCase();
+  const r = c.run("dashboard", ["--no-open"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^no night-shift run recorded for this repository\nno run to show yet: `dashboard --demo` opens the page with made-up data\n$/);
+});
+
+test("status names the page once it is there", () => {
+  const c = finishedRun("en");
+  const before = c.run("status");
+  assert.equal(before.status, 0, before.stderr);
+  assert.doesNotMatch(before.stdout, /^dashboard: /m);
+  assert.match(before.stdout, /^finished 2026-11-16 03:30:00: STOP: done\nstate: [^\n]*\n(?!dashboard)/);
+  fs.writeFileSync(path.join(c.state, "dashboard.html"), "<!doctype html>");
+  const lines = c.run("status").stdout.split("\n");
+  assert.match(lines[1], /^state: /);
+  assert.equal(lines[2], `dashboard: ${path.join(c.state, "dashboard.html")}`);
+});
+
+test("start names the dashboard command", async () => {
+  assert.match(await startPrints(() => {}), /^ {2}dashboard: node ".*night-chain\.mjs" dashboard --repo ".*"$/m);
+});
+
+test("doctor misses a dashboard file", () => {
+  const skill = path.dirname(path.dirname(CHAIN)), copy = fs.mkdtempSync(path.join(tempRoot(), "night-skill-copy-"));
+  fs.cpSync(skill, copy, { recursive: true });
+  fs.rmSync(path.join(copy, "assets", "dashboard.html"));
+  const c = pointerCase();
+  const r = c.run("doctor", [], {}, path.join(copy, "scripts", "night-chain.mjs"));
+  assert.match(doctorLine(r.stdout, "FAIL", "skill")[0], /lacks assets\/dashboard\.html; copy the whole skill folder again$/);
+  fs.rmSync(path.join(copy, "scripts", "dashboard.mjs"));
+  assert.match(doctorLine(c.run("doctor", [], {}, path.join(copy, "scripts", "night-chain.mjs")).stdout, "FAIL", "skill")[0],
+    /lacks assets\/dashboard\.html, scripts\/dashboard\.mjs; /);
 });

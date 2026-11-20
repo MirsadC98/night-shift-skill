@@ -374,6 +374,26 @@ test("keepAwake off Windows: caffeinate on macOS, systemd-inhibit around a kill 
   assert.doesNotThrow(() => child.emit("error", new Error("spawn powershell ENOENT")));
 });
 
+test("openFile hands the path over as one argument", () => {
+  const file = "C:\\Users\\a b\\x & y ü's\\dashboard.html";
+  const { p, calls, child } = recorder();
+  assert.equal(p.openFile(file), true);
+  assert.deepEqual(calls, [["powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `Invoke-Item -LiteralPath ${p.psQuote(file)}`],
+    { detached: true, stdio: "ignore", windowsHide: true }]]);
+  assert.equal(calls[0][1][3], "Invoke-Item -LiteralPath 'C:\\Users\\a b\\x & y ü''s\\dashboard.html'");
+  assert.doesNotThrow(() => child.emit("error", new Error("spawn powershell.exe ENOENT")));
+  for (const [name, opener] of [["darwin", "open"], ["linux", "xdg-open"]]) {
+    const R = posixRec(name), f = "/home/u/a b/x & y ü/dashboard.html";
+    assert.equal(R.p.openFile(f), true);
+    assert.deepEqual(R.calls, [[opener, [f], { detached: true, stdio: "ignore", windowsHide: true }]]);
+    assert.doesNotThrow(() => R.children[0].emit("error", new Error(`spawn ${opener} ENOENT`)));
+  }
+  for (const name of ["win32", "darwin", "linux"]) {
+    const broken = platformFor(name, { spawn: () => { throw new Error("EPERM"); } });
+    assert.equal(broken.openFile(file), false, name);
+  }
+});
+
 test("waitExit off Windows polls alive: 0 once gone, 3 when the pid runs another program, \"woken\" on an abort", async () => {
   let up = true;
   const L = posixRec("linux", { files: { "/proc/42/cmdline": `node${NUL}/s/Night-Chain.mjs${NUL}run` },

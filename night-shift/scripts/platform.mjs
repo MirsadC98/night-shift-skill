@@ -23,6 +23,8 @@
 //   waitExit(pid, { signal, unless })  0 once pid is gone, 3 when its command line does not match unless, "woken" on abort
 //   cliCandidates(nodeDir), cliName    where Claude Code's CLI is looked for, after NIGHT_SHIFT_CLAUDE, and its file's name
 //   psQuote(s)                         a PowerShell single-quoted string
+//   openFile(file)                     opens a file in the program the system gives its kind (a page: the browser); false
+//                                      when no opener could start
 //   schedule({ task, node, script, args, window, state, title })  starts node script args detached, outside the
 //                                      editor and the shell that ran it, and returns what started it (the task's name,
 //                                      or "detached" off Windows)
@@ -53,7 +55,7 @@ export function platformFor(name = process.platform, deps = {}) {
   const writeFile = deps.writeFileSync || fs.writeFileSync;
   const readFile = deps.readFileSync || fs.readFileSync;
   const readDir = deps.readdirSync || fs.readdirSync;
-  const openFile = deps.openSync || fs.openSync;
+  const openFd = deps.openSync || fs.openSync;
   const closeFile = deps.closeSync || fs.closeSync;
   const env = () => deps.env || process.env;
   const self = deps.pid ?? process.pid;
@@ -299,7 +301,7 @@ export function platformFor(name = process.platform, deps = {}) {
   const schedule = ({ task, node, script, args, window = false, state, title = "" }) => {
     if (!win) {
       const e = Object.fromEntries(Object.entries(env()).filter(([k]) => !SESSION_MARKS.test(k)));
-      const err = openFile(pp.join(state, "runner.err"), "a");
+      const err = openFd(pp.join(state, "runner.err"), "a");
       try {
         const child = start(node, [script, ...args], { detached: true, stdio: ["ignore", "ignore", err], env: e });
         child.on("error", () => {});
@@ -323,8 +325,23 @@ export function platformFor(name = process.platform, deps = {}) {
     return task;
   };
 
+  // The system's own opener, detached and with its output ignored: Windows' Invoke-Item in a hidden PowerShell, with
+  // the path as a quoted literal and no cmd line built from it; macOS' open; elsewhere xdg-open, the path as their one
+  // argument. True once the opener was started, false when starting it threw; one the system lacks (xdg-open on a
+  // server) emits an error later, swallowed here.
+  const openFile = (file) => {
+    try {
+      const child = win ? start("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `Invoke-Item -LiteralPath ${psQuote(file)}`],
+        { detached: true, stdio: "ignore", windowsHide: true })
+        : start(name === "darwin" ? "open" : "xdg-open", [String(file)], { detached: true, stdio: "ignore", windowsHide: true });
+      child.on("error", () => {});
+      child.unref?.();
+      return true;
+    } catch { return false; }
+  };
+
   return { name, path: pp, realpath, tempRoot, norm, fold, samePath, isAbsolute, fsHome, home, oddPath, tempRoots, sharedTemps, systemDirProblem, alive,
-    commandLine, killTree, keepAwake, waitExit, cliName, cliCandidates, psQuote, schedule };
+    commandLine, killTree, keepAwake, waitExit, cliName, cliCandidates, psQuote, schedule, openFile };
 }
 
 export const platform = platformFor();

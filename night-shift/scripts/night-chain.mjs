@@ -51,6 +51,9 @@
 //    (one that wrote no result line, killed or crashed, at what its transcript is priced at);
 //    at or over 90% of the five-hour window a session waits for its reset)
 //   node night-chain.mjs status --repo <dir>
+//   node night-chain.mjs dashboard [--repo <dir>] [--state <dir>] [--out <file>] [--no-open] [--demo]
+//                               (writes the run's dashboard into its state folder and opens its page, which updates
+//                               itself while the run works; --out also a copy, --demo made-up data; no network, no model)
 //   node night-chain.mjs wait   --repo <dir> [--state <dir>]  (returns once the chain is over: exit 0
 //                               with status's first lines and what waits for the user, 2 if it died;
 //                               it follows a reload, and a usage-limit wait does not end it; in an attended
@@ -486,7 +489,8 @@ const HANDOVER_MS = 180_000;
 const guardHook = () => ({ type: "command", command: NODE, args: [GUARD], timeout: 15, onFailure: "block" });
 // What a copy of the skill needs beside this script (a copy of scripts/ alone lacks the texts the runner reads).
 const SKILL_FILES = ["SKILL.md", ...MODES.map((m) => `references/mode-${m}.md`), "references/goal.md", "references/attended.md",
-  "references/interactive.md", "scripts/guard.mjs", "scripts/night-report.mjs", "scripts/hide-windows.cjs"];
+  "references/interactive.md", "scripts/guard.mjs", "scripts/night-report.mjs", "scripts/hide-windows.cjs",
+  "assets/dashboard.html", "assets/dashboard-demo.json", "scripts/dashboard.mjs"];
 // Where a listed MCP server came from, for start's line, and where one is looked for (mcp.mjs).
 const MCP_SOURCE = { local: () => "yours, this repository only", project: () => "this repository's .mcp.json", user: () => "yours",
   plugin: (name) => `plugin ${name.split(":")[1]}` };
@@ -727,6 +731,7 @@ async function start(opt) {
   if (mcpFound?.found.length) console.log(`  mcp:    ${mcpFound.found.map((f) => `${f.name} (${MCP_SOURCE[f.source](f.name)})`).join(", ")}; no other server starts`);
   else if (cfg.mcp === "inherit") console.log("  mcp:    inherit: every MCP server you have starts in each session, and the guard lets all their tools through");
   console.log(`  status: node "${SELF}" status --repo "${repo}"`);
+  console.log(`  dashboard: node "${SELF}" dashboard --repo "${repo}"`);
   console.log(`  stop:   node "${SELF}" stop --repo "${repo}" [--now]`);
 }
 
@@ -1265,8 +1270,56 @@ async function status(opt) {
   if (!ptr) return console.log((await readLang(langOf({ repo }))).cli.noRun);
   const running = !ptr.finished && isRunner(ptr.pid);
   const T = await readLang(stateLang(ptr.state, repo));
-  console.log(`${[...statusHead(ptr, running, T, repo), ...ruleLines(ruleStatus(repo))].join("\n")}\n`);
+  // The page once a watcher or the dashboard command wrote it; an older run's folder has none, and says nothing of it.
+  const page = path.join(ptr.state, "dashboard.html");
+  const pageLine = fs.existsSync(page) ? [T.cli.dashboardAt(page)] : [];
+  console.log(`${[...statusHead(ptr, running, T, repo), ...pageLine, ...ruleLines(ruleStatus(repo))].join("\n")}\n`);
   console.log(buildReport(ptr.state, { focus: "all", pid: running ? ptr.pid : 0 }).plain);
+}
+
+// dashboard: brings a run's dashboard files in its state folder up to date and opens its page; --out also writes a
+// copy, --demo the page of the made-up run that ships with the skill and reads no run. The run is --state's folder or
+// the repository's last one, as status finds it. dashboard.mjs is loaded here only, with import(), so that a
+// dashboard that does not load breaks this command and nothing else. A browser that does not open is no error: the
+// path is printed either way.
+async function dashboard(opt) {
+  for (const k of ["state", "out", "repo"]) if (opt[k] === true) fail(`--${k} wants a value`);
+  const D = await import("./dashboard.mjs");
+  const out = typeof opt.out === "string" ? path.resolve(opt.out) : null;
+  const put = (file, text) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text); };
+  const open = (file) => { if (!opt["no-open"]) platform.openFile(file); };
+  if (opt.demo) {
+    // English first, and the user's configured language beside it when its table loads (labelsFor leaves out one
+    // that did not), so that someone writing a table sees their words on a whole page.
+    const code = langOf({ repo: gitRoot(opt.repo || process.cwd(), true) || undefined });
+    const T = await readLang(code);
+    const file = out || path.join(tempRoot(), "night-shift-dashboard-demo", D.FILES.page);
+    put(file, D.pageHtml(D.demoData(), D.labelsFor("en", { also: code })));
+    console.log(T.cli.dashboardAt(file));
+    return open(file);
+  }
+  const repo = typeof opt.state === "string" ? null : chainRepo(opt.repo || process.cwd());
+  const ptr = repo ? readPointer(repo) : null;
+  if (repo && !ptr) {
+    const T = await readLang(langOf({ repo }));
+    return console.log(`${T.cli.noRun}\n${T.cli.dashboardDemoHint}`);
+  }
+  const state = path.resolve(repo ? ptr.state : opt.state);
+  const runFile = path.join(state, "run.json");
+  if (!fs.existsSync(runFile)) fail(`${state} holds no run.json, so it is no night-shift run's state folder`);
+  const T = await readLang(stateLang(state, repo ?? undefined));
+  let built;
+  try { built = await D.refresh(state, { page: true, force: true, alive: isRunner }); }
+  catch (e) { fail(`the dashboard of ${state} could not be built: ${e.message}`); }
+  const { data, file } = built;
+  const lines = [T.cli.dashboardAt(file), ["ended", "gone"].includes(data.chain.state) ? T.cli.dashboardStill(data.chain.state) : T.cli.dashboardLive];
+  if (out) {
+    // The words refresh gave the state folder's page: the run.json's language.
+    put(out, D.pageHtml(data, D.labelsFor(langOf(parseOr(read(runFile), {})))));
+    lines.push(T.cli.dashboardCopy(out));
+  }
+  console.log(lines.join("\n"));
+  open(file);
 }
 
 // wait: for an interactive session that runs it in the background and tells the user when the
@@ -1620,7 +1673,7 @@ function init(opt) {
 
 // Only as a command: night-chain.test.mjs imports cutOffSession.
 const opt = parseArgs(process.argv.slice(2));
-const commands = { start, run: runChain, status, wait: waitChain, stop, reload, doctor, init, "--version": () => console.log(`night-shift ${VERSION}`) };
+const commands = { start, run: runChain, status, dashboard, wait: waitChain, stop, reload, doctor, init, "--version": () => console.log(`night-shift ${VERSION}`) };
 if (!isMain(import.meta)) { /* imported */ }
 else if (commands[opt.cmd]) await commands[opt.cmd](opt);
 else {

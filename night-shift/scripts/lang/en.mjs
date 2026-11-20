@@ -381,5 +381,11 @@ export default {
     neverStarted: (min) => `the runner did not start in ${min} minutes (the Task Scheduler task did not run)`,
     handoverLost: (pid, min) => `runner ${pid} handed over but no new runner started in ${min} minutes`,
     diedNoEnd: (pid) => `runner (pid ${pid}) closed without writing an end line`,
+    // `dashboard`, and status's line once the page is there; state is the data's chain.state (ended, gone)
+    dashboardAt: (file) => `dashboard: ${file}`,
+    dashboardLive: "live: the page updates itself while the run works",
+    dashboardStill: (state) => `not live: the run is ${state}; this page is its last state`,
+    dashboardCopy: (file) => `copy:      ${file}`,
+    dashboardDemoHint: "no run to show yet: `dashboard --demo` opens the page with made-up data",
   },
 };
