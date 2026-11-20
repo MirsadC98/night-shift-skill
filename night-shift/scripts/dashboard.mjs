@@ -6,7 +6,12 @@
 // (run-read.mjs holds the readers they share).
 import fs from "node:fs";
 import path from "node:path";
-import { when, LOG, parseSession, transcriptBase } from "./run-read.mjs";
+import { read, readJson, when, LOG, parseSession, transcriptBase, chainEvents, pointerOf, git, unitPrices, priced, reportCommit, stopWaits, questionLines } from "./run-read.mjs";
+import { reportSection } from "./telegram-cards.mjs";
+import { workTree } from "./runs.mjs";
+import { strings, langOf } from "./lang/index.mjs";
+import { platform } from "./platform.mjs";
+import { VERSION } from "./version.mjs";
 
 const cut = (s, n = 160) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 const cents = (x) => Math.round(x * 100) / 100;
@@ -25,7 +30,7 @@ const RESUME_WHY = [[/where the last runner stopped/, "stopped"], [/after the er
 // start, resume (after a usage limit, an error or a runner that stopped) or retry (the number started again). An attempt
 // that a new runner's "chain starts" finds open was cut off: its end is not known from the log.
 export function readChain(events, { since = null } = {}) {
-  const sessions = new Map(), out = [], limits = [];
+  const sessions = new Map(), out = [], limits = [], waits = [];
   let started = null, firstLine = null, lastLine = null, endLine = null, wait = null, open = null;
   const session = (n) => {
     if (!sessions.has(n)) sessions.set(n, { n, title: null, model: null, effort: null, attempts: [] });
@@ -96,6 +101,7 @@ export function readChain(events, { since = null } = {}) {
       event(t, "limit", text);
     } else if ((m = /^usage limit: waiting until (\S+ \S+)/.exec(text)) || (m = /^five-hour window at .*: the next session starts when it resets (\S+ \S+)/.exec(text))) {
       wait = { until: stampOf(m[1]), text };
+      waits.push({ t, text });
       event(t, "limit", text);
     } else if (text.startsWith("runner reloads")) event(t, "reload", text);
     else if (text.startsWith(LOG.chainEnds)) {
@@ -110,6 +116,7 @@ export function readChain(events, { since = null } = {}) {
     events: out,
     limits,
     wait,
+    waits,
     lastLine,
   };
 }
@@ -268,5 +275,162 @@ export function sessionBlock(state, n) {
     lastSeen: f.stream ? Math.max(f.stream.mtime, f.main?.mtime ?? 0, f.tree.newest) : null,
     windows: windowsOf(p.entries),
     src: { v: CACHE_VERSION, sid: f.sid, base: f.base, sig: f.sig, beats: [...spans.values()].sort((a, b) => a - b) },
+  };
+}
+
+// ---------------------------------------------------------------- the data
+export const SCHEMA = 1;
+const MIN = 60_000;
+const pad2 = (n) => String(n).padStart(2, "0");
+const localStamp = (ms) => new Date(ms).toLocaleString("sv-SE");
+const finite = (x) => (Number.isFinite(x) ? x : null);
+const asRead = (r) => ({ model: r.model, cost: r.usd || 0, usage: { units: r.units } });
+const listItem = (l) => l.replace(/^\s*(?:[-*] |\d+\. )/, "").trim();
+// A prompt's or an inbox note's first line that says something: a MODEL: or EFFORT: line is the runner's, a heading's
+// marks go.
+function firstLine(text) {
+  for (const l of text.split(/\r?\n/)) {
+    const t = l.trim();
+    if (t && !/^(MODEL|EFFORT):/i.test(t)) return cut(t.replace(/^#+\s*/, ""), 140);
+  }
+  return "";
+}
+
+// The commits of a work tree between two times (epoch ms; until null: up to now), [{ h, t, s }]. Local time, as the
+// cards pass a session's span to git log; none without a tree, a repository or git.
+export function gitLog(tree, since, until) {
+  if (!tree || since == null) return [];
+  const out = git(tree, ["log", `--since=${localStamp(since)}`, ...(until != null ? [`--until=${localStamp(until)}`] : []), "--format=%h%x09%ct%x09%s"], { timeout: 10_000 });
+  return out.split("\n").flatMap((l) => {
+    const [h, ct, ...s] = l.split("\t");
+    return h && /^\d+$/.test(ct ?? "") ? [{ h, t: Number(ct) * 1000, s: s.join("\t") }] : [];
+  });
+}
+
+// A state folder as the dashboard's data (schema 1). now: the clock; prev: the last data, whose session blocks are
+// kept while their files have not changed; pointer: the run's pointer or null; alive: the check of a pid; readBlock and
+// gitLog: the readers, injected in tests. A source that is missing gives its empty value: it never throws for a
+// folder that holds a run.json.
+export function buildData(state, { now = Date.now(), prev = null, pointer = pointerOf(state), alive = platform.alive, readBlock = sessionBlock, gitLog: commitsOf = gitLog } = {}) {
+  const run = readJson(path.join(state, "run.json"));
+  const lang = langOf(run), T = strings(lang);
+  const since = run.chainStartedAt ? finite(stampOf(run.chainStartedAt)) : null;
+  const c = readChain(chainEvents(state), { since });
+
+  // Each session's block: the earlier one while its files' signature is the same, else read again.
+  const cached = prev && typeof prev === "object" && prev.schema === SCHEMA && Array.isArray(prev.sessions) ? new Map(prev.sessions.map((s) => [s.n, s])) : new Map();
+  const xs = c.sessions.map((s) => {
+    const old = cached.get(s.n);
+    const { sig } = blockSignature(state, s.n, old?.src);
+    const block = old?.src?.v === CACHE_VERSION && old.src.sig === sig ? Object.fromEntries(BLOCK_KEYS.map((k) => [k, old[k]])) : readBlock(state, s.n);
+    return { s, block, commits: [], section: null };
+  });
+
+  // A session without its result line is priced at this chain's dollars per weighted token of the same model, on every
+  // pass; a row whose model no finished session ran stays unknown, and so does its session.
+  const price = unitPrices(xs.filter((x) => !x.block.estimated).map((x) => ({ rows: x.block.rows.map(asRead) })));
+  for (const x of xs.filter((x) => x.block.estimated)) {
+    const rows = x.block.rows.map((r) => ({ ...r, usd: price[r.model]?.units ? priced(asRead(r), price) : null }));
+    x.block = { ...x.block, rows, usd: rows.length && rows.every((r) => r.usd != null) ? rows.reduce((a, r) => a + r.usd, 0) : null };
+  }
+
+  // The chain's state, the first rule that holds.
+  const p = pointer;
+  const flat = xs.flatMap((x) => x.s.attempts.map((a) => ({ a, x }))).sort((u, v) => u.a.start - v.a.start);
+  const openOf = () => flat.find(({ a }) => a.outcome == null && a.end == null);
+  let st, ended = null, endReason = null, waitUntil = null;
+  if (c.endLine && !(p && !p.finished && stampOf(p.scheduledAt ?? "") > c.endLine.t)) [st, ended, endReason] = ["ended", c.endLine.t, c.endLine.reason];
+  else if (p?.finished) [st, ended, endReason] = ["ended", p.finishedAt ? finite(stampOf(p.finishedAt)) : null, p.reason ?? null];
+  else if (!p) st = "gone";
+  else if (!p.pid) st = "scheduled";
+  else if (!alive(p.pid)) st = "gone";
+  else if (c.wait && c.wait.until > now) [st, waitUntil] = ["limit", c.wait.until];
+  else st = openOf() ? "running" : "between";
+
+  // Attempts the log never ended. A cut one ended at its session's last heartbeat before the next attempt began; one
+  // still open in a chain that is over was cut at its session's last sign of life.
+  flat.forEach(({ a, x }, i) => {
+    const next = flat[i + 1]?.a.start ?? Infinity;
+    if (a.outcome === "cut" && a.end == null) a.end = Math.max(a.start, ...(x.block.src?.beats ?? []).filter((b) => b >= a.start && b < next));
+    else if (a.outcome == null && a.end == null && (st === "ended" || st === "gone")) Object.assign(a, { outcome: "cut", endKnown: false, usd: null, end: Math.max(a.start, x.block.lastSeen ?? a.start) });
+  });
+
+  // What the chain waited for between two attempts more than three minutes apart.
+  const gaps = [];
+  for (let i = 0; i + 1 < flat.length; i++) {
+    const a = flat[i].a, b = flat[i + 1].a;
+    if (a.end == null || b.start - a.end <= 3 * MIN) continue;
+    const between = (e) => e.t >= a.end && e.t <= b.start;
+    const lim = c.waits.find(between);
+    const kind = lim ? "limit" : a.outcome === "cut" || c.events.some((e) => e.kind === "start" && between(e)) ? "down" : "other";
+    gaps.push({ from: a.end, to: b.start, kind, note: lim ? lim.text : "" });
+  }
+  if (st === "limit" && flat.length) { const a = flat.at(-1).a; gaps.push({ from: a.end ?? a.start, to: null, kind: "limit", note: c.wait.text }); }
+  const open = st === "running" ? openOf() : null;
+
+  // Commits: one git log over the chain; each goes to the attempt that ran when it was made. The night report's own
+  // and those made while no attempt ran are not the chain's.
+  const tree = workTree(run), isReport = reportCommit(T);
+  for (const k of commitsOf(tree, c.started, ended)) {
+    if (isReport.test(`${k.h} ${k.s}`)) continue;
+    flat.find(({ a }) => a.start <= k.t && k.t <= (a.end ?? now))?.x.commits.push(k);
+  }
+
+  // The night report, read once: each session's section by its number and the start of its last start or retry.
+  const report = tree ? read(path.resolve(tree, run.report || "NIGHT_RUNS.md")) : "";
+  for (const x of xs) {
+    const first = x.s.attempts.findLast((a) => a.kind !== "resume");
+    const d = first && new Date(first.start);
+    if (d && report) x.section = reportSection(report, pad2(x.s.n), `${pad2(d.getHours())}:${pad2(d.getMinutes())}`, `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`);
+  }
+  // What waits now, as the cards say it: a STOP prompt's list, else the last finished session's.
+  const stop = stopWaits(read(path.join(state, "next-prompt.md")).trim(), T);
+  const done = xs.findLast((x) => { const a = x.s.attempts.at(-1); return a?.endKnown && a.end != null; });
+  const waitsNow = stop ? stop.map(listItem).filter(Boolean) : done?.section?.waits ?? [];
+  const waitsOlder = stop ? 0 : done?.section?.older ?? 0, waitsFrom = !stop && done?.section ? done.s.n : null;
+
+  // Handover prompts and inbox notes. A prompt written after its session began was rewritten by a resume: it came at
+  // the session's first start.
+  const prompts = path.join(state, "prompts");
+  const messages = [];
+  xs.forEach((x, i) => {
+    const n = x.s.n, start = x.s.attempts[0]?.start ?? null;
+    for (const [file, kind] of [[path.join(prompts, `${pad2(n)}.md`), "handover"], [path.join(prompts, `${pad2(n)}-inbox.md`), "inbox"]]) {
+      const s = statOf(file);
+      if (!s) continue;
+      const t = kind === "handover" && start != null && s.mtime > start + MIN ? start : Math.round(s.mtime);
+      messages.push({ t, kind, from: kind === "handover" && i > 0 ? n - 1 : null, to: n, title: firstLine(read(file)), bytes: s.size });
+    }
+    x.inbox = fs.existsSync(path.join(prompts, `${pad2(n)}-inbox.md`));
+  });
+  messages.sort((a, b) => a.t - b.t);
+
+  // An attended run's questions; one is answered when an inbox holds an A<n>: line for it (a free-text answer is not seen).
+  const answered = new Set();
+  const inboxes = fs.existsSync(prompts) ? fs.readdirSync(prompts).filter((f) => /-inbox\.md$/.test(f)).map((f) => path.join(prompts, f)) : [];
+  for (const f of [path.join(state, "inbox.md"), ...inboxes]) for (const m of read(f).matchAll(/^(?:\[[^\]\n]*\]\s*)?A(\d+):/gm)) answered.add(Number(m[1]));
+  const questions = questionLines(state).map((l) => { const m = /^Q(\d+) · (.*)$/.exec(l); return { id: `Q${m[1]}`, text: m[2], answered: answered.has(Number(m[1])) }; });
+
+  const sessions = xs.map(({ s, block: b, commits, section, inbox }) => ({
+    n: s.n, title: s.title, model: s.model, effort: s.effort,
+    attempts: s.attempts.map(({ usdCum, ...a }) => a),
+    usd: b.usd, estimated: b.estimated, turns: b.turns, calls: b.calls, rows: b.rows, tokens: b.tokens, contextPeak: b.contextPeak, context: b.context,
+    tools: b.tools, subagents: b.subagents, commits, denials: b.denials, denialNotes: b.denialNotes, lastStep: b.lastStep, lastSeen: b.lastSeen,
+    windows: b.windows, remaining: section?.remaining ?? null, waits: section?.waits ?? [], inbox: Boolean(inbox), src: b.src,
+  }));
+  const resume = readJson(path.join(state, "resume.json"), null);
+  const seen = [c.lastLine, ...sessions.map((s) => s.lastSeen)].filter(Number.isFinite);
+  return {
+    schema: SCHEMA, generatedAt: now, skillVersion: VERSION, lang, demo: false,
+    chain: {
+      project: run.repo ? path.basename(run.repo) : null, repo: run.repo ?? null, mode: run.mode ?? null, attended: Boolean(run.attended),
+      branch: run.branch ?? null, tree: run.tree ?? null,
+      state: st, started: c.started ?? null, ended, endReason, lastSeen: seen.length ? Math.max(...seen) : null, waitUntil, until: run.deadline ?? null,
+      next: st === "running" || st === "ended" ? null : Number(resume?.nn) ? { n: Number(resume.nn), resume: true } : { n: (c.sessions.at(-1)?.n ?? 0) + 1, resume: false },
+      sessions: sessions.length, attempts: flat.length, turns: sessions.reduce((a, s) => a + (s.turns ?? 0), 0),
+      commits: sessions.reduce((a, s) => a + s.commits.length, 0), usd: cents(sessions.reduce((a, s) => a + (s.usd ?? 0), 0)),
+    },
+    now: open ? { n: open.x.s.n, since: open.a.start, lastStep: open.x.block.lastStep, lastSeen: open.x.block.lastSeen, context: open.x.block.context.at(-1)?.[1] ?? null } : null,
+    sessions, gaps, events: c.events, limits: c.limits, messages, waitsNow, waitsOlder, waitsFrom, questions,
   };
 }

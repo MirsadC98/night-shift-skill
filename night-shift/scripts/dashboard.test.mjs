@@ -4,10 +4,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tempRoot } from "./config.mjs";
 import { parseSession } from "./run-read.mjs";
-import { readChain, sessionBlock, blockSignature, BLOCK_KEYS, CACHE_VERSION } from "./dashboard.mjs";
+import { readChain, sessionBlock, blockSignature, BLOCK_KEYS, CACHE_VERSION, buildData, SCHEMA, gitLog } from "./dashboard.mjs";
 import { reached } from "./fixtures/imports.mjs";
 // A CLAUDE_CONFIG_DIR of the user's own would move every file these tests read or write (claudeHome in config.mjs).
 delete process.env.CLAUDE_CONFIG_DIR;
@@ -165,8 +166,29 @@ function fixtureRun(extra = {}) {
   const state = path.join(root, "state"), claude = path.join(root, "claude"), proj = path.join(claude, "projects", "p");
   for (const d of [state, proj]) fs.mkdirSync(d, { recursive: true });
   fs.writeFileSync(path.join(state, "run.json"), line({ claudeConfigDir: claude, lang: "en", repo: path.join(root, "repo"), ...extra }));
+  const repoDir = extra.tree || path.join(root, "repo");
+  const prompts = path.join(state, "prompts");
   return {
-    root, state, claude, proj,
+    root, state, claude, proj, repoDir,
+    log: (base, lines) => fs.writeFileSync(path.join(state, "chain.log"), lines.map(([m, text]) => `[${stamp(base + m * MIN)}] ${text}`).join("\n") + "\n"),
+    pointer: (obj) => {
+      const d = path.join(claude, "night-shift", "runs");
+      fs.mkdirSync(d, { recursive: true });
+      fs.writeFileSync(path.join(d, "repo-0000.json"), line({ state, ...obj }));
+    },
+    prompt: (name, text) => { fs.mkdirSync(prompts, { recursive: true }); fs.writeFileSync(path.join(prompts, name), text); },
+    file: (name, text) => fs.writeFileSync(path.join(state, name), text),
+    report: (text) => { fs.mkdirSync(repoDir, { recursive: true }); fs.writeFileSync(path.join(repoDir, "NIGHT_RUNS.md"), text); },
+    // A repository whose commits were made at the given times (epoch ms).
+    repo: (commits) => {
+      fs.mkdirSync(repoDir, { recursive: true });
+      const g = (args, env = {}) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd: repoDir, stdio: "ignore", env: { ...process.env, ...env } });
+      g(["init", "-q"]);
+      for (const [ms, subject] of commits) {
+        const at = `${Math.floor(ms / 1000)} +0000`;
+        g(["commit", "-q", "--allow-empty", "-m", subject], { GIT_AUTHOR_DATE: at, GIT_COMMITTER_DATE: at });
+      }
+    },
     stream: (n, lines) => fs.writeFileSync(path.join(state, `session-${nn(n)}.jsonl`), jl(lines)),
     transcript: (sid, lines) => fs.writeFileSync(path.join(proj, `${sid}.jsonl`), jl(lines)),
     agent: (sid, name, lines) => {
@@ -180,8 +202,8 @@ const SID = "00000000-0000-4000-8000-000000000001";
 const T0 = Date.UTC(2026, 10, 16, 1, 0);
 const iso = (ms) => new Date(ms).toISOString();
 const init = (sid = SID) => ({ type: "system", subtype: "init", session_id: sid, model: "claude-opus-5-5" });
-const call = (id, min, { input = 100, read = 1000, write = 50, output = 20, content = [], model = "claude-opus-5-5", sidechain = false, sid = SID } = {}) => ({
-  type: "assistant", timestamp: iso(T0 + min * MIN), session_id: sid, parent_tool_use_id: null, ...(sidechain ? { isSidechain: true } : {}),
+const call = (id, min, { input = 100, read = 1000, write = 50, output = 20, content = [], model = "claude-opus-5-5", sidechain = false, sid = SID, t0 = T0 } = {}) => ({
+  type: "assistant", timestamp: iso(t0 + min * MIN), session_id: sid, parent_tool_use_id: null, ...(sidechain ? { isSidechain: true } : {}),
   message: { id, model, role: "assistant", content, usage: { input_tokens: input, cache_read_input_tokens: read, cache_creation_input_tokens: write, output_tokens: output } },
 });
 const use = (id, name, input = {}) => ({ type: "tool_use", id, name, input });
@@ -323,4 +345,283 @@ test("sessionBlock: a three-digit session finds its stream", () => {
   const r = fixtureRun();
   r.stream(100, [init(), call("m1", 0)]);
   assert.ok(sessionBlock(r.state, 100).calls > 0);
+});
+
+// ---------------------------------------------------------------- the data
+const sid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+// Session n's stream: calls at the given minutes after base, and a result line when usd is given.
+const streamOf = (n, base, mins, usd = null) => [
+  init(sid(n)),
+  ...mins.map((m, i) => call(`s${n}-m${i}`, m, { sid: sid(n), t0: base })),
+  ...(usd == null ? [] : [{ ...result(usd, mins.length, { "claude-opus-5-5": MU(100, 20 * mins.length, usd) }), session_id: sid(n) }]),
+];
+const TWO = [
+  [0, "chain starts in /r, until the work is done, from session 1, opus at xhigh"],
+  [0, "session 01 starts: A"], [0, "session 01 runs Opus at xhigh"], [20, "session 01 ends: success, 5 turns, $2.00"],
+  [21, "session 02 starts: B"], [21, "session 02 runs Opus at xhigh"], [40, "session 02 ends: success, 6 turns, $3.00"],
+];
+const LIVE = { pid: 4242, finished: false, scheduledAt: stamp(BASE - MIN) };
+const build = (r, opt = {}) => buildData(r.state, { now: BASE + 120 * MIN, alive: () => true, ...opt });
+function twoSessions(extra) {
+  const r = fixtureRun(extra);
+  r.stream(1, streamOf(1, BASE, [0, 5, 10], 2));
+  r.stream(2, streamOf(2, BASE, [21, 30], 3));
+  return r;
+}
+const TOP = ["schema", "generatedAt", "skillVersion", "lang", "demo", "chain", "now", "sessions", "gaps", "events", "limits", "messages", "waitsNow", "waitsOlder", "waitsFrom", "questions"];
+const CHAIN = ["project", "repo", "mode", "attended", "branch", "tree", "state", "started", "ended", "endReason", "lastSeen", "waitUntil", "until", "next", "sessions", "attempts", "turns", "commits", "usd"];
+
+test("buildData: a finished chain", () => {
+  const r = twoSessions();
+  r.log(BASE, [...TWO, [41, "chain ends: STOP: done"]]);
+  r.pointer({ pid: 4242, finished: true, finishedAt: stamp(BASE + 41 * MIN), reason: "STOP: done" });
+  const d = build(r);
+  assert.equal(d.schema, SCHEMA);
+  assert.equal(d.chain.state, "ended");
+  assert.equal(d.chain.endReason, "STOP: done");
+  assert.equal(d.chain.ended, BASE + 41 * MIN);
+  assert.equal(d.chain.usd, 5);
+  assert.equal(d.chain.sessions, 2);
+  assert.equal(d.chain.attempts, 2);
+  assert.equal(d.chain.turns, 5);
+  assert.equal(d.now, null);
+  assert.equal(d.chain.next, null);
+  assert.equal(d.chain.project, "repo");
+  assert.deepEqual(d.sessions.map((s) => [s.n, s.title, s.model, s.effort, s.usd, s.estimated]), [[1, "A", "Opus", "xhigh", 2, false], [2, "B", "Opus", "xhigh", 3, false]]);
+  assert.deepEqual(Object.keys(d.sessions[0].attempts[0]), ["kind", "why", "start", "end", "endKnown", "outcome", "limitType", "turns", "usd", "h5", "d7"]);
+  assert.equal(d.generatedAt, BASE + 120 * MIN);
+});
+
+test("buildData: a running session", () => {
+  const r = twoSessions();
+  r.stream(2, streamOf(2, BASE, [21, 25]));
+  r.log(BASE, TWO.slice(0, -1));
+  r.pointer(LIVE);
+  const d = build(r, { now: BASE + 30 * MIN });
+  assert.equal(d.chain.state, "running");
+  assert.equal(d.now.n, 2);
+  assert.equal(d.now.since, BASE + 21 * MIN);
+  assert.equal(d.now.context, 1150);
+  const s = d.sessions[1];
+  assert.equal(s.estimated, true);
+  assert.ok(s.usd > 0, String(s.usd));
+  assert.ok(s.rows.every((x) => x.usd > 0));
+  assert.equal(s.attempts[0].end, null);
+  assert.equal(d.chain.usd, Math.round((2 + s.usd) * 100) / 100);
+  assert.equal(d.chain.next, null);
+});
+
+test("buildData: the first session has no price yet", () => {
+  const r = fixtureRun();
+  r.stream(1, streamOf(1, BASE, [0, 3]));
+  r.log(BASE, TWO.slice(0, 3));
+  r.pointer(LIVE);
+  const d = build(r, { now: BASE + 5 * MIN });
+  assert.equal(d.sessions[0].usd, null);
+  assert.equal(d.sessions[0].estimated, true);
+  assert.ok(d.sessions[0].rows.every((x) => x.usd === null));
+  assert.equal(d.chain.usd, 0);
+});
+
+test("buildData: a session that runs across midnight", () => {
+  const late = new Date(2026, 10, 16, 23, 50).getTime();
+  const r = fixtureRun();
+  r.stream(1, streamOf(1, late, [0, 20]));
+  r.log(late, [[0, "chain starts in /r"], [0, "session 01 starts: A"]]);
+  r.pointer(LIVE);
+  const d = buildData(r.state, { now: late + 30 * MIN, alive: () => true });
+  assert.equal(d.chain.state, "running");
+  assert.equal(d.now.since, late);
+  assert.equal(d.generatedAt - d.now.since, 30 * MIN);
+});
+
+test("buildData: a usage-limit wait", () => {
+  const r = fixtureRun();
+  r.stream(1, streamOf(1, BASE, [0, 5]));
+  r.log(BASE, CUT);
+  r.file("resume.json", line({ nn: "01", sessionId: sid(1), why: "limit" }));
+  r.pointer(LIVE);
+  const d = build(r, { now: BASE + 30 * MIN });
+  assert.equal(d.chain.state, "limit");
+  assert.equal(d.chain.waitUntil, new Date(2026, 10, 16, 4, 1).getTime());
+  assert.deepEqual(d.chain.next, { n: 1, resume: true });
+  assert.deepEqual(d.gaps.at(-1), { from: BASE + 10 * MIN, to: null, kind: "limit", note: "usage limit: waiting until 2026-11-16 04:01:00" });
+  // Once the wait is over and nothing ran yet, the chain is between sessions.
+  assert.equal(build(r, { now: BASE + 62 * MIN }).chain.state, "between");
+});
+
+test("buildData: gaps name what the chain waited for", () => {
+  const gapsOf = (lines) => { const r = fixtureRun(); r.log(BASE, lines); return build(r, { pointer: null }).gaps; };
+  const limited = gapsOf([...CUT, [50, "session 01 resumes s1 after the usage limit"], [50, "session 01 runs Opus at xhigh"], [60, "session 01 ends: success, 17 turns, $7.05"]]);
+  assert.deepEqual(limited, [{ from: BASE + 10 * MIN, to: BASE + 50 * MIN, kind: "limit", note: "usage limit: waiting until 2026-11-16 04:01:00" }]);
+  assert.deepEqual(gapsOf([[0, "session 01 starts: A"], [10, "session 01 ends: success, 1 turns, $1.00"], [12, "session 02 starts: B"], [20, "session 02 ends: success, 1 turns, $1.00"]]), []);
+  assert.deepEqual(gapsOf([[0, "session 01 starts: A"], [10, "session 01 ends: success, 1 turns, $1.00"], [20, "session 02 starts: B"], [30, "session 02 ends: success, 1 turns, $1.00"]]),
+    [{ from: BASE + 10 * MIN, to: BASE + 20 * MIN, kind: "other", note: "" }]);
+});
+
+test("buildData: a runner that died", () => {
+  const r = fixtureRun();
+  r.stream(1, streamOf(1, BASE, [0, 5]));
+  r.log(BASE, TWO.slice(0, 3));
+  r.pointer(LIVE);
+  const d = build(r, { alive: () => false });
+  assert.equal(d.chain.state, "gone");
+  assert.equal(d.chain.ended, null);
+  assert.ok(Number.isFinite(d.chain.lastSeen));
+  const a = d.sessions[0].attempts[0];
+  assert.deepEqual({ outcome: a.outcome, endKnown: a.endKnown, usd: a.usd, end: a.end }, { outcome: "cut", endKnown: false, usd: null, end: d.sessions[0].lastSeen });
+  assert.equal(d.now, null);
+  assert.deepEqual(d.chain.next, { n: 2, resume: false });
+});
+
+test("buildData: a pointer marked finished without an end line", () => {
+  const r = fixtureRun();
+  r.stream(1, streamOf(1, BASE, [0, 5]));
+  r.log(BASE, TWO.slice(0, 3));
+  r.pointer({ ...LIVE, finished: true, finishedAt: stamp(BASE + 30 * MIN), reason: "stopped now by the user" });
+  const d = build(r);
+  assert.equal(d.chain.state, "ended");
+  assert.equal(d.chain.endReason, "stopped now by the user");
+  assert.equal(d.chain.ended, BASE + 30 * MIN);
+  assert.equal(d.sessions[0].attempts[0].outcome, "cut");
+});
+
+test("buildData: a start not picked up yet", () => {
+  const r = fixtureRun();
+  r.log(BASE, [...ONE, [21, "chain ends: STOP: done"]]);
+  r.pointer({ pid: 0, finished: false, scheduledAt: stamp(BASE + 60 * MIN) });
+  assert.equal(build(r).chain.state, "scheduled");
+  // A pointer scheduled before the end line is the run that ended.
+  r.pointer({ pid: 0, finished: false, scheduledAt: stamp(BASE - 60 * MIN) });
+  assert.equal(build(r).chain.state, "ended");
+});
+
+test("buildData: a cut attempt ends at its last sign of life", () => {
+  const r = fixtureRun();
+  r.stream(5, [...streamOf(5, BASE, [0, 20, 50]), ...streamOf(5, BASE, [91, 95], 4).slice(1)]);
+  r.log(BASE, [[0, "chain starts in /r, from session 5"], [0, "session 05 starts: E"], [0, "session 05 runs Opus at xhigh"],
+    [90, "chain starts in /r, until the work is done, from session 5"], [90, "session 05 resumes s5 where the last runner stopped"], [99, "session 05 ends: success, 9 turns, $4.00"]]);
+  const d = build(r, { pointer: null });
+  const [a, b] = d.sessions[0].attempts;
+  assert.deepEqual([a.end, a.endKnown, a.outcome], [BASE + 50 * MIN, false, "cut"]);
+  assert.equal(b.outcome, "success");
+  assert.deepEqual(d.gaps, [{ from: BASE + 50 * MIN, to: BASE + 90 * MIN, kind: "down", note: "" }]);
+});
+
+test("buildData: a chain after a fresh start in a folder that holds an earlier one", () => {
+  const lines = [...ONE, [21, "chain ends: STOP: done"], [120, "chain starts in /r"], [120, "session 02 starts: B"], [130, "session 02 ends: success, 2 turns, $1.00"]];
+  const fresh = fixtureRun({ chainStartedAt: stamp(BASE + 120 * MIN) });
+  fresh.log(BASE, lines);
+  assert.deepEqual(build(fresh, { pointer: null, now: BASE + 140 * MIN }).sessions.map((s) => s.n), [2]);
+  const whole = fixtureRun();
+  whole.log(BASE, lines);
+  assert.deepEqual(build(whole, { pointer: null, now: BASE + 140 * MIN }).sessions.map((s) => s.n), [1, 2]);
+});
+
+test("buildData: commits go to the session that made them", () => {
+  const r = twoSessions();
+  r.log(BASE, [...TWO, [41, "chain ends: STOP: done"]]);
+  r.repo([[BASE + 5 * MIN, "feat: one"], [BASE + 20 * MIN + 30_000, "fix: between"], [BASE + 35 * MIN, "feat: two"], [BASE + 38 * MIN, "docs: night report 2026-11-16"]]);
+  let calls = 0;
+  const d = build(r, { pointer: null, gitLog: (...a) => { calls++; return gitLog(...a); } });
+  assert.equal(calls, 1);
+  assert.deepEqual(d.sessions.map((s) => s.commits.map((c) => c.s)), [["feat: one"], ["feat: two"]]);
+  assert.equal(d.sessions[0].commits[0].t, BASE + 5 * MIN);
+  assert.match(d.sessions[0].commits[0].h, /^[0-9a-f]{7,}$/);
+  assert.equal(d.chain.commits, 2);
+});
+
+test("buildData: no repository is no error", () => {
+  const r = twoSessions();
+  r.log(BASE, TWO);
+  const d = build(r, { pointer: null });
+  assert.ok(d.sessions.every((s) => s.commits.length === 0));
+  assert.equal(d.chain.commits, 0);
+  assert.deepEqual(gitLog(path.join(r.root, "nowhere"), BASE, null), []);
+  assert.deepEqual(gitLog(null, BASE, null), []);
+});
+
+test("buildData: a worktree run", () => {
+  const root = fs.mkdtempSync(path.join(tempRoot(), "dash-tree-"));
+  const r = twoSessions({ tree: path.join(root, "tree"), branch: "night/one" });
+  r.log(BASE, TWO);
+  let seen = null;
+  const d = build(r, { pointer: null, gitLog: (tree) => { seen = tree; return []; } });
+  assert.equal(d.chain.tree, path.join(root, "tree"));
+  assert.equal(d.chain.branch, "night/one");
+  assert.equal(seen, path.join(root, "tree"));
+});
+
+test("buildData: what waits now", () => {
+  const r = twoSessions();
+  r.log(BASE, TWO);
+  r.report(["# Night runs", "", "## 2026-11-16 session 02 (03:21–03:40) · B", "", "**Remaining:** 3", "", "**Waits for you:**", "- a", "- b", ""].join("\n"));
+  const d = build(r, { pointer: null });
+  assert.deepEqual([d.waitsNow, d.waitsFrom, d.waitsOlder], [["a", "b"], 2, 0]);
+  assert.deepEqual([d.sessions[1].remaining, d.sessions[1].waits], [3, ["a", "b"]]);
+  assert.deepEqual([d.sessions[0].remaining, d.sessions[0].waits], [null, []]);
+  r.file("next-prompt.md", "STOP: done\n**Waits for you**\n- one\n");
+  const s = build(r, { pointer: null });
+  assert.deepEqual([s.waitsNow, s.waitsFrom], [["one"], null]);
+});
+
+test("buildData: an attended run's questions", () => {
+  const r = fixtureRun({ attended: true });
+  r.log(BASE, ONE);
+  r.file("questions.md", "Q1 · pick a name?\nQ2 · which color?\n");
+  r.prompt("02-inbox.md", "[03:30 · Telegram] A1: yes\n");
+  const d = build(r, { pointer: null });
+  assert.deepEqual(d.questions, [{ id: "Q1", text: "pick a name?", answered: true }, { id: "Q2", text: "which color?", answered: false }]);
+  assert.equal(d.chain.attended, true);
+});
+
+test("buildData: messages", () => {
+  const r = twoSessions();
+  r.log(BASE, TWO);
+  r.prompt("01.md", "# Build the thing\n\nmore\n");
+  r.prompt("02.md", "MODEL: fable\n\nNext piece\n");
+  r.prompt("02-inbox.md", "a note\n");
+  const d = build(r, { pointer: null });
+  const m = [...d.messages].sort((a, b) => a.to - b.to || a.kind.localeCompare(b.kind));
+  assert.deepEqual(m.map((x) => [x.kind, x.from, x.to, x.title]), [["handover", null, 1, "Build the thing"], ["handover", 1, 2, "Next piece"], ["inbox", null, 2, "a note"]]);
+  assert.ok(m.every((x) => x.bytes > 0 && Number.isFinite(x.t)));
+  // A prompt file written after its session started was rewritten (a resume): its message is dated at the start.
+  assert.equal(m[1].t, BASE + 21 * MIN);
+  assert.deepEqual(d.sessions.map((s) => s.inbox), [false, true]);
+});
+
+test("buildData: an unchanged session is not read again", () => {
+  const r = twoSessions();
+  r.log(BASE, TWO);
+  let reads = 0;
+  const readBlock = (s, n) => { reads++; return sessionBlock(s, n); };
+  const count = (prev) => { reads = 0; const d = build(r, { pointer: null, prev, readBlock }); return [reads, d]; };
+  const [first, d1] = count(null);
+  assert.equal(first, 2);
+  const [none, again] = count(d1);
+  assert.equal(none, 0);
+  assert.deepEqual(again.sessions, d1.sessions);
+  fs.appendFileSync(path.join(r.state, "session-02.jsonl"), jl([call("s2-m9", 39, { sid: sid(2), t0: BASE })]));
+  const [one, d2] = count(d1);
+  assert.equal(one, 1);
+  assert.deepEqual(d2.sessions, build(r, { pointer: null }).sessions, "the same as a cold build");
+  const p = structuredClone(d2);
+  p.sessions[0].src.v = 0;
+  assert.equal(count(p)[0], 1);
+  assert.equal(count({ schema: 2, sessions: d2.sessions })[0], 2);
+  assert.equal(count("x")[0], 2);
+});
+
+test("buildData: every key is there for the barest folder", () => {
+  const state = fs.mkdtempSync(path.join(tempRoot(), "dash-bare-"));
+  fs.writeFileSync(path.join(state, "run.json"), line({ repo: path.join(state, "repo"), lang: "en" }));
+  fs.writeFileSync(path.join(state, "chain.log"), "");
+  const d = buildData(state, { now: BASE, pointer: null });
+  assert.deepEqual(Object.keys(d), TOP);
+  assert.deepEqual(Object.keys(d.chain), CHAIN);
+  for (const k of ["sessions", "gaps", "events", "limits", "messages", "waitsNow", "questions"]) assert.deepEqual(d[k], [], k);
+  assert.equal(d.chain.state, "gone");
+  assert.equal(d.now, null);
+  assert.deepEqual([d.chain.sessions, d.chain.attempts, d.chain.usd, d.chain.commits, d.waitsOlder, d.waitsFrom], [0, 0, 0, 0, 0, null]);
+  assert.equal(d.demo, false);
 });
