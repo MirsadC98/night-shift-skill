@@ -441,3 +441,28 @@ export function buildData(state, { now = Date.now(), prev = null, pointer = poin
 // The demo: a made-up evening of seven sessions in the data's shape, frozen at its generatedAt (assets/, next to scripts/).
 const ASSETS = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "assets");
 export const demoData = () => JSON.parse(fs.readFileSync(path.join(ASSETS, "dashboard-demo.json"), "utf8"));
+
+// ---------------------------------------------------------------------------- the page
+// The words the page carries: the run's language first, English always, and `also` (a second language, for a run in
+// English). A language whose table nothing loaded reads English word for word, so it gets no set of its own: the page
+// would offer a switch between two equal columns.
+export function labelsFor(lang, { also = null } = {}) {
+  const english = strings("en"), sets = {};
+  const add = (code) => {
+    const table = strings(code);
+    if (Object.hasOwn(sets, code) || (code !== "en" && table === english)) return;
+    sets[code] = { code, name: table.name, words: table.dash };
+  };
+  for (const code of [lang, "en", also]) if (typeof code === "string") add(code);
+  return { start: Object.hasOwn(sets, lang) ? lang : "en", sets };
+}
+
+// The page with its data and its words inside. Both go in as JSON in a data block, with every < written as an escape:
+// no text of a run can close the block or open a tag. The places are filled in one pass and through a function: a
+// replacement string would read a commit subject's $& or $1 as a pattern, and a second pass would find a place's
+// name inside the data the first one put in.
+const embed = (value) => JSON.stringify(value).replace(/</g, "\\u003c");
+export function pageHtml(data, labels) {
+  const template = fs.readFileSync(path.join(ASSETS, "dashboard.html"), "utf8");
+  return template.replace(/\/\*__(DATA|LABELS)__\*\//g, (place, name) => embed(name === "DATA" ? data : labels));
+}

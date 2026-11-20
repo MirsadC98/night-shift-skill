@@ -170,3 +170,20 @@ test("langOf: the run's own language, else the config files as they are now, els
   assert.equal(langOf({ repo }, homeWithGlobal({ lang: "xx" })), "en");
   assert.equal(langOf({ repo: path.join(throwaway(), "x"), lang: "X X" }, homeWithGlobal({ lang: "../fr" })), "en");
 });
+
+test("every dash entry is a plain string", () => {
+  assert.ok(Object.keys(en.dash).length > 50, "the dashboard's words are in the table");
+  for (const [k, v] of Object.entries(en.dash)) {
+    assert.equal(typeof v, "string", k);
+    // a place is {name}; a brace that is not one would reach the page as it is
+    assert.equal(v.replace(/\{[a-z][A-Za-z]*\}/g, "").match(/[{}]/), null, k);
+  }
+});
+
+test("a user table's dash words go over English's, key by key", async () => {
+  const r = await loadLang("xx", homeWithTable("xx"));
+  assert.equal(r.error, undefined);
+  const mine = Object.entries(strings("xx").dash).filter(([k, v]) => v !== en.dash[k]).map(([k]) => k).sort();
+  assert.deepEqual(mine, ["stateRunning", "waitsHead"]);
+  assert.deepEqual(Object.keys(strings("xx").dash), Object.keys(en.dash));
+});

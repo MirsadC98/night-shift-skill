@@ -8,7 +8,9 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tempRoot } from "./config.mjs";
 import { parseSession } from "./run-read.mjs";
-import { readChain, sessionBlock, blockSignature, BLOCK_KEYS, CACHE_VERSION, buildData, SCHEMA, gitLog, demoData } from "./dashboard.mjs";
+import { readChain, sessionBlock, blockSignature, BLOCK_KEYS, CACHE_VERSION, buildData, SCHEMA, gitLog, demoData, labelsFor, pageHtml } from "./dashboard.mjs";
+import { loadLang, langFile } from "./lang/index.mjs";
+import en from "./lang/en.mjs";
 import { reached } from "./fixtures/imports.mjs";
 // A CLAUDE_CONFIG_DIR of the user's own would move every file these tests read or write (claudeHome in config.mjs).
 delete process.env.CLAUDE_CONFIG_DIR;
@@ -736,4 +738,92 @@ test("the demo names nothing real", () => {
     if (s.startsWith("/")) assert.ok(s.startsWith("/home/sam/demo-app"), s);
   }
   assert.equal(d.chain.project, "demo-app");
+});
+
+// ---------------------------------------------------------------- the page
+const TEMPLATE = path.join(HERE, "..", "assets", "dashboard.html");
+const template = () => fs.readFileSync(TEMPLATE, "utf8");
+const CSP = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' file:; style-src 'unsafe-inline'; img-src data:">`;
+// The template without its script and style blocks: the markup a browser shows before any script ran.
+const markup = () => template().replace(/<script\b[\s\S]*?<\/script>/g, "").replace(/<style\b[\s\S]*?<\/style>/g, "");
+// What a page embeds under an id, parsed as the page's script parses it.
+const embedded = (html, id) => JSON.parse(new RegExp(`<script type="application/json" id="${id}">([\\s\\S]*?)</script>`).exec(html)[1]);
+
+test("the page reaches nothing outside itself", () => {
+  const html = template();
+  assert.deepEqual([...new Set(html.match(/https?:\/\/[^\s"'<>)]*/g))], ["http://www.w3.org/2000/svg"]);
+  assert.ok(html.includes(CSP), "the Content-Security-Policy line as measured");
+  assert.doesNotMatch(html, /@import|url\(|<link\b|<iframe\b|<img\b|<object\b|<embed\b/);
+});
+
+test("the page never writes markup", () => {
+  const html = template();
+  for (const bad of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function"]) assert.ok(!html.includes(bad), bad);
+});
+
+test("the template holds no word of its own", () => {
+  const text = markup().replace(/<[^>]*>/g, "").replace(/night-shift/g, "");
+  assert.deepEqual(text.match(/[A-Za-z]{2,}/g) ?? [], []);
+  // nor in an attribute a reader meets
+  assert.deepEqual(markup().match(/\b(?:aria-label|placeholder|title|alt)="[^"]*"/g) ?? [], []);
+});
+
+test("every word the page uses is in the table, and none is left over", () => {
+  const used = [...new Set([...template().matchAll(/\bt\("([A-Za-z0-9]+)"/g)].map((m) => m[1]))].sort();
+  assert.ok(used.length > 50, `${used.length} keys found`);
+  assert.deepEqual(used, Object.keys(en.dash).sort());
+});
+
+test("a run's text is embedded as data", () => {
+  const data = demoData();
+  data.sessions[0].title = "</script><img src=x onerror=alert(1)><!--";
+  data.sessions[0].commits[0].s = "a $& b $' c $1 $` d";
+  const labels = labelsFor("en");
+  const html = pageHtml(data, labels);
+  const count = (s) => s.split("</script>").length - 1;
+  assert.equal(count(html), count(template()));
+  assert.ok(!html.includes("<img src=x") && !html.includes("<!--<"));
+  assert.deepEqual(embedded(html, "chain-data"), data);
+  assert.deepEqual(embedded(html, "labels"), labels);
+  assert.ok(!html.includes("/*__DATA__*/") && !html.includes("/*__LABELS__*/"));
+  // only the two places changed
+  const [head, rest] = template().split("/*__DATA__*/"), [mid, tail] = rest.split("/*__LABELS__*/");
+  assert.ok(html.startsWith(head) && html.includes(mid) && html.endsWith(tail));
+});
+
+// The made-up table as a user's own, loaded as the scripts load it (lang.test.mjs does the same).
+async function loadXx() {
+  const home = fs.mkdtempSync(path.join(tempRoot(), "ns-dash-lang-"));
+  const file = langFile("xx", home);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.copyFileSync(path.join(HERE, "fixtures", "lang-xx.mjs"), file);
+  assert.equal((await loadLang("xx", home)).error, undefined);
+}
+
+test("a run in another language carries both sets", async () => {
+  await loadXx();
+  const l = labelsFor("xx");
+  assert.equal(l.start, "xx");
+  assert.deepEqual(Object.keys(l.sets), ["xx", "en"]);
+  assert.deepEqual(l.sets.en, { code: "en", name: "English", words: en.dash });
+  assert.equal(l.sets.xx.code, "xx");
+  assert.equal(l.sets.xx.name, "Xxish");
+  // the fixture gives two of the keys; every other reads English
+  assert.deepEqual(l.sets.xx.words, { ...en.dash, waitsHead: "xx·waits for you", stateRunning: "xx·running" });
+});
+
+test("an English run carries one set", async () => {
+  await loadXx();
+  assert.deepEqual(labelsFor("en"), { start: "en", sets: { en: { code: "en", name: "English", words: en.dash } } });
+  const l = labelsFor("en", { also: "xx" });
+  assert.equal(l.start, "en");
+  assert.deepEqual(Object.keys(l.sets), ["en", "xx"]);
+  assert.deepEqual(Object.keys(labelsFor("en", { also: "en" }).sets), ["en"]);
+});
+
+test("a language whose table was not loaded reads as English", () => {
+  // strings() gives English for a code nothing loaded: one set, no switch between two columns of the same words
+  assert.deepEqual(Object.keys(labelsFor("zz").sets), ["en"]);
+  assert.equal(labelsFor("zz").start, "en");
+  assert.deepEqual(Object.keys(labelsFor("en", { also: "zz" }).sets), ["en"]);
 });

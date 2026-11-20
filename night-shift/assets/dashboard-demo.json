@@ -1729,7 +1729,7 @@
    "from": 1792614665000,
    "to": 1792617670000,
    "kind": "limit",
-   "note": "usage limit: waiting until 2026-10-21 21:20:00"
+   "note": "usage limit: waiting 50 min for the five-hour window"
   }
  ],
  "events": [
@@ -1746,7 +1746,7 @@
   {
    "t": 1792614666000,
    "kind": "limit",
-   "text": "usage limit: waiting until 2026-10-21 21:20:00"
+   "text": "usage limit: waiting 50 min for the five-hour window"
   },
   {
    "t": 1792617670000,

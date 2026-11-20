@@ -27,6 +27,11 @@ export default {
   cmdReport: "xxreport", cmdReportDesc: "xx·report",
   cmdStop: "xxstop", cmdStopDesc: "xx·stop", cmdNow: "xxnow",
   cmdInbox: "xxinbox", cmdInboxDesc: "xx·inbox",
+  // two of the dashboard's words; the page reads the rest in English
+  dash: {
+    waitsHead: "xx·waits for you",
+    stateRunning: "xx·running",
+  },
   cli: {
     userWaits: (lines) => (lines.length ? `xx·waits:\n${lines.join("\n")}` : "xx·waits: none"),
     reportLine: (report, cmd) => `xx·report: ${report} · ${cmd}`,
