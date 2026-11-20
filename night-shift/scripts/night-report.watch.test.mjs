@@ -814,3 +814,109 @@ test("card --send and notify go to Telegram and the webhook, and print sent only
     });
   } finally { await rx.close(); }
 });
+
+// ---------------------------------------------------------------- the dashboard
+const dash = (state) => { try { return JSON.parse(fs.readFileSync(path.join(state, "dashboard.json"), "utf8")); } catch { return null; } };
+const bareState = () => {
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), "ns-dash-pass-"));
+  fs.writeFileSync(path.join(state, "run.json"), JSON.stringify({ repo: state, lang: "en" }));
+  fs.writeFileSync(path.join(state, "chain.log"), "");
+  return state;
+};
+const dashLines = (state) => logOf(state).split("\n").filter((l) => /\] dashboard: /.test(l));
+
+test("a dashboard that does not load costs one log line", async () => {
+  const { dashboardPass } = await import("./night-report.mjs");
+  const state = bareState();
+  try {
+    const load = async () => { throw new Error("no module"); };
+    for (let i = 0; i < 3; i++) assert.equal(await dashboardPass(state, { load }), "failed");
+    assert.deepEqual(dashLines(state).map((l) => l.replace(/^\[[^\]]+\] /, "")), ["dashboard: no module"]);
+  } finally { fs.rmSync(state, { recursive: true, force: true }); }
+});
+
+test("a writer that throws costs one log line per message", async () => {
+  const { dashboardPass } = await import("./night-report.mjs");
+  const state = bareState();
+  try {
+    const said = ["disk", "disk", "other"];
+    const load = async () => ({ refresh: async () => { throw new Error(said.shift()); } });
+    for (let i = 0; i < 3; i++) assert.equal(await dashboardPass(state, { load }), "failed");
+    assert.deepEqual(dashLines(state).map((l) => l.replace(/^\[[^\]]+\] /, "")), ["dashboard: disk", "dashboard: other"]);
+  } finally { fs.rmSync(state, { recursive: true, force: true }); }
+});
+
+test("a pass does not start beside a running one, but the final one waits", async () => {
+  const { dashboardPass } = await import("./night-report.mjs");
+  const state = bareState();
+  try {
+    let release;
+    const held = new Promise((r) => { release = r; });
+    const calls = [];
+    const load = async () => ({ refresh: async (s, opt) => { calls.push(opt); if (calls.length === 1) await held; return { wrote: true }; } });
+    const first = dashboardPass(state, { load });
+    assert.equal(await dashboardPass(state, { load }), "busy");
+    let finalDone = false;
+    const last = dashboardPass(state, { load, final: true }).then((r) => { finalDone = true; return r; });
+    // Nothing but release() can let the first pass go: a few turns of the event loop show the final one still waiting.
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(finalDone, false);
+    assert.equal(calls.length, 1);
+    release();
+    assert.equal(await first, "wrote");
+    assert.equal(await last, "wrote");
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].force, true);
+    assert.equal(calls[1].page, true);
+  } finally { fs.rmSync(state, { recursive: true, force: true }); }
+});
+
+test("the watcher writes the dashboard while a run works", async () => {
+  await scene(() => undefined, { runner: true, env: { NIGHT_SHIFT_DASHBOARD_MS: "100" } }, async ({ state, chain, exited }) => {
+    chain("session 01 starts: A");
+    await until(() => dash(state)?.sessions.length === 1, 30_000, "the session in dashboard.json");
+    chain("session 01 ends: success, 3 turns, $1.00");
+    await until(() => dash(state)?.sessions[0].attempts[0].end != null, 30_000, "the session's end in dashboard.json");
+    chain("chain ends: STOP: done");
+    await exited;
+    assert.equal(dash(state).chain.state, "ended");
+    assert.ok(fs.existsSync(path.join(state, "dashboard.html")));
+    assert.equal(dashLines(state).length, 0, logOf(state));
+  });
+});
+
+test("a card nobody takes does not hold the dashboard back", async () => {
+  const down = (m) => (m === "sendMessage" ? [500, { ok: false, error_code: 500, description: "Internal Server Error" }] : undefined);
+  await scene(down, { runner: true, env: { NIGHT_SHIFT_DASHBOARD_MS: "100", NIGHT_SHIFT_SEND_GIVEUP_MS: "60000" } }, async ({ api, state, chain }) => {
+    chain("session 01 starts: A");
+    chain("session 01 ends: success, 3 turns, $1.00");
+    await until(() => api.sends().length > 0, 30_000, "a card tried");
+    // The loop now waits on session 01's card; only the timer can show what the log says after it.
+    chain("session 02 starts: B");
+    await until(() => dash(state)?.sessions.length === 2, 30_000, "the second session in dashboard.json");
+    assert.notEqual(dash(state).sessions[0].attempts[0].end, null);
+    // The starts line has no card and is counted; the session's card is still being tried, its line not counted.
+    assert.ok((marks(state).lines ?? 0) < 2, "the session's card is still waiting");
+  });
+});
+
+test("each way out of the watcher's loop writes the final state after its card", async () => {
+  // A timer too slow to fire: what the page shows after the chain's end comes from the final pass.
+  await scene(() => undefined, { runner: true, env: { NIGHT_SHIFT_DASHBOARD_MS: "600000" } }, async ({ api, state, chain, exited }) => {
+    await until(() => dash(state) !== null, 30_000, "the first pass's dashboard.json");
+    chain("session 01 starts: A");
+    chain("session 01 ends: success, 3 turns, $1.00");
+    chain("chain ends: STOP: done");
+    await exited;
+    assert.ok(api.sends().length >= 2, "the session's and the chain's cards went out");
+    assert.equal(dash(state).chain.state, "ended");
+    assert.equal(dash(state).sessions.length, 1);
+  });
+});
+
+test("a bare state folder gives data and no complaint", async () => {
+  await scene(() => undefined, { env: { NIGHT_SHIFT_DASHBOARD_MS: "100" } }, async ({ state }) => {
+    await until(() => dash(state) && typeof dash(state) === "object", 30_000, "dashboard.json");
+    assert.equal(dashLines(state).length, 0, logOf(state));
+  });
+});

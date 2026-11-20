@@ -576,6 +576,33 @@ export async function notify(state, headline, opt = {}) {
 }
 
 
+// ---------------------------------------------------------------- the dashboard
+// One pass of dashboard.mjs's refresh, off the card loop's path: a pass never rejects and never runs beside another.
+// The first pass that works in this process writes the page too (a new version's page replaces the old one), and the
+// final one, after the loop's last card, writes everything whatever the cache says. dashboard.mjs is loaded here, not
+// imported above: it must never import this file, and a broken dashboard must cost a log line, not the watcher.
+let dashRunning = null, dashPaged = false;
+const dashSaid = new Set();
+export async function dashboardPass(state, { load = () => import("./dashboard.mjs"), final = false } = {}) {
+  if (dashRunning && !final) return "busy";
+  while (dashRunning) await dashRunning; // a final pass waits for the one running, then runs
+  let done;
+  dashRunning = new Promise((r) => { done = r; });
+  try {
+    const { refresh } = await load();
+    const { wrote } = await refresh(state, { page: !dashPaged || final, force: final });
+    dashPaged = true;
+    return wrote ? "wrote" : "idle";
+  } catch (e) {
+    const line = `dashboard: ${e?.message || String(e)}`;
+    if (!dashSaid.has(line)) { dashSaid.add(line); watchLog(state, line); }
+    return "failed";
+  } finally {
+    dashRunning = null;
+    done();
+  }
+}
+
 // ---------------------------------------------------------------- watch
 async function watch(opt) {
   const state = path.resolve(opt.state);
@@ -585,6 +612,18 @@ async function watch(opt) {
   const other = Number(read(lock));
   if (other && other !== process.pid && alive(other)) return console.log(`already watched by pid ${other}`);
   fs.writeFileSync(lock, String(process.pid));
+  // The dashboard has a timer of its own, so a card that waits on an outage does not hold it back; each way out of the
+  // loop writes the final state after its card.
+  dashboardPass(state);
+  const timer = setInterval(() => dashboardPass(state), Number(process.env.NIGHT_SHIFT_DASHBOARD_MS) || 20_000);
+  try { return await watchLoop(state, opt, T, pid, lock); }
+  finally {
+    clearInterval(timer);
+    await dashboardPass(state, { final: true });
+  }
+}
+
+async function watchLoop(state, opt, T, pid, lock) {
   const markFile = path.join(state, "notified.json");
   const mark = { lines: 0, quiet: {}, ...readJson(markFile) };
   const save = () => fs.writeFileSync(markFile, JSON.stringify(mark));
