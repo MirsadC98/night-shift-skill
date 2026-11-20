@@ -2256,6 +2256,41 @@ const startRun = (extra, cfg) => {
   return { ...r, c, run: r.stderr.includes("launch refused (test)") ? JSON.parse(fs.readFileSync(path.join(c.state, "run.json"), "utf8")) : undefined };
 };
 
+// The dashboard's chain: everything a state folder ran since its last fresh start (a start with a new prompt or goal),
+// dated by chainStartedAt, which a start that goes on keeps and an older run.json does not have.
+const startGoingOn = (prev) => {
+  const c = pointerCase();
+  const file = path.join(c.state, "run.json");
+  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, "utf8")), ...prev }));
+  return { c, file };
+};
+test("a fresh start dates its chain", () => {
+  const { run } = startRun([]);
+  assert.ok(run.startedAt && run.startedAt !== "test");
+  assert.equal(run.chainStartedAt, run.startedAt);
+});
+test("a start that goes on keeps the chain's date", () => {
+  const { c, file } = startGoingOn({ chainStartedAt: "2026-11-16 03:00:00" });
+  assert.match(c.run("start", ["--state", c.state, "--allow-dirty"]).stderr, /launch refused \(test\)/);
+  const run = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(run.chainStartedAt, "2026-11-16 03:00:00");
+  assert.notEqual(run.startedAt, "test");
+});
+test("a start that goes on from an older run.json writes no chain date", () => {
+  const { c, file } = startGoingOn({});
+  assert.match(c.run("start", ["--state", c.state, "--allow-dirty"]).stderr, /launch refused \(test\)/);
+  const run = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.notEqual(run.startedAt, "test");
+  assert.equal("chainStartedAt" in run, false);
+});
+test("a new prompt in a folder that holds a chain starts a new one", () => {
+  const { c, file } = startGoingOn({ chainStartedAt: "2026-11-16 03:00:00" });
+  assert.match(c.run("start", ["--state", c.state, "--prompt", "second", "--allow-dirty"]).stderr, /launch refused \(test\)/);
+  const run = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.notEqual(run.chainStartedAt, "2026-11-16 03:00:00");
+  assert.equal(run.chainStartedAt, run.startedAt);
+});
+
 // C4: the version the code knows (version.mjs), printed by --version and kept in run.json for a report of what ran.
 test("--version prints the runner's version, and start keeps it in run.json", async () => {
   const { VERSION } = await import("./version.mjs");

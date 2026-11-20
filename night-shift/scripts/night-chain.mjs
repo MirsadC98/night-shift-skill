@@ -609,7 +609,8 @@ async function start(opt) {
   if (owner) fail(`${state} holds a run of ${owner}, not of ${repo}; pass --state with a run folder of this repository's, or set "stateDir" in its .claude/night-shift.json for a new one`);
   // K6: the tree, chosen before the state folder is made, so that a refused one leaves nothing inside it.
   const fresh = Boolean(planning) || Boolean(opt["prompt-file"]) || typeof opt.prompt === "string";
-  const wt = treeChoice({ repo, state, opt, cfg, from, fresh, prev: fs.existsSync(path.join(state, "run.json")) ? parseOr(read(path.join(state, "run.json")), {}) : null });
+  const prev = fs.existsSync(path.join(state, "run.json")) ? parseOr(read(path.join(state, "run.json")), {}) : null;
+  const wt = treeChoice({ repo, state, opt, cfg, from, fresh, prev });
   const copy = wt ? copyChoice(repo, cfg.worktreeCopy) : null;
   fs.mkdirSync(path.join(state, "prompts"), { recursive: true });
   // In long form, so the guard, which refuses 8.3 short names, accepts the handover's path whatever way --state or %TEMP% spelled it.
@@ -651,6 +652,7 @@ async function start(opt) {
   const sessionPath = [path.dirname(NODE), ...String(process.env.PATH || "").split(path.delimiter).filter((p) => p && !/fnm_multishells/i.test(p))].join(path.delimiter);
   // --max-sessions counts the sessions this start runs, a resumed one first, in an earlier run's folder too.
   const maxSessions = opt["max-sessions"] !== undefined ? Number(opt["max-sessions"]) : null;
+  const at = now();
   const run = {
     repo,
     state,
@@ -690,7 +692,10 @@ async function start(opt) {
     ...(process.env.CLAUDE_CONFIG_DIR ? { claudeConfigDir: claudeHome() } : {}),
     // C4: the copy that started the run, for a report of what ran (a reload takes up newer code without changing it).
     version: VERSION,
-    startedAt: now(),
+    startedAt: at,
+    // The chain the dashboard shows: everything this folder ran since its last fresh start. A start that goes on keeps
+    // the date; a run.json from before the key has none, and the dashboard then reads the whole folder.
+    ...(fresh ? { chainStartedAt: at } : prev?.chainStartedAt ? { chainStartedAt: prev.chainStartedAt } : {}),
   };
   fs.writeFileSync(runFile, JSON.stringify(run, null, 2));
   // Each chain counts its own Fable sessions and measures the allowance anew; one used up stays so.
