@@ -2,9 +2,12 @@
 // node --test scripts/dashboard.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { readChain } from "./dashboard.mjs";
+import { tempRoot } from "./config.mjs";
+import { parseSession } from "./run-read.mjs";
+import { readChain, sessionBlock, blockSignature, BLOCK_KEYS, CACHE_VERSION } from "./dashboard.mjs";
 import { reached } from "./fixtures/imports.mjs";
 // A CLAUDE_CONFIG_DIR of the user's own would move every file these tests read or write (claudeHome in config.mjs).
 delete process.env.CLAUDE_CONFIG_DIR;
@@ -149,4 +152,175 @@ test("readChain: a line nobody knows stays visible", () => {
 test("readChain: session 100 comes after session 99", () => {
   const c = readChain(log(BASE, [[0, "session 100 starts: later"], [1, "session 99 starts: earlier"]]));
   assert.deepEqual(c.sessions.map((s) => s.n), [99, 100]);
+});
+
+// ---------------------------------------------------------------- a session's block
+const line = (j) => JSON.stringify(j);
+const jl = (lines) => lines.map((l) => (typeof l === "string" ? l : line(l))).join("\n") + "\n";
+const nn = (n) => String(n).padStart(2, "0");
+// A run made by hand under tempRoot(): state/ with a run.json that names the fixture's own Claude folder, whose
+// projects/p/ holds the transcripts. Later tests add to it.
+function fixtureRun(extra = {}) {
+  const root = fs.mkdtempSync(path.join(tempRoot(), "dash-"));
+  const state = path.join(root, "state"), claude = path.join(root, "claude"), proj = path.join(claude, "projects", "p");
+  for (const d of [state, proj]) fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(state, "run.json"), line({ claudeConfigDir: claude, lang: "en", repo: path.join(root, "repo"), ...extra }));
+  return {
+    root, state, claude, proj,
+    stream: (n, lines) => fs.writeFileSync(path.join(state, `session-${nn(n)}.jsonl`), jl(lines)),
+    transcript: (sid, lines) => fs.writeFileSync(path.join(proj, `${sid}.jsonl`), jl(lines)),
+    agent: (sid, name, lines) => {
+      const d = path.join(proj, sid, "subagents");
+      fs.mkdirSync(d, { recursive: true });
+      fs.writeFileSync(path.join(d, `${name}.jsonl`), jl(lines));
+    },
+  };
+}
+const SID = "00000000-0000-4000-8000-000000000001";
+const T0 = Date.UTC(2026, 10, 16, 1, 0);
+const iso = (ms) => new Date(ms).toISOString();
+const init = (sid = SID) => ({ type: "system", subtype: "init", session_id: sid, model: "claude-opus-5-5" });
+const call = (id, min, { input = 100, read = 1000, write = 50, output = 20, content = [], model = "claude-opus-5-5", sidechain = false, sid = SID } = {}) => ({
+  type: "assistant", timestamp: iso(T0 + min * MIN), session_id: sid, parent_tool_use_id: null, ...(sidechain ? { isSidechain: true } : {}),
+  message: { id, model, role: "assistant", content, usage: { input_tokens: input, cache_read_input_tokens: read, cache_creation_input_tokens: write, output_tokens: output } },
+});
+const use = (id, name, input = {}) => ({ type: "tool_use", id, name, input });
+const MU = (input, output, costUSD) => ({ inputTokens: input, outputTokens: output, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD });
+const result = (usd, turns, modelUsage) => ({ type: "result", subtype: "success", is_error: false, num_turns: turns, session_id: SID, total_cost_usd: usd, modelUsage });
+const limitEvent = (h5, d7) => ({ type: "rate_limit_event", rate_limit_info: { status: "allowed", unifiedWindows: { five_hour: { utilization: h5 }, seven_day: { utilization: d7 } } } });
+// Two main-thread calls (Bash; Read and an Agent call), the agent a1 on Haiku started, reported and finished.
+const SESSION = [
+  init(),
+  call("msg_1", 0, { content: [use("tu1", "Bash", { command: "ls", description: "list" })] }),
+  limitEvent(0.1, 0.3),
+  { type: "user", session_id: SID, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tu1", content: "ok" }] } },
+  call("msg_2", 5, { input: 200, read: 3000, content: [use("tu2", "Read", { file_path: "/r/a.md" }), use("tu3", "Agent", { description: "look", subagent_type: "Explore", model: "haiku" })] }),
+  { type: "user", session_id: SID, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tu3", content: "launched" }] }, tool_use_result: { agentId: "a1", resolvedModel: "claude-haiku-5-5" } },
+  { type: "system", subtype: "task_started", task_id: "a1", tool_use_id: "tu3", task_type: "local_agent", description: "look", subagent_type: "Explore", is_backgrounded: false, session_id: SID },
+  { type: "system", subtype: "task_progress", task_id: "a1", tool_use_id: "tu3", usage: { total_tokens: 5000, tool_uses: 2 }, session_id: SID },
+];
+const FINISH = [
+  { type: "system", subtype: "task_updated", task_id: "a1", patch: { status: "completed", end_time: T0 + 9 * MIN }, session_id: SID },
+  { type: "system", subtype: "task_notification", task_id: "a1", tool_use_id: "tu3", status: "completed", usage: { total_tokens: 6000, tool_uses: 3 }, session_id: SID },
+  limitEvent(0.2, 0.31),
+  result(2, 9, { "claude-opus-5-5": MU(300, 40, 1.5), "claude-haiku-5-5": MU(50, 30, 0.5) }),
+];
+function sessionFixture(stream) {
+  const r = fixtureRun();
+  r.stream(1, stream);
+  r.transcript(SID, [call("msg_1", 0), call("msg_2", 5, { input: 200, read: 3000 })]);
+  r.agent(SID, "agent-a1", [call("msg_a1", 6, { model: "claude-haiku-5-5", input: 50, read: 0, write: 0, output: 10, sidechain: true })]);
+  return r;
+}
+
+test("sessionBlock: a finished session", () => {
+  const r = sessionFixture([...SESSION, ...FINISH]);
+  const b = sessionBlock(r.state, 1);
+  assert.equal(b.usd, 2);
+  assert.equal(b.estimated, false);
+  assert.equal(b.turns, 9);
+  assert.equal(b.calls, 2);
+  assert.deepEqual(b.rows.map((x) => x.kind).sort(), ["main", "sub"]);
+  assert.equal(Math.round(b.rows.reduce((s, x) => s + x.usd, 0) * 100) / 100, 2);
+  for (const k of ["input", "cacheRead", "cacheWrite", "output"]) assert.equal(b.tokens[k], b.rows.reduce((s, x) => s + x[k], 0), k);
+  assert.deepEqual(b.tools, { Bash: 1, Read: 1, Agent: 1 });
+  assert.equal(b.subagents.length, 1);
+  assert.deepEqual(b.subagents[0], { description: "look", type: "Explore", model: "haiku", start: T0 + 5 * MIN, end: T0 + 9 * MIN, tokens: 6000, toolUses: 3, background: false, status: "completed" });
+  assert.deepEqual(b.context, [[T0, 1150], [T0 + 5 * MIN, 3250]]);
+  assert.equal(b.contextPeak, 3250);
+  assert.equal(b.lastStep, "look");
+  assert.deepEqual(b.windows, { first: { t: T0, h5: 10, d7: 30 }, last: { t: T0 + 5 * MIN, h5: 20, d7: 31 } });
+  assert.equal(b.denials, 0);
+  assert.deepEqual(b.denialNotes, []);
+  assert.equal(b.src.v, CACHE_VERSION);
+  assert.equal(b.src.sid, SID);
+  assert.equal(b.src.base, path.join(r.proj, SID));
+  assert.equal(typeof b.src.sig, "string");
+  assert.ok(Number.isFinite(b.lastSeen));
+  assert.deepEqual(Object.keys(b).sort(), [...BLOCK_KEYS].sort());
+});
+
+test("sessionBlock: a running session", () => {
+  const r = sessionFixture(SESSION);
+  const b = sessionBlock(r.state, 1);
+  assert.equal(b.usd, null);
+  assert.equal(b.estimated, true);
+  assert.equal(b.turns, null);
+  for (const x of b.rows) {
+    assert.equal(x.usd, null);
+    assert.equal(x.estimated, true);
+    assert.ok(x.units > 0);
+  }
+  assert.equal(b.subagents[0].end, null);
+  assert.equal(b.subagents[0].tokens, 5000);
+});
+
+test("sessionBlock: the context is thinned and keeps its peak", () => {
+  const r = fixtureRun();
+  const calls = Array.from({ length: 200 }, (_, i) => call(`m${i}`, i, { input: 10, read: i === 136 ? 90_000 : 1000 + i, write: 0 }));
+  r.stream(1, [init(), ...calls]);
+  const b = sessionBlock(r.state, 1);
+  assert.ok(b.context.length <= 60, String(b.context.length));
+  assert.deepEqual(b.context[0], [T0, 1010]);
+  assert.deepEqual(b.context.at(-1), [T0 + 199 * MIN, 1209]);
+  assert.ok(b.context.some(([t, v]) => t === T0 + 136 * MIN && v === 90_010));
+  assert.equal(b.contextPeak, 90_010);
+  assert.equal(b.calls, 200);
+  for (let i = 1; i < b.context.length; i++) assert.ok(b.context[i][0] > b.context[i - 1][0], "in time order");
+});
+
+test("sessionBlock: only the guard's own refusal counts", () => {
+  const r = fixtureRun();
+  fs.copyFileSync(path.join(HERE, "fixtures", "session-guard-text-2026-11-19.jsonl"), path.join(r.state, "session-01.jsonl"));
+  const b = sessionBlock(r.state, 1);
+  assert.equal(b.denials, parseSession(r.state, "01").denials.length);
+  assert.ok(b.denials > 0 && b.denials < 7, `the fixture holds 7 guard texts, ${b.denials} of them refusals`);
+  assert.equal(b.denialNotes.length, b.denials);
+});
+
+test("sessionBlock: a stream that is not there, empty, or cut mid-line", () => {
+  const r = fixtureRun();
+  fs.writeFileSync(path.join(r.state, "session-02.jsonl"), "");
+  for (const b of [sessionBlock(r.state, 1), sessionBlock(r.state, 2)]) {
+    assert.equal(b.calls, 0);
+    assert.deepEqual([b.rows, b.context, b.subagents, b.denialNotes, b.tools], [[], [], [], [], {}]);
+    assert.deepEqual([b.usd, b.turns, b.contextPeak, b.lastStep, b.windows], [null, null, 0, null, { first: null, last: null }]);
+    assert.equal(b.estimated, true);
+    assert.deepEqual(Object.keys(b).sort(), [...BLOCK_KEYS].sort());
+  }
+  assert.equal(sessionBlock(r.state, 1).lastSeen, null, "no stream, no sign of life");
+  r.stream(3, [init(), call("m1", 0), call("m2", 1)]);
+  fs.appendFileSync(path.join(r.state, "session-03.jsonl"), '{"type":"assistant","message":{"id":"m3","usa');
+  assert.equal(sessionBlock(r.state, 3).calls, 2);
+});
+
+test("blockSignature: it moves with the files", () => {
+  const r = sessionFixture(SESSION);
+  const a = blockSignature(r.state, 1);
+  assert.equal(a.sid, SID);
+  assert.equal(a.base, path.join(r.proj, SID));
+  assert.deepEqual(blockSignature(r.state, 1), a, "nothing changed");
+  fs.appendFileSync(path.join(r.state, "session-01.jsonl"), jl([call("msg_3", 9)]));
+  const b = blockSignature(r.state, 1);
+  assert.notEqual(b.sig, a.sig, "a stream line");
+  r.agent(SID, "agent-a2", [call("msg_a2", 9, { model: "claude-haiku-5-5", sidechain: true })]);
+  const c = blockSignature(r.state, 1);
+  assert.notEqual(c.sig, b.sig, "a new agent file");
+  assert.deepEqual(blockSignature(r.state, 1, { v: CACHE_VERSION, sid: SID, base: a.base }), c, "known gives the same");
+  // With an earlier src the stream's head is not read: its session id is taken as it is.
+  assert.equal(blockSignature(r.state, 1, { v: CACHE_VERSION, sid: "kept", base: null }).sid, "kept");
+  const none = blockSignature(r.state, 9);
+  assert.deepEqual([none.sid, none.base], [null, null], "no stream");
+});
+
+test("sessionBlock: a session's heartbeats", () => {
+  const r = fixtureRun();
+  r.stream(1, [init(), call("m1", 0), call("m2", 1), call("m3", 7), call("m4", 40)]);
+  assert.deepEqual(sessionBlock(r.state, 1).src.beats, [T0 + 1 * MIN, T0 + 7 * MIN, T0 + 40 * MIN]);
+});
+
+test("sessionBlock: a three-digit session finds its stream", () => {
+  const r = fixtureRun();
+  r.stream(100, [init(), call("m1", 0)]);
+  assert.ok(sessionBlock(r.state, 100).calls > 0);
 });
