@@ -64,6 +64,22 @@ code, .mono { font-family: var(--mono); font-size: .92em; }
 .facts dt { font-size: 12px; color: var(--on-night-2); }
 .facts dd { font-size: 16px; font-weight: 600; margin-top: 1px; white-space: nowrap; }
 .facts dd small { display: block; font-size: 12px; font-weight: 400; color: var(--on-night-2); margin-top: 1px; min-height: 17px; }
+.bar .age { margin-left: 9px; padding-left: 9px; border-left: 1px solid var(--night-line); }
+.langs { display: inline-flex; align-items: center; gap: 2px; color: var(--night-line); white-space: nowrap; }
+.langs button { font: inherit; font-size: 12.5px; color: var(--on-night-2); background: none; border: 1px solid transparent; border-radius: 6px; padding: 2px 8px; cursor: pointer; }
+.langs button:hover { color: var(--on-night); background: var(--night-2); }
+.langs button[aria-pressed="true"] { color: var(--on-night); border-color: var(--night-line); }
+.notice { margin: 0 0 18px; padding: 10px 14px; border-radius: 8px; border-left: 3px solid var(--caution); background: var(--caution-bg); color: var(--ink); font-size: 13.5px; overflow-wrap: anywhere; }
+.notice code { white-space: nowrap; }
+.now { padding: 14px 0 18px; border-top: 1px solid var(--night-line); color: var(--on-night-2); font-size: 13.5px; }
+.now p { overflow-wrap: anywhere; }
+.now p + p { margin-top: 3px; padding-left: 17px; }
+.now b, .now q { color: var(--on-night); }
+.now b { font-weight: 650; }
+.now q { quotes: "\201C" "\201D"; }
+.now .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; background: #58d68d; }
+.now .dot.wait { background: #f0b445; }
+.now .dot.idle { background: none; box-shadow: inset 0 0 0 2px var(--on-night-2); }
 
 /* ---- work areas ---- */
 main.wrap { padding-top: 24px; padding-bottom: 48px; }
@@ -192,6 +208,7 @@ footer p + p { margin-top: 4px; }
 @media (max-width: 680px) {
   .wrap { padding: 0 14px; }
   .bar nav { display: none; }
+  .bar { flex-wrap: wrap; gap: 4px 12px; padding: 6px 0; }
   .head h1 { font-size: 22px; }
   .facts { gap: 14px 22px; }
   .facts div { border-right: 0; margin-right: 0; padding-right: 0; }
@@ -214,8 +231,9 @@ footer p + p { margin-top: 4px; }
         night-shift
       </span>
       <nav id="nav"><a href="#you" id="nav-you"></a><a href="#run" id="nav-run"></a><a href="#log" id="nav-log"></a><a href="#sessions" id="nav-ses"></a></nav>
-      <span class="meta" id="snap"></span>
+      <span class="meta"><span id="snap"></span><span class="age" id="age" hidden></span></span>
       <span class="tag" id="tag" hidden></span>
+      <span class="langs" id="langs" role="group" hidden></span>
     </div>
     <div class="head">
       <h1 id="project"></h1>
@@ -223,6 +241,8 @@ footer p + p { margin-top: 4px; }
       <p class="where" id="where"></p>
       <dl class="facts" id="facts"></dl>
     </div>
+    <p class="notice" id="notice" role="status" hidden></p>
+    <div class="now" id="now" hidden></div>
   </div>
 </div>
 
@@ -294,8 +314,13 @@ footer p + p { margin-top: 4px; }
 
   const LABELS = JSON.parse($("labels").textContent);
   let D = JSON.parse($("chain-data").textContent);
+  // The kind of data this page reads: the kind it was written with.
+  const SCHEMA = D.schema;
+  // A language the user chose here before wins over the run's, when the page carries it.
+  const LANG_KEY = "night-shift-dashboard-lang";
+  const stored = (() => { try { return localStorage.getItem(LANG_KEY); } catch { return null; } })();
   // What the user opened, ticked and typed, and the language: kept across every render.
-  const ui = { open: new Set(), filter: false, search: "", lang: LABELS.start };
+  const ui = { open: new Set(), filter: false, search: "", lang: stored != null && Object.hasOwn(LABELS.sets, stored) ? stored : LABELS.start };
   let V = null, F = null, hot = null, drawnW = 0;
 
   // ---------------------------------------------------------------- words, dates and numbers
@@ -347,9 +372,50 @@ footer p + p { margin-top: 4px; }
   const titleOf = (s) => ((s.title || "").length >= 85 ? `${s.title.trimEnd()}…` : s.title || "");
   const smooth = () => (matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth");
 
+  // ---------------------------------------------------------------- live: the data file beside the page
+  // A run that has not ended is live: the page reads dashboard-data.js again every 5 s. A page that never read it
+  // (copied away from its folder) is a snapshot, and data of another kind than this page's asks for a reload.
+  const FRESH_MS = 90_000, POLL_MS = 5000;
+  const isLive = (d) => !d.demo && !["ended", "gone"].includes(d.chain?.state);
+  const poll = { ok: true, ever: false, fails: 0, note: null };
+  // The data's age by the browser's clock; a clock behind the writer's reads zero.
+  const age = () => Math.max(0, Date.now() - D.generatedAt);
+  const fresh = () => isLive(D) && poll.ok && !poll.note && age() < FRESH_MS;
+  // The page's clock: the browser's while the data is live, the last load worked and the data is younger than 90 s,
+  // so the running timers tick; else the moment the data was written, so a page nothing updates shows no running timer.
+  const clock = () => (fresh() ? Date.now() : D.generatedAt);
+  let got = false, mode = null;
+  window.nightShiftData = (d) => { got = true; take(d); };
+  function take(d) {
+    if (!d || typeof d !== "object" || !d.chain) return;
+    if (d.schema !== SCHEMA) { poll.note = "reload"; return drawTop(); }
+    // another chain's data (the folder was started afresh), or nothing newer: the page keeps what it shows
+    if (d.chain.started !== D.chain.started || !(d.generatedAt > D.generatedAt)) return;
+    render(d);
+  }
+  function pollOnce() {
+    if (!isLive(D) || poll.note) return;
+    got = false;
+    const s = document.createElement("script");
+    const done = (ok) => { s.remove(); settle(ok && got); };
+    s.addEventListener("load", () => done(true));
+    s.addEventListener("error", () => done(false));
+    s.src = "dashboard-data.js";
+    document.body.append(s);
+  }
+  function settle(ok) {
+    poll.ok = ok;
+    if (ok) { poll.ever = true; poll.fails = 0; } else if (++poll.fails >= 3 && !poll.ever) poll.note = "snapshot";
+    tick();
+    if (isLive(D) && !poll.note) setTimeout(pollOnce, POLL_MS);
+  }
+  // Each second: a page whose clock changed source is drawn again; a live one moves its timers.
+  function tick() {
+    if (fresh() !== mode) return render(D);
+    if (isLive(D)) drawTop();
+  }
+
   // ---------------------------------------------------------------- the data, in the shapes the page draws
-  // The page's clock: the moment the data was written.
-  const clock = () => D.generatedAt;
   const LIVE = ["scheduled", "running", "between", "limit"];
   function shape(now) {
     const c = D.chain, live = LIVE.includes(c.state);
@@ -457,6 +523,68 @@ footer p + p { margin-top: 4px; }
       fact(t("factGuard"), pl(denials, t("refusalOne"), t("refusalMany", { n: num(denials) }))),
     ]);
     fill($("foot"), [el("p", { text: D.demo ? t("footDemo") : t("foot") }), el("p", { text: t("footVersion", { v: D.skillVersion || NONE }) })]);
+  }
+  // With two sets of words, both names in the bar; the choice is kept for the next visit.
+  function drawLangs() {
+    const codes = Object.keys(LABELS.sets), box = $("langs");
+    box.hidden = codes.length < 2;
+    if (box.hidden) return;
+    box.setAttribute("aria-label", t("langLabel"));
+    fill(box, dots(codes.map((code) => el("button", { type: "button", id: `lang-${code}`, lang: code, "aria-pressed": String(code === ui.lang), text: LABELS.sets[code].name || code, onclick: () => choose(code) }))));
+  }
+  function choose(code) {
+    if (code === ui.lang) return;
+    setLang(code);
+    try { localStorage.setItem(LANG_KEY, code); } catch { /* a page from disk may have no storage */ }
+    render(D);
+  }
+
+  // ---------------------------------------------------------------- the top: the data's age, what stands still, now
+  function drawTop() { drawAge(); drawNotice(); drawNow(); }
+  function drawAge() {
+    const show = fresh();
+    $("age").hidden = !show;
+    $("age").textContent = show ? t("ageSec", { n: num(Math.floor(age() / 1000)) }) : "";
+  }
+  let noticeKey = "";
+  function drawNotice() {
+    const box = $("notice"), kind = poll.note || (isLive(D) && age() >= FRESH_MS ? "stale" : "");
+    const key = `${kind}|${ui.lang}|${D.generatedAt}`;
+    if (key === noticeKey) return;
+    noticeKey = key;
+    box.hidden = !kind;
+    box.dataset.kind = kind;
+    const when = dayHm(D.generatedAt);
+    fill(box, kind === "stale" ? [t("staleLine", { when }), " ", el("code", { text: `node night-chain.mjs dashboard${D.chain.repo ? ` --repo "${D.chain.repo}"` : ""}` })]
+      : kind === "snapshot" ? [t("snapshotLine", { when })] : kind === "reload" ? [t("reloadLine")] : []);
+  }
+  // The running session as the data last saw it, or what the chain waits for; nothing once it ended.
+  function drawNow() {
+    const c = D.chain, at = clock(), near = (ms) => (day(ms) === day(at) ? hm(ms) : dayHm(ms)), lines = [];
+    const next = c.next ? (c.next.resume ? t("nowNextResume", { n: pad(c.next.n) }) : t("nowNext", { n: pad(c.next.n) })) : null;
+    if (c.state === "running" && D.now) {
+      const n = D.now, s = (D.sessions || []).find((x) => Number(x.n) === Number(n.n)) || {};
+      const agents = s.subagents || [], busy = agents.filter((a) => a.end == null), done = agents.length - busy.length;
+      const w = [...(D.limits || []), s.windows?.last].filter((x) => x?.t).sort((a, b) => a.t - b.t).at(-1);
+      const model = s.model ? (s.effort ? t("nowModel", { model: modelName(s.model), effort: s.effort }) : modelName(s.model)) : null;
+      lines.push(
+        [el("i", { class: "dot" }), ...dots([el("b", { text: t("sessionN", { n: pad(n.n) }) }), n.since != null ? t("nowFor", { dur: dur(at - n.since) }) : null, model])],
+        s.title ? [el("q", {}, rich(titleOf(s)))] : null,
+        dots([n.lastStep ? t("nowStep", { step: n.lastStep }) : null, n.context != null ? t("nowContext", { n: tok(n.context), peak: tok(s.contextPeak ?? n.context) }) : null]),
+        agents.length ? dots([
+          busy.length ? `${pl(busy.length, t("nowBusyOne"), t("nowBusyMany", { n: num(busy.length) }))} (${busy.map((a) => (a.model ? `${a.type || t("agent")} · ${modelName(a.model)}` : a.type || t("agent"))).join(", ")})` : null,
+          done ? pl(done, t("nowDoneOne"), t("nowDoneMany", { n: num(done) })) : null]) : null,
+        dots([w?.h5 != null ? t("window5Long", { v: pct(w.h5) }) : null, w?.d7 != null ? t("window7Long", { v: pct(w.d7) }) : null,
+          s.usd != null ? t("nowSoFar", { usd: usd(s.usd, s.estimated) }) : t("nowCostUnknown")]),
+      );
+    } else if (c.state === "limit") {
+      const then = c.next ? (c.next.resume ? t("nowResumesThen", { n: pad(c.next.n) }) : t("nowStartsThen", { n: pad(c.next.n) })) : null;
+      lines.push([el("i", { class: "dot wait" }), ...dots([c.waitUntil != null ? t("nowLimit", { when: near(c.waitUntil) }) : t("limitWait"), then])]);
+    } else if (c.state === "between") lines.push([el("i", { class: "dot idle" }), ...dots([t("between"), next])]);
+    else if (c.state === "scheduled") lines.push([el("i", { class: "dot wait" }), ...dots([t("nowScheduled"), next])]);
+    const kept = lines.filter((l) => l && keep(l).length);
+    $("now").hidden = !kept.length;
+    fill($("now"), kept.map((l) => el("p", {}, l)));
   }
 
   // ---------------------------------------------------------------- the run: one string through the night
@@ -736,19 +864,24 @@ footer p + p { margin-top: 4px; }
 
   // ---------------------------------------------------------------- the whole page, from the data; it can be called again
   function render(data) {
+    const x = scrollX, y = scrollY, focus = document.activeElement?.id;
     D = data;
+    mode = fresh();
     V = shape(clock());
-    const focus = document.activeElement?.id;
     hot = null;
-    drawWords(); drawShell(); drawWaits(); drawLog(); drawLegend(); drawRun(true); drawSessions(); readoutIdle();
-    // a redraw replaces the row a keyboard user stood on
+    noticeKey = "";
+    drawWords(); drawShell(); drawLangs(); drawTop(); drawWaits(); drawLog(); drawLegend(); drawRun(true); drawSessions(); readoutIdle();
+    // a redraw replaces the row a keyboard user stood on, and must not move the page under the reader
     if (focus && document.activeElement?.id !== focus) $(focus)?.focus({ preventScroll: true });
+    if (scrollX !== x || scrollY !== y) scrollTo(x, y);
   }
   $("find").addEventListener("input", () => { ui.search = $("find").value; applyFilter(); });
   $("only-you").addEventListener("change", () => { ui.filter = $("only-you").checked; applyFilter(); });
   setLang(ui.lang);
   render(D);
   new ResizeObserver(() => drawRun(false)).observe($("run-plot"));
+  setInterval(tick, 1000);
+  pollOnce();
 })();
 </script>
 </body>
