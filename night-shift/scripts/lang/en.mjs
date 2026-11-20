@@ -7,6 +7,9 @@ const s = (n) => (n === 1 ? "" : "s");
 export default {
   // the language's English name, for the header line "The user reads …" of every night session
   name: "English",
+  // the language's name in the language itself ("Türkçe", "Deutsch"), for the dashboard's language switch; a table
+  // without one is named there by its `name`
+  nativeName: "English",
   // the phrase that marks a night-report commit (`docs: night report …`), left out of a job's commits
   reportCommit: "night report",
 
@@ -162,6 +165,8 @@ export default {
 
   // The dashboard's words. Each is a plain string, because the page carries them as data; a {name} place is filled by
   // the page, and a count has one entry for one and one for many. Dates and numbers follow the language's code.
+  // The page's language switch names each language by its table's `nativeName` (at the top, beside `name`), not by a
+  // word of this group.
   dash: {
     // the bar and the header
     navLabel: "Sections",

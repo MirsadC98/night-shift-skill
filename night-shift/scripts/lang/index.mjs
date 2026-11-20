@@ -38,6 +38,9 @@ export async function loadLang(code, home = os.homedir()) {
   const table = overEnglish(mod.default);
   // The session header names the language; without a name of its own the code says it better than "English".
   if (typeof mod.default.name !== "string" || !mod.default.name.trim()) table.name = code;
+  // The dashboard's switch names the language in the language itself; a table without that name is named by the one
+  // above, since the "English" a missing key reads would name another language.
+  if (typeof mod.default.nativeName !== "string" || !mod.default.nativeName.trim()) table.nativeName = table.name;
   // Telegram takes 1 to 32 lowercase letters, digits or _ for a command, and each name must answer one thing. Each name
   // is checked on its own: one Telegram would refuse, another command's English name, or a name an earlier command took
   // reads English, and the others keep theirs.

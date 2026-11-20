@@ -97,6 +97,23 @@ test("a table that is missing, does not load or exports no table is an error nam
   assert.equal(strings("zn"), en);
 });
 
+test("a table names its language in the language itself (nativeName), and one without it is named by its name, never by English's", async () => {
+  assert.equal(en.nativeName, "English");
+  // 2026-11-20: the dashboard's switch read "Turkish" for the user's Turkish table, since `name` is the English name
+  const own = await loadLang("yn", homeWithTable("yn", "export default { name: 'Ynnish', nativeName: 'Ynçe' };\n"));
+  assert.deepEqual([own.table.name, own.table.nativeName], ["Ynnish", "Ynçe"]);
+  // a table from before the key: its own name, not the "English" every other missing key reads
+  assert.equal((await loadLang("xx", homeWithTable("xx"))).table.nativeName, "Xxish");
+  for (const [code, text] of [["yo", "nativeName: '  '"], ["yp", "nativeName: 5"], ["yr", "nativeName: null"]])
+    assert.equal((await loadLang(code, homeWithTable(code, `export default { name: 'Yish', ${text} };\n`))).table.nativeName, "Yish", code);
+  // neither: the code, as for name
+  const bare = (await loadLang("ys", homeWithTable("ys", "export default { reportTitle: 'ys·title' };\n"))).table;
+  assert.deepEqual([bare.name, bare.nativeName], ["ys", "ys"]);
+  // a native name alone does not name the language for the session header, which reads English
+  const only = (await loadLang("yt", homeWithTable("yt", "export default { nativeName: 'Ytçe' };\n"))).table;
+  assert.deepEqual([only.name, only.nativeName], ["yt", "Ytçe"]);
+});
+
 test("a table without a name reads its code as its name, and command names Telegram would refuse read English", async () => {
   const nameless = await loadLang("zq", homeWithTable("zq", "export default { name: '  ', reportTitle: 'zq·title' };\n"));
   assert.equal(nameless.error, undefined);

@@ -446,13 +446,14 @@ export const demoData = () => JSON.parse(fs.readFileSync(path.join(ASSETS, "dash
 // ---------------------------------------------------------------------------- the page
 // The words the page carries: the run's language first, English always, and `also` (a second language, for a run in
 // English). A language whose table nothing loaded reads English word for word, so it gets no set of its own: the page
-// would offer a switch between two equal columns.
+// would offer a switch between two equal columns. A set's name is what the switch shows: the language's name in the
+// language itself (nativeName; loadLang gives a table without one its `name`).
 export function labelsFor(lang, { also = null } = {}) {
   const english = strings("en"), sets = {};
   const add = (code) => {
     const table = strings(code);
     if (Object.hasOwn(sets, code) || (code !== "en" && table === english)) return;
-    sets[code] = { code, name: table.name, words: table.dash };
+    sets[code] = { code, name: table.nativeName, words: table.dash };
   };
   for (const code of [lang, "en", also]) if (typeof code === "string") add(code);
   return { start: Object.hasOwn(sets, lang) ? lang : "en", sets };

@@ -838,6 +838,20 @@ test("a run in another language carries both sets", async () => {
   assert.deepEqual(l.sets.xx.words, { ...en.dash, waitsHead: "xx·waits for you", stateRunning: "xx·running" });
 });
 
+test("the switch names a language in the language itself, and by its name when the table gives none", async () => {
+  // 2026-11-20: the page's switch read "Turkish" beside "English" for the user's Turkish table
+  const home = fs.mkdtempSync(path.join(tempRoot(), "ns-dash-native-"));
+  const put = (code, text) => { fs.mkdirSync(path.dirname(langFile(code, home)), { recursive: true }); fs.writeFileSync(langFile(code, home), text); };
+  put("xn", "export default { name: 'Xnnish', nativeName: 'Xnçe', dash: { stateRunning: 'xn·running' } };\n");
+  put("xo", "export default { name: 'Xoish', dash: { stateRunning: 'xo·running' } };\n");
+  for (const code of ["xn", "xo"]) assert.equal((await loadLang(code, home)).error, undefined);
+  assert.equal(labelsFor("xn").sets.xn.name, "Xnçe");
+  assert.equal(labelsFor("xo").sets.xo.name, "Xoish");
+  assert.equal(labelsFor("xn").sets.en.name, "English");
+  // the page shows a set's name as it comes: no word of the template names a language
+  assert.match(template(), /text: LABELS\.sets\[code\]\.name \|\| code/);
+});
+
 test("an English run carries one set", async () => {
   await loadXx();
   assert.deepEqual(labelsFor("en"), { start: "en", sets: { en: { code: "en", name: "English", words: en.dash } } });
