@@ -775,7 +775,7 @@ footer p + p { margin-top: 4px; }
     const starts = r.tries.map((a) => el("li", {}, [
       a.open ? t("tryOpen", { start: from(a) }) : a.endKnown === false ? t("trySpanAbout", { start: from(a), end: to(a) }) : t("trySpan", { start: from(a), end: to(a) }),
       sub([why(a), how(a), a.outcome === "success" && a.turns != null ? pl(a.turns, t("turnOne"), t("turnMany", { n: num(a.turns) })) : null, a.usd != null ? usd(a.usd) : null,
-        a.h5 ? t("span5", { a: a.h5[0] ?? NONE, b: pct(a.h5[1]) }) : null, a.d7 ? t("span7", { a: a.d7[0] ?? NONE, b: pct(a.d7[1]) }) : null])]));
+        a.h5 ? t("span5", { a: pct(a.h5[0]), b: pct(a.h5[1]) }) : null, a.d7 ? t("span7", { a: pct(a.d7[0]), b: pct(a.d7[1]) }) : null])]));
 
     const ctx = (() => {
       const pts = s.context || [];

@@ -838,6 +838,14 @@ test("a run in another language carries both sets", async () => {
   assert.deepEqual(l.sets.xx.words, { ...en.dash, waitsHead: "xx·waits for you", stateRunning: "xx·running" });
 });
 
+test("a limit span's two ends are both percentages", () => {
+  // 2026-11-20: {a} was the bare number and {b} a percentage, "5 h 12 → 31%" in English and "5s 12 → %31" in Turkish
+  for (const [key, field] of [["span5", "h5"], ["span7", "d7"]]) {
+    assert.ok(template().includes(`t("${key}", { a: pct(a.${field}[0]), b: pct(a.${field}[1]) })`), key);
+    assert.match(en.dash[key], /\{a\} → \{b\}$/, "the word adds no sign of its own");
+  }
+});
+
 test("the switch names a language in the language itself, and by its name when the table gives none", async () => {
   // 2026-11-20: the page's switch read "Turkish" beside "English" for the user's Turkish table
   const home = fs.mkdtempSync(path.join(tempRoot(), "ns-dash-native-"));

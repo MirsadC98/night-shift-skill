@@ -322,6 +322,7 @@ export default {
     outLimit7: "stopped by the 7-day limit",
     turnOne: "1 turn",
     turnMany: "{n} turns",
+    // a limit window over one start: {a} and {b} are both percentages as the language writes them ("12%", "%12")
     span5: "5 h {a} → {b}",
     span7: "7 d {a} → {b}",
     ctxHead: "Context per call",
