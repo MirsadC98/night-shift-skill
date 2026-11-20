@@ -25,9 +25,11 @@ const under = (p, root) => root && (p === root || p.startsWith(root + "/"));
 
 // What the runner keeps in the state folder: the settings file that loads this guard, the file
 // that names the program each session starts, its own logs and marks, the caps' count (limits.json),
-// what the user's waiter has reported (wait.json) and the user's stop (STOP-REQUEST). In any case: Windows and macOS
-// fold the path, and on Linux the runner's STOP-REQUEST and RELOAD-REQUEST keep their capitals.
-const RUNNER_FILES = /^(night-settings\.json|run\.json|launch\.cmd|runner\.err|resume\.json|chain\.log|reload-request|watch\.pid|notified\.json|fable\.json|limits\.json|wait\.json|stop-request|session-\d+\.(jsonl|err))$/i;
+// what the user's waiter has reported (wait.json) and the user's stop (STOP-REQUEST), and the dashboard its watcher
+// writes (dashboard.json, dashboard-data.js, dashboard.html, an earlier chain's dated page, each one's temporary name):
+// a session that replaced the page would decide what the user sees. In any case: Windows and macOS fold the path, and
+// on Linux the runner's STOP-REQUEST and RELOAD-REQUEST keep their capitals.
+const RUNNER_FILES = /^(night-settings\.json|run\.json|launch\.cmd|runner\.err|resume\.json|chain\.log|reload-request|watch\.pid|notified\.json|fable\.json|limits\.json|wait\.json|stop-request|session-\d+\.(jsonl|err)|(dashboard\.json|dashboard-data\.js|dashboard(-\d{8}-\d{4})?\.html)(\.\d+\.tmp)?)$/i;
 
 // ~/.claude may be a link (a junction to a folder elsewhere): a shell write can then name the files the
 // guard protects there by the link's target, a spelling norm() cannot know (on 2026-11-18 `echo x >
@@ -1516,6 +1518,11 @@ function selfTest() {
     [bash("rm -rf C:/temp/x-night"), true], [bash("rm -f C:/temp/x-night/run.json"), true], [bash("rm -f C:/temp/x-night/scratch.txt"), false],
     [write("C:/Users/u/Documents/.claude/projects/p/memory/a.txt"), true],
     [bash("rm -f C:/temp/x-night/run.*"), true], [bash("rm -f C:/work/repo/.cl*/settings.json"), true], [bash("rm -rf dist/*"), false],
+    // The dashboard's files are the runner's own (its watcher writes them); a neighbour's name and the repository's are not.
+    [write("C:/temp/x-night/dashboard.json"), true], [write("C:/temp/x-night/dashboard-data.js"), true], [write("C:/temp/x-night/dashboard.html"), true],
+    [bash("echo x > C:/temp/x-night/dashboard-data.js"), true], [bash("rm -f C:/temp/x-night/dashboard.html"), true],
+    [write("C:/temp/x-night/dashboard-20261116-0300.html"), true], [write("C:/temp/x-night/dashboard.json.123.tmp"), true],
+    [write("C:/temp/x-night/dashboard-notes.md"), false], [write("C:/work/repo/dashboard.html"), false],
     [bash("gh api --method=DELETE repos/o/r"), true], [bash("gh api repos/o/r/issues -f title=x"), true], [bash("gh api repos/o/r/pulls"), false],
     // The command a wrapper runs, a shell fed by a pipe, a write by redirect.
     [bash("bash -c 'git push --force origin main'"), true], [bash("powershell -c \"Remove-Item -Recurse C:\\Users\\u\\Documents\""), true],

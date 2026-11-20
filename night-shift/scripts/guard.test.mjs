@@ -433,6 +433,15 @@ test("the caps' count, the waiter's marks and the user's stop are the runner's o
   }
 });
 
+test("the dashboard's files are the runner's own; a neighbour's name and the repository's are not", () => {
+  for (const f of ["dashboard.json", "dashboard-data.js", "dashboard.html", "DASHBOARD.HTML", "dashboard-20261116-0300.html", "dashboard.json.123.tmp", "dashboard-data.js.9.tmp", "dashboard-20261116-0300.html.77.tmp"])
+    assert.match(write(`C:/temp/x-night/${f}`) ?? "", /the runner's own files in the state folder/, f);
+  assert.match(bash("echo x > C:/temp/x-night/dashboard-data.js") ?? "", /the runner's own files in the state folder/);
+  assert.match(bash("rm -f C:/temp/x-night/dashboard.html") ?? "", /refusing a delete of the runner's own files/);
+  for (const f of ["dashboard-notes.md", "dashboard-2026.html", "dashboard.json.tmp", "dashboard.html.bak"]) assert.equal(write(`C:/temp/x-night/${f}`), null, f);
+  assert.equal(write("C:/work/repo/dashboard.html"), null);
+});
+
 test("the hook answers deny when it cannot read its input or throws", () => {
   const GUARD = fileURLToPath(new URL("./guard.mjs", import.meta.url));
   for (const input of ["{ not json", "null"]) {
