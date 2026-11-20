@@ -1287,7 +1287,8 @@ async function dashboard(opt) {
   const D = await import("./dashboard.mjs");
   const out = typeof opt.out === "string" ? path.resolve(opt.out) : null;
   const put = (file, text) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text); };
-  const open = (file) => { if (!opt["no-open"]) platform.openFile(file); };
+  // Awaited: on Windows the opener is a PowerShell that must end before this process does (platform.openFile).
+  const open = async (file) => { if (!opt["no-open"]) await platform.openFile(file); };
   if (opt.demo) {
     // English first, and the user's configured language beside it when its table loads (labelsFor leaves out one
     // that did not), so that someone writing a table sees their words on a whole page.
@@ -1319,7 +1320,7 @@ async function dashboard(opt) {
     lines.push(T.cli.dashboardCopy(out));
   }
   console.log(lines.join("\n"));
-  open(file);
+  await open(file);
 }
 
 // wait: for an interactive session that runs it in the background and tells the user when the

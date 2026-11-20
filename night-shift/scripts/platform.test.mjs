@@ -374,24 +374,52 @@ test("keepAwake off Windows: caffeinate on macOS, systemd-inhibit around a kill 
   assert.doesNotThrow(() => child.emit("error", new Error("spawn powershell ENOENT")));
 });
 
-test("openFile hands the path over as one argument", () => {
+test("openFile hands the path over as one argument", async () => {
   const file = "C:\\Users\\a b\\x & y ü's\\dashboard.html";
   const { p, calls, child } = recorder();
-  assert.equal(p.openFile(file), true);
+  const opened = p.openFile(file);
   assert.deepEqual(calls, [["powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `Invoke-Item -LiteralPath ${p.psQuote(file)}`],
-    { detached: true, stdio: "ignore", windowsHide: true }]]);
+    { stdio: "ignore", windowsHide: true }]]);
   assert.equal(calls[0][1][3], "Invoke-Item -LiteralPath 'C:\\Users\\a b\\x & y ü''s\\dashboard.html'");
+  child.emit("exit", 0);
+  assert.equal(await opened, true);
   assert.doesNotThrow(() => child.emit("error", new Error("spawn powershell.exe ENOENT")));
   for (const [name, opener] of [["darwin", "open"], ["linux", "xdg-open"]]) {
     const R = posixRec(name), f = "/home/u/a b/x & y ü/dashboard.html";
-    assert.equal(R.p.openFile(f), true);
+    assert.equal(await R.p.openFile(f), true);
     assert.deepEqual(R.calls, [[opener, [f], { detached: true, stdio: "ignore", windowsHide: true }]]);
     assert.doesNotThrow(() => R.children[0].emit("error", new Error(`spawn ${opener} ENOENT`)));
   }
   for (const name of ["win32", "darwin", "linux"]) {
     const broken = platformFor(name, { spawn: () => { throw new Error("EPERM"); } });
-    assert.equal(broken.openFile(file), false, name);
+    assert.equal(await broken.openFile(file), false, name);
   }
+});
+
+test("openFile on Windows waits for its PowerShell, since a detached one opens nothing", async () => {
+  // Measured on Windows 11 (Task 15): a PowerShell started detached runs Invoke-Item, exits 0 and opens no page; one
+  // that is not detached opens it, but Node ends it when Node exits, so the command waits for it.
+  const settle = (p) => { let done = false; p.then(() => { done = true; }); return () => done; };
+  const ends = async (how) => {
+    const { p, child } = recorder();
+    const opened = p.openFile("C:\\x.html", { waitMs: 5000 });
+    const done = settle(opened);
+    await new Promise((r) => setImmediate(r));
+    assert.equal(done(), false, "settled before its PowerShell ended");
+    how(child);
+    return opened;
+  };
+  assert.equal(await ends((c) => c.emit("exit", 0)), true);
+  assert.equal(await ends((c) => c.emit("exit", 1)), false);
+  assert.equal(await ends((c) => c.emit("error", new Error("spawn powershell.exe ENOENT"))), false);
+  // One that does not end holds the command no longer than waitMs, and is let go.
+  const { p, child } = recorder();
+  let unref = 0;
+  child.unref = () => { unref++; };
+  const t0 = Date.now();
+  assert.equal(await p.openFile("C:\\x.html", { waitMs: 50 }), true);
+  assert.ok(Date.now() - t0 < 2000);
+  assert.equal(unref, 1);
 });
 
 test("waitExit off Windows polls alive: 0 once gone, 3 when the pid runs another program, \"woken\" on an abort", async () => {

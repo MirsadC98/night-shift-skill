@@ -23,8 +23,8 @@
 //   waitExit(pid, { signal, unless })  0 once pid is gone, 3 when its command line does not match unless, "woken" on abort
 //   cliCandidates(nodeDir), cliName    where Claude Code's CLI is looked for, after NIGHT_SHIFT_CLAUDE, and its file's name
 //   psQuote(s)                         a PowerShell single-quoted string
-//   openFile(file)                     opens a file in the program the system gives its kind (a page: the browser); false
-//                                      when no opener could start
+//   openFile(file, { waitMs })         opens a file in the program the system gives its kind (a page: the browser);
+//                                      resolves false when no opener could start or Windows' opener failed
 //   schedule({ task, node, script, args, window, state, title })  starts node script args detached, outside the
 //                                      editor and the shell that ran it, and returns what started it (the task's name,
 //                                      or "detached" off Windows)
@@ -325,19 +325,30 @@ export function platformFor(name = process.platform, deps = {}) {
     return task;
   };
 
-  // The system's own opener, detached and with its output ignored: Windows' Invoke-Item in a hidden PowerShell, with
-  // the path as a quoted literal and no cmd line built from it; macOS' open; elsewhere xdg-open, the path as their one
-  // argument. True once the opener was started, false when starting it threw; one the system lacks (xdg-open on a
-  // server) emits an error later, swallowed here.
-  const openFile = (file) => {
+  // The system's own opener, with its output ignored: Windows' Invoke-Item in a hidden PowerShell, with the path as a
+  // quoted literal and no cmd line built from it; macOS' open; elsewhere xdg-open, the path as their one argument.
+  // On Windows the PowerShell is not detached and is waited for, up to waitMs: started detached it ran Invoke-Item,
+  // exited 0 and opened nothing (measured on Windows 11), and Node ends a child that is not detached when Node exits.
+  // Resolves false when starting the opener threw, or when the PowerShell failed; true otherwise. One the system lacks
+  // (xdg-open on a server) emits an error later, swallowed here.
+  const openFile = (file, { waitMs = 15000 } = {}) => {
+    let child;
     try {
-      const child = win ? start("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `Invoke-Item -LiteralPath ${psQuote(file)}`],
-        { detached: true, stdio: "ignore", windowsHide: true })
+      child = win ? start("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `Invoke-Item -LiteralPath ${psQuote(file)}`],
+        { stdio: "ignore", windowsHide: true })
         : start(name === "darwin" ? "open" : "xdg-open", [String(file)], { detached: true, stdio: "ignore", windowsHide: true });
+    } catch { return Promise.resolve(false); }
+    if (!win) {
       child.on("error", () => {});
       child.unref?.();
-      return true;
-    } catch { return false; }
+      return Promise.resolve(true);
+    }
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => { child.unref?.(); resolve(true); }, waitMs);
+      const end = (ok) => { clearTimeout(timer); resolve(ok); };
+      child.on("error", () => end(false));
+      child.on("exit", (code) => end(code === 0));
+    });
   };
 
   return { name, path: pp, realpath, tempRoot, norm, fold, samePath, isAbsolute, fsHome, home, oddPath, tempRoots, sharedTemps, systemDirProblem, alive,
