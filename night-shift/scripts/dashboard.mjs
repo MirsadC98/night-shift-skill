@@ -6,12 +6,14 @@
 // (run-read.mjs holds the readers they share).
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { read, readJson, when, LOG, parseSession, transcriptBase, chainEvents, pointerOf, git, unitPrices, priced, reportCommit, stopWaits, questionLines } from "./run-read.mjs";
 import { reportSection } from "./telegram-cards.mjs";
 import { workTree } from "./runs.mjs";
 import { strings, langOf } from "./lang/index.mjs";
 import { platform } from "./platform.mjs";
 import { VERSION } from "./version.mjs";
+import { MODEL_TABLE, familyOf } from "./effort.mjs";
 
 const cut = (s, n = 160) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 const cents = (x) => Math.round(x * 100) / 100;
@@ -166,7 +168,8 @@ export function blockSignature(state, n, known = null) {
   return { sid, base, sig };
 }
 
-const family = (m) => (m ? /opus|sonnet|haiku|fable|mythos/i.exec(m)?.[0].toLowerCase() ?? null : null);
+// effort.mjs's family word for a model id, null for an id that names none (familyOf alone would say the main model's).
+const family = (m) => (m && MODEL_TABLE.some((r) => String(m).toLowerCase().includes(r.family)) ? familyOf(m) : null);
 // A window's utilization as percent, as session-outcome.mjs reads it (a fraction, or a percent above 1).
 const pctOf = (u) => (typeof u === "number" ? Math.round(u > 1 ? u : u * 100) : null);
 const isMain = (j) => !j.parent_tool_use_id && !j.isSidechain;
@@ -434,3 +437,7 @@ export function buildData(state, { now = Date.now(), prev = null, pointer = poin
     sessions, gaps, events: c.events, limits: c.limits, messages, waitsNow, waitsOlder, waitsFrom, questions,
   };
 }
+
+// The demo: a made-up evening of seven sessions in the data's shape, frozen at its generatedAt (assets/, next to scripts/).
+const ASSETS = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "assets");
+export const demoData = () => JSON.parse(fs.readFileSync(path.join(ASSETS, "dashboard-demo.json"), "utf8"));

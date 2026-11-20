@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tempRoot } from "./config.mjs";
 import { parseSession } from "./run-read.mjs";
-import { readChain, sessionBlock, blockSignature, BLOCK_KEYS, CACHE_VERSION, buildData, SCHEMA, gitLog } from "./dashboard.mjs";
+import { readChain, sessionBlock, blockSignature, BLOCK_KEYS, CACHE_VERSION, buildData, SCHEMA, gitLog, demoData } from "./dashboard.mjs";
 import { reached } from "./fixtures/imports.mjs";
 // A CLAUDE_CONFIG_DIR of the user's own would move every file these tests read or write (claudeHome in config.mjs).
 delete process.env.CLAUDE_CONFIG_DIR;
@@ -624,4 +624,116 @@ test("buildData: every key is there for the barest folder", () => {
   assert.equal(d.now, null);
   assert.deepEqual([d.chain.sessions, d.chain.attempts, d.chain.usd, d.chain.commits, d.waitsOlder, d.waitsFrom], [0, 0, 0, 0, 0, null]);
   assert.equal(d.demo, false);
+});
+
+// ---------------------------------------------------------------- the demo
+// A value's shape: an object's sorted keys with each value's shape, a list as the union of its items' shapes ("none"
+// for no items), anything else "v". In a union a leaf gives way to a list or an object (a window that is null in one
+// session and read in another). The keys under tools and src are data, not shape.
+const FREE = new Set(["tools", "src"]);
+const merge = (a, b) => {
+  if (typeof a === "string") return b === "none" ? a : b;
+  if (typeof b === "string") return a;
+  const out = {};
+  for (const k of [...new Set([...Object.keys(a), ...Object.keys(b)])].sort()) out[k] = k in a && k in b ? merge(a[k], b[k]) : (a[k] ?? b[k]);
+  return out;
+};
+function keyShape(v) {
+  if (Array.isArray(v)) return { "[]": v.map(keyShape).reduce(merge, "none") };
+  if (v && typeof v === "object") return Object.fromEntries(Object.keys(v).sort().map((k) => [k, FREE.has(k) ? "free" : keyShape(v[k])]));
+  return "v";
+}
+// Every string and number in a value, walked.
+const leaves = (v, out = []) => {
+  if (Array.isArray(v)) v.forEach((x) => leaves(x, out));
+  else if (v && typeof v === "object") Object.values(v).forEach((x) => leaves(x, out));
+  else out.push(v);
+  return out;
+};
+// Session n's stream: a Bash call (refused by the guard when deny), an Agent call per name in agents, their task lines
+// (finished ones end two minutes after their start), limit windows, and a result line when usd is given.
+function fullStream(n, m0, { usd = null, deny = false, agents = ["look"], running = [] } = {}) {
+  const S = sid(n), o = { sid: S, t0: BASE }, sys = (j) => ({ type: "system", session_id: S, ...j });
+  const refusal = "PreToolUse:Bash hook error: night-shift guard: rm -rf on a path outside the work tree. Do not work around it; stop.";
+  return [
+    init(S),
+    call(`f${n}-1`, m0, { ...o, content: [use(`b${n}`, "Bash", { command: "ls", description: "list" })] }),
+    limitEvent(0.1, 0.3),
+    { type: "user", session_id: S, message: { role: "user", content: [{ type: "tool_result", tool_use_id: `b${n}`, is_error: deny, content: deny ? refusal : "ok" }] } },
+    ...agents.flatMap((a, i) => [
+      call(`f${n}-a${i}`, m0 + 1 + i, { ...o, content: [use(`g${n}${i}`, "Agent", { description: a, subagent_type: "Explore", model: "haiku" })] }),
+      sys({ subtype: "task_started", task_id: `a${n}${i}`, tool_use_id: `g${n}${i}`, task_type: "local_agent", description: a, subagent_type: "Explore", is_backgrounded: false }),
+      sys({ subtype: "task_progress", task_id: `a${n}${i}`, tool_use_id: `g${n}${i}`, usage: { total_tokens: 4000, tool_uses: 2 } }),
+      ...(running.includes(a) ? [] : [sys({ subtype: "task_updated", task_id: `a${n}${i}`, patch: { status: "completed", end_time: BASE + (m0 + 3 + i) * MIN } })]),
+    ]),
+    limitEvent(0.2, 0.31),
+    ...(usd == null ? [] : [{ ...result(usd, 4, { "claude-opus-5-5": MU(300, 40, usd - 0.5), "claude-haiku-5-5": MU(50, 30, 0.5) }), session_id: sid(n) }]),
+  ];
+}
+// A running chain that fills every list the data has: session 1 refused once, session 2 cut by a usage limit and
+// resumed, session 3 running with one agent finished and two in progress; commits, report sections with waits, handover
+// prompts and an inbox note, limit lines and a line nobody knows.
+function fullRun() {
+  const r = fixtureRun();
+  for (const [n, m0, opt] of [[1, 0, { usd: 2, deny: true }], [2, 50, { usd: 2.5 }], [3, 61, { agents: ["tests", "docs", "sync"], running: ["docs", "sync"] }]]) {
+    r.stream(n, fullStream(n, m0, opt));
+    r.transcript(sid(n), [call(`f${n}-1`, m0, { sid: sid(n), t0: BASE })]);
+    r.agent(sid(n), `agent-a${n}0`, [call(`x${n}`, m0 + 1, { sid: sid(n), t0: BASE, model: "claude-haiku-5-5", input: 50, read: 0, write: 0, output: 10, sidechain: true })]);
+  }
+  r.log(BASE, [
+    [0, "chain starts in /r, until the work is done, from session 1, opus at xhigh"],
+    [0, "session 01 starts: A"], [0, "session 01 runs Opus at xhigh"], [10, "session 01 ends: success, 4 turns, $2.00"],
+    [10, "session 01 limits: 5h 10%→20% · 7d 30%→31%; it ran on claude-opus-5-5"],
+    [11, "session 02 starts: B"], [11, "session 02 runs Opus at xhigh"], [20, "session 02 ends: success (error), 1 turns, $1.00"],
+    [20, "session 02: five_hour cut it off; limit record {\"status\":\"rejected\"}"],
+    [20, `usage limit: waiting until ${stamp(BASE + 50 * MIN)}`],
+    [50, "session 02 resumes s2 after the usage limit"], [50, "session 02 runs Opus at xhigh"], [60, "session 02 ends: success, 4 turns, $2.50"],
+    [61, "session 03 starts: C"], [61, "session 03 runs Opus at xhigh"], [62, "a line nobody knows"],
+  ]);
+  r.pointer(LIVE);
+  r.repo([[BASE + 5 * MIN, "feat: one"], [BASE + 55 * MIN, "feat: two"], [BASE + 70 * MIN, "feat: three"]]);
+  r.report(["# Night runs", "",
+    "## 2026-11-16 session 01 (03:00–03:10) · A", "", "**Remaining:** 3", "", "**Waits for you:**", "- a", "",
+    "## 2026-11-16 session 02 (03:11–04:00) · B", "", "**Remaining:** 2", "", "**Waits for you:**", "- a", "- b", ""].join("\n"));
+  r.prompt("01.md", "# Build the thing\n");
+  r.prompt("02.md", "Next piece\n");
+  r.prompt("03.md", "Last piece\n");
+  r.prompt("03-inbox.md", "a note\n");
+  return r;
+}
+
+test("the demo is the data's shape", () => {
+  const d = build(fullRun());
+  // The fixture fills what the demo shows, so that a key the demo lacks is not hidden by an empty list.
+  assert.equal(d.chain.state, "running");
+  assert.ok(d.gaps.length && d.limits.length && d.messages.length && d.waitsNow.length && d.events.length);
+  assert.ok(d.sessions.some((s) => s.denialNotes.length) && d.sessions.some((s) => s.commits.length) && d.sessions.some((s) => s.subagents.some((a) => a.end == null)));
+  const demo = demoData();
+  assert.equal(demo.schema, SCHEMA);
+  assert.deepEqual(keyShape(demo), keyShape(d));
+});
+
+test("the demo is what the spec says", () => {
+  const d = demoData();
+  assert.equal(d.demo, true);
+  assert.equal(d.chain.state, "running");
+  assert.equal(d.now.n, 7);
+  assert.equal(d.sessions.find((s) => s.n === 7).subagents.filter((a) => a.end === null).length, 2);
+  assert.equal(d.gaps.filter((g) => g.kind === "limit").length, 1);
+  assert.ok(d.sessions.some((s) => s.attempts.some((a) => a.kind === "resume")));
+  assert.equal(d.sessions.filter((s) => s.denials === 1).length, 1);
+  assert.equal(d.waitsNow.length, 2);
+  // Every epoch time lies before the frozen moment (token counts stay far below 1e12).
+  const late = leaves(d).filter((v) => typeof v === "number" && v > 1e12 && v > d.generatedAt);
+  assert.deepEqual(late, []);
+});
+
+test("the demo names nothing real", () => {
+  const d = demoData();
+  const texts = leaves(d).filter((v) => typeof v === "string");
+  for (const s of texts) {
+    assert.doesNotMatch(s, /\b[A-Za-z]:[\\/]|\/Users\/|AppData|@/, s);
+    if (s.startsWith("/")) assert.ok(s.startsWith("/home/sam/demo-app"), s);
+  }
+  assert.equal(d.chain.project, "demo-app");
 });

@@ -1,0 +1,1907 @@
+{
+ "schema": 1,
+ "generatedAt": 1792626000000,
+ "skillVersion": "0.3.0",
+ "lang": "en",
+ "demo": true,
+ "chain": {
+  "project": "demo-app",
+  "repo": "/home/sam/demo-app",
+  "mode": "opus",
+  "attended": false,
+  "branch": null,
+  "tree": null,
+  "state": "running",
+  "started": 1792607410000,
+  "ended": null,
+  "endReason": null,
+  "lastSeen": 1792625965000,
+  "waitUntil": null,
+  "until": null,
+  "next": null,
+  "sessions": 7,
+  "attempts": 8,
+  "turns": 86,
+  "commits": 17,
+  "usd": 22.59
+ },
+ "now": {
+  "n": 7,
+  "since": 1792625120000,
+  "lastStep": "Run the sync tests in the background",
+  "lastSeen": 1792625965000,
+  "context": 73769
+ },
+ "sessions": [
+  {
+   "n": 1,
+   "title": "Set up the data model for recipes and ingredients",
+   "model": "Opus",
+   "effort": "xhigh",
+   "attempts": [
+    {
+     "kind": "start",
+     "why": null,
+     "start": 1792607412000,
+     "end": 1792609480000,
+     "endKnown": true,
+     "outcome": "success",
+     "limitType": null,
+     "turns": 14,
+     "usd": 3.1,
+     "h5": [
+      12,
+      31
+     ],
+     "d7": [
+      41,
+      43
+     ]
+    }
+   ],
+   "usd": 3.1,
+   "estimated": false,
+   "turns": 14,
+   "calls": 74,
+   "rows": [
+    {
+     "kind": "main",
+     "model": "claude-opus-5-5",
+     "agents": 0,
+     "calls": 74,
+     "input": 3274,
+     "cacheRead": 3061446,
+     "cacheWrite": 186297,
+     "output": 32707,
+     "thinking": 15895,
+     "units": 845547.6000000001,
+     "usd": 2.2004,
+     "estimated": false,
+     "untracked": false
+    },
+    {
+     "kind": "sub",
+     "model": "claude-sonnet-5-5",
+     "agents": 1,
+     "calls": 59,
+     "input": 1839,
+     "cacheRead": 1456455,
+     "cacheWrite": 68593,
+     "output": 12205,
+     "thinking": 3537,
+     "units": 345695.5,
+     "usd": 0.8996,
+     "estimated": false,
+     "untracked": false
+    }
+   ],
+   "tokens": {
+    "input": 5113,
+    "cacheRead": 4517901,
+    "cacheWrite": 254890,
+    "output": 44912
+   },
+   "contextPeak": 136908,
+   "context": [
+    [
+     1792607412000,
+     40634
+    ],
+    [
+     1792607506000,
+     42555
+    ],
+    [
+     1792607600000,
+     46765
+    ],
+    [
+     1792607694000,
+     52755
+    ],
+    [
+     1792607788000,
+     56880
+    ],
+    [
+     1792607882000,
+     62672
+    ],
+    [
+     1792607976000,
+     66019
+    ],
+    [
+     1792608070000,
+     68987
+    ],
+    [
+     1792608164000,
+     73617
+    ],
+    [
+     1792608258000,
+     77599
+    ],
+    [
+     1792608352000,
+     79354
+    ],
+    [
+     1792608446000,
+     86180
+    ],
+    [
+     1792608540000,
+     88911
+    ],
+    [
+     1792608634000,
+     92820
+    ],
+    [
+     1792608728000,
+     98394
+    ],
+    [
+     1792608822000,
+     103012
+    ],
+    [
+     1792608916000,
+     106242
+    ],
+    [
+     1792609010000,
+     112055
+    ],
+    [
+     1792609104000,
+     115989
+    ],
+    [
+     1792609198000,
+     119882
+    ],
+    [
+     1792609292000,
+     125312
+    ],
+    [
+     1792609386000,
+     130516
+    ],
+    [
+     1792609480000,
+     136908
+    ]
+   ],
+   "tools": {
+    "Read": 15,
+    "Edit": 16,
+    "Bash": 16,
+    "Grep": 6,
+    "Agent": 1,
+    "Write": 1
+   },
+   "subagents": [
+    {
+     "description": "Survey the existing schema",
+     "type": "Explore",
+     "model": "haiku",
+     "start": 1792607825600,
+     "end": 1792608305600,
+     "tokens": 70273,
+     "toolUses": 26,
+     "background": false,
+     "status": "completed"
+    }
+   ],
+   "commits": [
+    {
+     "h": "980607d",
+     "t": 1792607929000,
+     "s": "feat(db): recipes, ingredients and units tables"
+    },
+    {
+     "h": "5594b15",
+     "t": 1792608446000,
+     "s": "feat(db): seed a dozen sample recipes"
+    },
+    {
+     "h": "9f684c6",
+     "t": 1792608963000,
+     "s": "test(db): unit conversions round-trip"
+    }
+   ],
+   "denials": 0,
+   "denialNotes": [],
+   "lastStep": "Run the database tests",
+   "lastSeen": 1792609495000,
+   "windows": {
+    "first": {
+     "t": 1792607412000,
+     "h5": 12,
+     "d7": 41
+    },
+    "last": {
+     "t": 1792609480000,
+     "h5": 31,
+     "d7": 43
+    }
+   },
+   "remaining": 8,
+   "waits": [],
+   "inbox": false,
+   "src": {
+    "v": 1,
+    "sid": "demo-session-01",
+    "base": null,
+    "sig": "demo",
+    "beats": []
+   }
+  },
+  {
+   "n": 2,
+   "title": "Add the recipe list screen with sorting",
+   "model": "Opus",
+   "effort": "xhigh",
+   "attempts": [
+    {
+     "kind": "start",
+     "why": null,
+     "start": 1792609530000,
+     "end": 1792612090000,
+     "endKnown": true,
+     "outcome": "success",
+     "limitType": null,
+     "turns": 17,
+     "usd": 4.25,
+     "h5": [
+      31,
+      58
+     ],
+     "d7": [
+      43,
+      46
+     ]
+    }
+   ],
+   "usd": 4.25,
+   "estimated": false,
+   "turns": 17,
+   "calls": 64,
+   "rows": [
+    {
+     "kind": "main",
+     "model": "claude-opus-5-5",
+     "agents": 0,
+     "calls": 64,
+     "input": 3615,
+     "cacheRead": 4531781,
+     "cacheWrite": 325238,
+     "output": 56597,
+     "thinking": 23420,
+     "units": 1390254.1,
+     "usd": 3.0553,
+     "estimated": false,
+     "untracked": false
+    },
+    {
+     "kind": "sub",
+     "model": "claude-sonnet-5-5",
+     "agents": 1,
+     "calls": 84,
+     "input": 1418,
+     "cacheRead": 1283324,
+     "cacheWrite": 142119,
+     "output": 25929,
+     "thinking": 6081,
+     "units": 543633.4,
+     "usd": 1.1947,
+     "estimated": false,
+     "untracked": false
+    }
+   ],
+   "tokens": {
+    "input": 5033,
+    "cacheRead": 5815105,
+    "cacheWrite": 467357,
+    "output": 82526
+   },
+   "contextPeak": 152192,
+   "context": [
+    [
+     1792609530000,
+     36988
+    ],
+    [
+     1792609624815,
+     38935
+    ],
+    [
+     1792609719630,
+     43813
+    ],
+    [
+     1792609814444,
+     45583
+    ],
+    [
+     1792609909259,
+     50837
+    ],
+    [
+     1792610004074,
+     53227
+    ],
+    [
+     1792610098889,
+     58058
+    ],
+    [
+     1792610193704,
+     61089
+    ],
+    [
+     1792610288519,
+     64528
+    ],
+    [
+     1792610383333,
+     66553
+    ],
+    [
+     1792610478148,
+     70692
+    ],
+    [
+     1792610572963,
+     72288
+    ],
+    [
+     1792610667778,
+     77918
+    ],
+    [
+     1792610762593,
+     83010
+    ],
+    [
+     1792610857407,
+     89658
+    ],
+    [
+     1792610952222,
+     93927
+    ],
+    [
+     1792611047037,
+     96330
+    ],
+    [
+     1792611141852,
+     100571
+    ],
+    [
+     1792611236667,
+     105758
+    ],
+    [
+     1792611331481,
+     111121
+    ],
+    [
+     1792611426296,
+     117495
+    ],
+    [
+     1792611521111,
+     122412
+    ],
+    [
+     1792611615926,
+     124589
+    ],
+    [
+     1792611710741,
+     130251
+    ],
+    [
+     1792611805556,
+     132988
+    ],
+    [
+     1792611900370,
+     139926
+    ],
+    [
+     1792611995185,
+     145400
+    ],
+    [
+     1792612090000,
+     152192
+    ]
+   ],
+   "tools": {
+    "Read": 27,
+    "Edit": 10,
+    "Bash": 17,
+    "Grep": 3,
+    "Agent": 2,
+    "Write": 1
+   },
+   "subagents": [
+    {
+     "description": "Review the list screen diff",
+     "type": "general-purpose",
+     "model": "sonnet",
+     "start": 1792610042000,
+     "end": 1792610402000,
+     "tokens": 43337,
+     "toolUses": 25,
+     "background": true,
+     "status": "completed"
+    },
+    {
+     "description": "Find the design tokens",
+     "type": "Explore",
+     "model": "haiku",
+     "start": 1792610810000,
+     "end": 1792611110000,
+     "tokens": 51745,
+     "toolUses": 24,
+     "background": false,
+     "status": "completed"
+    }
+   ],
+   "commits": [
+    {
+     "h": "64fe18f",
+     "t": 1792610170000,
+     "s": "feat(ui): recipe list with sort by name, time and rating"
+    },
+    {
+     "h": "3e7e667",
+     "t": 1792610810000,
+     "s": "fix(ui): keep the scroll position after a sort"
+    },
+    {
+     "h": "93d2f16",
+     "t": 1792611450000,
+     "s": "test(ui): list renders an empty state"
+    }
+   ],
+   "denials": 0,
+   "denialNotes": [],
+   "lastStep": "Review the list screen diff",
+   "lastSeen": 1792612107000,
+   "windows": {
+    "first": {
+     "t": 1792609530000,
+     "h5": 31,
+     "d7": 43
+    },
+    "last": {
+     "t": 1792612090000,
+     "h5": 58,
+     "d7": 46
+    }
+   },
+   "remaining": 7,
+   "waits": [],
+   "inbox": false,
+   "src": {
+    "v": 1,
+    "sid": "demo-session-02",
+    "base": null,
+    "sig": "demo",
+    "beats": []
+   }
+  },
+  {
+   "n": 3,
+   "title": "Import recipes from a web page",
+   "model": "Opus",
+   "effort": "xhigh",
+   "attempts": [
+    {
+     "kind": "start",
+     "why": null,
+     "start": 1792612140000,
+     "end": 1792614665000,
+     "endKnown": true,
+     "outcome": "limit",
+     "limitType": "five_hour",
+     "turns": 11,
+     "usd": 2.9,
+     "h5": [
+      58,
+      100
+     ],
+     "d7": [
+      46,
+      49
+     ]
+    },
+    {
+     "kind": "resume",
+     "why": "limit",
+     "start": 1792617670000,
+     "end": 1792619550000,
+     "endKnown": true,
+     "outcome": "success",
+     "limitType": null,
+     "turns": 8,
+     "usd": 2.15,
+     "h5": [
+      3,
+      21
+     ],
+     "d7": [
+      49,
+      50
+     ]
+    }
+   ],
+   "usd": 5.05,
+   "estimated": false,
+   "turns": 19,
+   "calls": 83,
+   "rows": [
+    {
+     "kind": "main",
+     "model": "claude-opus-5-5",
+     "agents": 0,
+     "calls": 83,
+     "input": 3869,
+     "cacheRead": 3255015,
+     "cacheWrite": 165163,
+     "output": 37172,
+     "thinking": 14944,
+     "units": 845556.5,
+     "usd": 3.5478,
+     "estimated": false,
+     "untracked": false
+    },
+    {
+     "kind": "sub",
+     "model": "claude-sonnet-5-5",
+     "agents": 2,
+     "calls": 48,
+     "input": 916,
+     "cacheRead": 667284,
+     "cacheWrite": 70361,
+     "output": 29931,
+     "thinking": 6637,
+     "units": 358021.4,
+     "usd": 1.5022,
+     "estimated": false,
+     "untracked": false
+    }
+   ],
+   "tokens": {
+    "input": 4785,
+    "cacheRead": 3922299,
+    "cacheWrite": 235524,
+    "output": 67103
+   },
+   "contextPeak": 158734,
+   "context": [
+    [
+     1792612140000,
+     43734
+    ],
+    [
+     1792612233519,
+     48149
+    ],
+    [
+     1792612327037,
+     54038
+    ],
+    [
+     1792612420556,
+     58962
+    ],
+    [
+     1792612514074,
+     63225
+    ],
+    [
+     1792612607593,
+     69107
+    ],
+    [
+     1792612701111,
+     71003
+    ],
+    [
+     1792612794630,
+     73793
+    ],
+    [
+     1792612888148,
+     77530
+    ],
+    [
+     1792612981667,
+     80368
+    ],
+    [
+     1792613075185,
+     84622
+    ],
+    [
+     1792613168704,
+     87289
+    ],
+    [
+     1792613262222,
+     91882
+    ],
+    [
+     1792613355741,
+     95597
+    ],
+    [
+     1792613449259,
+     98942
+    ],
+    [
+     1792613542778,
+     105352
+    ],
+    [
+     1792613636296,
+     111722
+    ],
+    [
+     1792613729815,
+     116819
+    ],
+    [
+     1792613823333,
+     120461
+    ],
+    [
+     1792613916852,
+     124464
+    ],
+    [
+     1792614010370,
+     131155
+    ],
+    [
+     1792614103889,
+     136764
+    ],
+    [
+     1792614197407,
+     139241
+    ],
+    [
+     1792614290926,
+     141375
+    ],
+    [
+     1792614384444,
+     146054
+    ],
+    [
+     1792614477963,
+     150768
+    ],
+    [
+     1792614571481,
+     155538
+    ],
+    [
+     1792614665000,
+     158734
+    ],
+    [
+     1792617670000,
+     37562
+    ],
+    [
+     1792617764000,
+     41047
+    ],
+    [
+     1792617858000,
+     47621
+    ],
+    [
+     1792617952000,
+     52167
+    ],
+    [
+     1792618046000,
+     56681
+    ],
+    [
+     1792618140000,
+     63474
+    ],
+    [
+     1792618234000,
+     70092
+    ],
+    [
+     1792618328000,
+     73508
+    ],
+    [
+     1792618422000,
+     76659
+    ],
+    [
+     1792618516000,
+     83161
+    ],
+    [
+     1792618610000,
+     89800
+    ],
+    [
+     1792618704000,
+     92873
+    ],
+    [
+     1792618798000,
+     96873
+    ],
+    [
+     1792618892000,
+     103039
+    ],
+    [
+     1792618986000,
+     104958
+    ],
+    [
+     1792619080000,
+     111344
+    ],
+    [
+     1792619174000,
+     115319
+    ],
+    [
+     1792619268000,
+     117891
+    ],
+    [
+     1792619362000,
+     122893
+    ],
+    [
+     1792619456000,
+     125963
+    ],
+    [
+     1792619550000,
+     131115
+    ]
+   ],
+   "tools": {
+    "Read": 38,
+    "Edit": 9,
+    "Bash": 22,
+    "Grep": 8,
+    "Agent": 2,
+    "Write": 1
+   },
+   "subagents": [
+    {
+     "description": "Collect sample recipe pages",
+     "type": "general-purpose",
+     "model": "sonnet",
+     "start": 1792613021000,
+     "end": 1792613381000,
+     "tokens": 55575,
+     "toolUses": 20,
+     "background": true,
+     "status": "completed"
+    },
+    {
+     "description": "Check the parser against the samples",
+     "type": "general-purpose",
+     "model": "sonnet",
+     "start": 1792614342500,
+     "end": 1792614522500,
+     "tokens": 75671,
+     "toolUses": 28,
+     "background": true,
+     "status": "completed"
+    }
+   ],
+   "commits": [
+    {
+     "h": "5f1faeb",
+     "t": 1792613241250,
+     "s": "feat(import): read recipe metadata from a page"
+    },
+    {
+     "h": "6fef310",
+     "t": 1792614342500,
+     "s": "feat(import): map ingredient lines to units"
+    },
+    {
+     "h": "11132e0",
+     "t": 1792618448750,
+     "s": "test(import): five sample pages"
+    }
+   ],
+   "denials": 0,
+   "denialNotes": [],
+   "lastStep": "Run the import tests",
+   "lastSeen": 1792619564000,
+   "windows": {
+    "first": {
+     "t": 1792612140000,
+     "h5": 58,
+     "d7": 46
+    },
+    "last": {
+     "t": 1792619550000,
+     "h5": 21,
+     "d7": 50
+    }
+   },
+   "remaining": 6,
+   "waits": [],
+   "inbox": false,
+   "src": {
+    "v": 1,
+    "sid": "demo-session-03",
+    "base": null,
+    "sig": "demo",
+    "beats": []
+   }
+  },
+  {
+   "n": 4,
+   "title": "Search and filters",
+   "model": "Opus",
+   "effort": "xhigh",
+   "attempts": [
+    {
+     "kind": "start",
+     "why": null,
+     "start": 1792619600000,
+     "end": 1792621815000,
+     "endKnown": true,
+     "outcome": "success",
+     "limitType": null,
+     "turns": 15,
+     "usd": 3.6,
+     "h5": [
+      21,
+      44
+     ],
+     "d7": [
+      50,
+      52
+     ]
+    }
+   ],
+   "usd": 3.6,
+   "estimated": false,
+   "turns": 15,
+   "calls": 74,
+   "rows": [
+    {
+     "kind": "main",
+     "model": "claude-opus-5-5",
+     "agents": 0,
+     "calls": 74,
+     "input": 2395,
+     "cacheRead": 5512193,
+     "cacheWrite": 288168,
+     "output": 28554,
+     "thinking": 12437,
+     "units": 1272720.3,
+     "usd": 2.2252,
+     "estimated": false,
+     "untracked": false
+    },
+    {
+     "kind": "sub",
+     "model": "claude-sonnet-5-5",
+     "agents": 2,
+     "calls": 38,
+     "input": 1022,
+     "cacheRead": 1466211,
+     "cacheWrite": 159024,
+     "output": 10666,
+     "thinking": 6867,
+     "units": 519021.1,
+     "usd": 0.9074,
+     "estimated": false,
+     "untracked": false
+    },
+    {
+     "kind": "workflow",
+     "model": "claude-sonnet-5-5",
+     "agents": 3,
+     "calls": 56,
+     "input": 1475,
+     "cacheRead": 857866,
+     "cacheWrite": 65730,
+     "output": 9723,
+     "thinking": 2137,
+     "units": 267336.6,
+     "usd": 0.4674,
+     "estimated": false,
+     "untracked": false
+    }
+   ],
+   "tokens": {
+    "input": 4892,
+    "cacheRead": 7836270,
+    "cacheWrite": 512922,
+    "output": 48943
+   },
+   "contextPeak": 100800,
+   "context": [
+    [
+     1792619600000,
+     39406
+    ],
+    [
+     1792619692292,
+     40986
+    ],
+    [
+     1792619784583,
+     46998
+    ],
+    [
+     1792619876875,
+     48586
+    ],
+    [
+     1792619969167,
+     50711
+    ],
+    [
+     1792620061458,
+     53368
+    ],
+    [
+     1792620153750,
+     56674
+    ],
+    [
+     1792620246042,
+     62228
+    ],
+    [
+     1792620338333,
+     65173
+    ],
+    [
+     1792620430625,
+     67033
+    ],
+    [
+     1792620522917,
+     69039
+    ],
+    [
+     1792620615208,
+     71837
+    ],
+    [
+     1792620707500,
+     75175
+    ],
+    [
+     1792620799792,
+     77714
+    ],
+    [
+     1792620892083,
+     80985
+    ],
+    [
+     1792620984375,
+     83426
+    ],
+    [
+     1792621076667,
+     89029
+    ],
+    [
+     1792621168958,
+     94728
+    ],
+    [
+     1792621261250,
+     100800
+    ],
+    [
+     1792621353542,
+     52337
+    ],
+    [
+     1792621445833,
+     55474
+    ],
+    [
+     1792621538125,
+     61460
+    ],
+    [
+     1792621630417,
+     68158
+    ],
+    [
+     1792621722708,
+     72858
+    ],
+    [
+     1792621815000,
+     79468
+    ]
+   ],
+   "tools": {
+    "Read": 19,
+    "Edit": 15,
+    "Bash": 13,
+    "Grep": 5,
+    "Agent": 3,
+    "Write": 1
+   },
+   "subagents": [
+    {
+     "description": "Benchmark the search index",
+     "type": "general-purpose",
+     "model": "sonnet",
+     "start": 1792620043000,
+     "end": 1792620163000,
+     "tokens": 36139,
+     "toolUses": 22,
+     "background": true,
+     "status": "completed"
+    },
+    {
+     "description": "Review the search diff",
+     "type": "general-purpose",
+     "model": "sonnet",
+     "start": 1792620486000,
+     "end": 1792620666000,
+     "tokens": 79451,
+     "toolUses": 11,
+     "background": true,
+     "status": "completed"
+    },
+    {
+     "description": "Find slow queries",
+     "type": "Explore",
+     "model": "haiku",
+     "start": 1792620929000,
+     "end": 1792621169000,
+     "tokens": 50220,
+     "toolUses": 23,
+     "background": false,
+     "status": "completed"
+    }
+   ],
+   "commits": [
+    {
+     "h": "c02ef92",
+     "t": 1792620153750,
+     "s": "feat(search): full-text search over titles and ingredients"
+    },
+    {
+     "h": "aa08fd2",
+     "t": 1792620707500,
+     "s": "feat(search): filter by time and diet"
+    },
+    {
+     "h": "6d6d03b",
+     "t": 1792621261250,
+     "s": "perf(search): index the ingredient names"
+    }
+   ],
+   "denials": 1,
+   "denialNotes": [
+    "rm -rf on a path outside the work tree"
+   ],
+   "lastStep": "Benchmark the search index",
+   "lastSeen": 1792621831000,
+   "windows": {
+    "first": {
+     "t": 1792619600000,
+     "h5": 21,
+     "d7": 50
+    },
+    "last": {
+     "t": 1792621815000,
+     "h5": 44,
+     "d7": 52
+    }
+   },
+   "remaining": 5,
+   "waits": [],
+   "inbox": true,
+   "src": {
+    "v": 1,
+    "sid": "demo-session-04",
+    "base": null,
+    "sig": "demo",
+    "beats": []
+   }
+  },
+  {
+   "n": 5,
+   "title": "Shopping list from a recipe",
+   "model": "Fable",
+   "effort": "high",
+   "attempts": [
+    {
+     "kind": "start",
+     "why": null,
+     "start": 1792621860000,
+     "end": 1792623760000,
+     "endKnown": true,
+     "outcome": "success",
+     "limitType": null,
+     "turns": 12,
+     "usd": 2.8,
+     "h5": [
+      44,
+      61
+     ],
+     "d7": [
+      52,
+      54
+     ]
+    }
+   ],
+   "usd": 2.8,
+   "estimated": false,
+   "turns": 12,
+   "calls": 61,
+   "rows": [
+    {
+     "kind": "main",
+     "model": "claude-fable-5-2",
+     "agents": 0,
+     "calls": 61,
+     "input": 3691,
+     "cacheRead": 3865447,
+     "cacheWrite": 307558,
+     "output": 33330,
+     "thinking": 13011,
+     "units": 1172001.7,
+     "usd": 2.051,
+     "estimated": false,
+     "untracked": false
+    },
+    {
+     "kind": "sub",
+     "model": "claude-sonnet-5-5",
+     "agents": 1,
+     "calls": 81,
+     "input": 1854,
+     "cacheRead": 1593592,
+     "cacheWrite": 68089,
+     "output": 26126,
+     "thinking": 7843,
+     "units": 428021.2,
+     "usd": 0.749,
+     "estimated": false,
+     "untracked": false
+    }
+   ],
+   "tokens": {
+    "input": 5545,
+    "cacheRead": 5459039,
+    "cacheWrite": 375647,
+    "output": 59456
+   },
+   "contextPeak": 122997,
+   "context": [
+    [
+     1792621860000,
+     40327
+    ],
+    [
+     1792621955000,
+     46423
+    ],
+    [
+     1792622050000,
+     49423
+    ],
+    [
+     1792622145000,
+     52075
+    ],
+    [
+     1792622240000,
+     57924
+    ],
+    [
+     1792622335000,
+     61788
+    ],
+    [
+     1792622430000,
+     64938
+    ],
+    [
+     1792622525000,
+     68764
+    ],
+    [
+     1792622620000,
+     74641
+    ],
+    [
+     1792622715000,
+     77689
+    ],
+    [
+     1792622810000,
+     82062
+    ],
+    [
+     1792622905000,
+     87841
+    ],
+    [
+     1792623000000,
+     90403
+    ],
+    [
+     1792623095000,
+     91969
+    ],
+    [
+     1792623190000,
+     98385
+    ],
+    [
+     1792623285000,
+     103658
+    ],
+    [
+     1792623380000,
+     109971
+    ],
+    [
+     1792623475000,
+     112535
+    ],
+    [
+     1792623570000,
+     118064
+    ],
+    [
+     1792623665000,
+     121268
+    ],
+    [
+     1792623760000,
+     122997
+    ]
+   ],
+   "tools": {
+    "Read": 38,
+    "Edit": 9,
+    "Bash": 23,
+    "Grep": 12,
+    "Agent": 1,
+    "Write": 4
+   },
+   "subagents": [
+    {
+     "description": "Review the shopping list diff",
+     "type": "general-purpose",
+     "model": "sonnet",
+     "start": 1792622240000,
+     "end": 1792622360000,
+     "tokens": 86067,
+     "toolUses": 24,
+     "background": true,
+     "status": "completed"
+    }
+   ],
+   "commits": [
+    {
+     "h": "e49252b",
+     "t": 1792622493333,
+     "s": "feat(list): build a shopping list from a recipe"
+    },
+    {
+     "h": "c53d10d",
+     "t": 1792623126667,
+     "s": "feat(list): merge the same ingredient across recipes"
+    }
+   ],
+   "denials": 0,
+   "denialNotes": [],
+   "lastStep": "Write the shopping list tests",
+   "lastSeen": 1792623777000,
+   "windows": {
+    "first": {
+     "t": 1792621860000,
+     "h5": 44,
+     "d7": 52
+    },
+    "last": {
+     "t": 1792623760000,
+     "h5": 61,
+     "d7": 54
+    }
+   },
+   "remaining": 4,
+   "waits": [],
+   "inbox": false,
+   "src": {
+    "v": 1,
+    "sid": "demo-session-05",
+    "base": null,
+    "sig": "demo",
+    "beats": []
+   }
+  },
+  {
+   "n": 6,
+   "title": "Offline cache for recipes",
+   "model": "Opus",
+   "effort": "xhigh",
+   "attempts": [
+    {
+     "kind": "start",
+     "why": null,
+     "start": 1792623810000,
+     "end": 1792625090000,
+     "endKnown": true,
+     "outcome": "success",
+     "limitType": null,
+     "turns": 9,
+     "usd": 1.95,
+     "h5": [
+      61,
+      70
+     ],
+     "d7": [
+      54,
+      55
+     ]
+    }
+   ],
+   "usd": 1.95,
+   "estimated": false,
+   "turns": 9,
+   "calls": 58,
+   "rows": [
+    {
+     "kind": "main",
+     "model": "claude-opus-5-5",
+     "agents": 0,
+     "calls": 58,
+     "input": 3199,
+     "cacheRead": 5284710,
+     "cacheWrite": 283914,
+     "output": 32733,
+     "thinking": 9778,
+     "units": 1263163,
+     "usd": 1.95,
+     "estimated": false,
+     "untracked": false
+    }
+   ],
+   "tokens": {
+    "input": 3199,
+    "cacheRead": 5284710,
+    "cacheWrite": 283914,
+    "output": 32733
+   },
+   "contextPeak": 100354,
+   "context": [
+    [
+     1792623810000,
+     41739
+    ],
+    [
+     1792623908462,
+     46626
+    ],
+    [
+     1792624006923,
+     49108
+    ],
+    [
+     1792624105385,
+     52103
+    ],
+    [
+     1792624203846,
+     56212
+    ],
+    [
+     1792624302308,
+     61491
+    ],
+    [
+     1792624400769,
+     68116
+    ],
+    [
+     1792624499231,
+     74881
+    ],
+    [
+     1792624597692,
+     79568
+    ],
+    [
+     1792624696154,
+     82932
+    ],
+    [
+     1792624794615,
+     88091
+    ],
+    [
+     1792624893077,
+     92707
+    ],
+    [
+     1792624991538,
+     95446
+    ],
+    [
+     1792625090000,
+     100354
+    ]
+   ],
+   "tools": {
+    "Read": 27,
+    "Edit": 8,
+    "Bash": 14,
+    "Grep": 11,
+    "Write": 5
+   },
+   "subagents": [],
+   "commits": [
+    {
+     "h": "8b23cc2",
+     "t": 1792624236667,
+     "s": "feat(cache): keep the last 50 recipes offline"
+    },
+    {
+     "h": "b3259fd",
+     "t": 1792624663333,
+     "s": "test(cache): a stale entry is refreshed"
+    }
+   ],
+   "denials": 0,
+   "denialNotes": [],
+   "lastStep": "Run the cache tests",
+   "lastSeen": 1792625108000,
+   "windows": {
+    "first": {
+     "t": 1792623810000,
+     "h5": 61,
+     "d7": 54
+    },
+    "last": {
+     "t": 1792625090000,
+     "h5": 70,
+     "d7": 55
+    }
+   },
+   "remaining": 3,
+   "waits": [
+    "Pick an icon set for the shopping list (two options in docs/icons.md)",
+    "Approve the schema change in db/migrations/0004 before it ships"
+   ],
+   "inbox": false,
+   "src": {
+    "v": 1,
+    "sid": "demo-session-06",
+    "base": null,
+    "sig": "demo",
+    "beats": []
+   }
+  },
+  {
+   "n": 7,
+   "title": "Sync across devices",
+   "model": "Opus",
+   "effort": "xhigh",
+   "attempts": [
+    {
+     "kind": "start",
+     "why": null,
+     "start": 1792625120000,
+     "end": null,
+     "endKnown": true,
+     "outcome": null,
+     "limitType": null,
+     "turns": null,
+     "usd": null,
+     "h5": null,
+     "d7": null
+    }
+   ],
+   "usd": 1.84,
+   "estimated": true,
+   "turns": null,
+   "calls": 53,
+   "rows": [
+    {
+     "kind": "main",
+     "model": "claude-opus-5-5",
+     "agents": 0,
+     "calls": 53,
+     "input": 2808,
+     "cacheRead": 3475583,
+     "cacheWrite": 243083,
+     "output": 42365,
+     "thinking": 12785,
+     "units": 1048357.3,
+     "usd": 1.3143,
+     "estimated": true,
+     "untracked": false
+    },
+    {
+     "kind": "sub",
+     "model": "claude-sonnet-5-5",
+     "agents": 3,
+     "calls": 33,
+     "input": 1935,
+     "cacheRead": 1231392,
+     "cacheWrite": 107008,
+     "output": 16052,
+     "thinking": 6082,
+     "units": 419350.2,
+     "usd": 0.5257,
+     "estimated": true,
+     "untracked": false
+    }
+   ],
+   "tokens": {
+    "input": 4743,
+    "cacheRead": 4706975,
+    "cacheWrite": 350091,
+    "output": 58417
+   },
+   "contextPeak": 73769,
+   "context": [
+    [
+     1792625120000,
+     40690
+    ],
+    [
+     1792625225625,
+     43202
+    ],
+    [
+     1792625331250,
+     47765
+    ],
+    [
+     1792625436875,
+     51061
+    ],
+    [
+     1792625542500,
+     53978
+    ],
+    [
+     1792625648125,
+     57882
+    ],
+    [
+     1792625753750,
+     63611
+    ],
+    [
+     1792625859375,
+     69539
+    ],
+    [
+     1792625965000,
+     73769
+    ]
+   ],
+   "tools": {
+    "Read": 30,
+    "Edit": 6,
+    "Bash": 16,
+    "Grep": 5,
+    "Agent": 4,
+    "Write": 3
+   },
+   "subagents": [
+    {
+     "description": "Read the sync protocol notes",
+     "type": "Explore",
+     "model": "haiku",
+     "start": 1792625289000,
+     "end": 1792625589000,
+     "tokens": 60869,
+     "toolUses": 13,
+     "background": false,
+     "status": "completed"
+    },
+    {
+     "description": "Draft the conflict rules",
+     "type": "general-purpose",
+     "model": "sonnet",
+     "start": 1792625415750,
+     "end": 1792625775750,
+     "tokens": 53269,
+     "toolUses": 24,
+     "background": true,
+     "status": "completed"
+    },
+    {
+     "description": "Run the sync tests",
+     "type": "general-purpose",
+     "model": "sonnet",
+     "start": 1792625542500,
+     "end": null,
+     "tokens": 39852,
+     "toolUses": 18,
+     "background": true,
+     "status": null
+    },
+    {
+     "description": "Review the change log diff",
+     "type": "general-purpose",
+     "model": "sonnet",
+     "start": 1792625669250,
+     "end": null,
+     "tokens": 82941,
+     "toolUses": 22,
+     "background": true,
+     "status": null
+    }
+   ],
+   "commits": [
+    {
+     "h": "81eea79",
+     "t": 1792625542500,
+     "s": "feat(sync): change log table and its clock"
+    }
+   ],
+   "denials": 0,
+   "denialNotes": [],
+   "lastStep": "Run the sync tests in the background",
+   "lastSeen": 1792625965000,
+   "windows": {
+    "first": {
+     "t": 1792625140000,
+     "h5": 70,
+     "d7": 55
+    },
+    "last": {
+     "t": 1792625940000,
+     "h5": 79,
+     "d7": 56
+    }
+   },
+   "remaining": null,
+   "waits": [],
+   "inbox": false,
+   "src": {
+    "v": 1,
+    "sid": "demo-session-07",
+    "base": null,
+    "sig": "demo",
+    "beats": []
+   }
+  }
+ ],
+ "gaps": [
+  {
+   "from": 1792614665000,
+   "to": 1792617670000,
+   "kind": "limit",
+   "note": "usage limit: waiting until 2026-10-21 21:20:00"
+  }
+ ],
+ "events": [
+  {
+   "t": 1792607410000,
+   "kind": "start",
+   "text": "chain starts in demo-app, until the work is done, from session 1, opus at xhigh"
+  },
+  {
+   "t": 1792614665000,
+   "kind": "limit",
+   "text": "session 03: five_hour cut it off; limit record {\"status\":\"rejected\"}"
+  },
+  {
+   "t": 1792614666000,
+   "kind": "limit",
+   "text": "usage limit: waiting until 2026-10-21 21:20:00"
+  },
+  {
+   "t": 1792617670000,
+   "kind": "resume",
+   "text": "session 03 resumes demo-session-03 after the usage limit"
+  },
+  {
+   "t": 1792621840000,
+   "kind": "reload",
+   "text": "runner reloads its code; watcher 2 replaced"
+  }
+ ],
+ "limits": [
+  {
+   "t": 1792607412000,
+   "h5": 12,
+   "d7": 41
+  },
+  {
+   "t": 1792609480000,
+   "h5": 31,
+   "d7": 43
+  },
+  {
+   "t": 1792609530000,
+   "h5": 31,
+   "d7": 43
+  },
+  {
+   "t": 1792612090000,
+   "h5": 58,
+   "d7": 46
+  },
+  {
+   "t": 1792612140000,
+   "h5": 58,
+   "d7": 46
+  },
+  {
+   "t": 1792614665000,
+   "h5": 100,
+   "d7": 49
+  },
+  {
+   "t": 1792617670000,
+   "h5": 3,
+   "d7": 49
+  },
+  {
+   "t": 1792619550000,
+   "h5": 21,
+   "d7": 50
+  },
+  {
+   "t": 1792619600000,
+   "h5": 21,
+   "d7": 50
+  },
+  {
+   "t": 1792621815000,
+   "h5": 44,
+   "d7": 52
+  },
+  {
+   "t": 1792621860000,
+   "h5": 44,
+   "d7": 52
+  },
+  {
+   "t": 1792623760000,
+   "h5": 61,
+   "d7": 54
+  },
+  {
+   "t": 1792623810000,
+   "h5": 61,
+   "d7": 54
+  },
+  {
+   "t": 1792625090000,
+   "h5": 70,
+   "d7": 55
+  }
+ ],
+ "messages": [
+  {
+   "t": 1792607392000,
+   "kind": "handover",
+   "from": null,
+   "to": 1,
+   "title": "Build the recipe app's next nine pieces from docs/plan.md",
+   "bytes": 2978
+  },
+  {
+   "t": 1792609505000,
+   "kind": "handover",
+   "from": 1,
+   "to": 2,
+   "title": "Piece 2 of 9: Add the recipe list screen with sorting",
+   "bytes": 3688
+  },
+  {
+   "t": 1792612108000,
+   "kind": "handover",
+   "from": 2,
+   "to": 3,
+   "title": "Piece 3 of 9: Import recipes from a web page",
+   "bytes": 2183
+  },
+  {
+   "t": 1792618812000,
+   "kind": "inbox",
+   "from": null,
+   "to": 4,
+   "title": "Keep the old import format working too",
+   "bytes": 61
+  },
+  {
+   "t": 1792619570000,
+   "kind": "handover",
+   "from": 3,
+   "to": 4,
+   "title": "Piece 4 of 9: Search and filters",
+   "bytes": 3641
+  },
+  {
+   "t": 1792621823000,
+   "kind": "handover",
+   "from": 4,
+   "to": 5,
+   "title": "Piece 5 of 9: Shopping list from a recipe",
+   "bytes": 1881
+  },
+  {
+   "t": 1792623781000,
+   "kind": "handover",
+   "from": 5,
+   "to": 6,
+   "title": "Piece 6 of 9: Offline cache for recipes",
+   "bytes": 3289
+  },
+  {
+   "t": 1792625098000,
+   "kind": "handover",
+   "from": 6,
+   "to": 7,
+   "title": "Piece 7 of 9: Sync across devices",
+   "bytes": 3375
+  }
+ ],
+ "waitsNow": [
+  "Pick an icon set for the shopping list (two options in docs/icons.md)",
+  "Approve the schema change in db/migrations/0004 before it ships"
+ ],
+ "waitsOlder": 0,
+ "waitsFrom": 6,
+ "questions": []
+}
