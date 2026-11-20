@@ -122,8 +122,9 @@ test("readChain: since leaves an earlier chain out", () => {
   assert.deepEqual(c.sessions.map((s) => s.n), [2]);
   assert.deepEqual(c.events.map((e) => e.kind), ["start"]);
   assert.equal(c.started, BASE + 120 * MIN);
-  // No chain starts after since: since is the start.
-  assert.equal(readChain(lines, { since: BASE + 100 * MIN }).started, BASE + 120 * MIN);
+  // since is the chain's start, before the runner's first line too: a page written while the run was scheduled and
+  // one written after the runner logged its start are of one chain.
+  assert.equal(readChain(lines, { since: BASE + 100 * MIN }).started, BASE + 100 * MIN);
   assert.equal(readChain(log(BASE, [[130, "session 02 starts: B"]]), { since: BASE + 100 * MIN }).started, BASE + 100 * MIN);
   assert.equal(readChain(log(BASE, [[130, "session 02 starts: B"]])).started, BASE + 130 * MIN, "else the first line's stamp");
 });
@@ -567,6 +568,21 @@ test("buildData: what waits now", () => {
   assert.deepEqual([s.waitsNow, s.waitsFrom], [["one"], null]);
 });
 
+test("buildData: a STOP prompt's list is what waits, not its prose, its heading or its count", () => {
+  const r = twoSessions();
+  r.log(BASE, TWO);
+  // The shape of a real chain's last prompt: a summary, a heading in the run's own words, the list, the count.
+  r.file("next-prompt.md", ["STOP: the plan is done", "", "The last piece (session 33) fixed the review's findings; nothing is pushed.", "",
+    "Waiting on you:", "- Still waiting (session 23): run `claude plugin validate .`, `docs/plan.md:134`.",
+    "- Still waiting (session 04): copy your table,", "  then start again, `docs/plan.md:76`.", "1. Approve the release notes.", "",
+    "**Remaining:** 0", ""].join("\n"));
+  assert.deepEqual(build(r, { pointer: null }).waitsNow, ["Still waiting (session 23): run `claude plugin validate .`, `docs/plan.md:134`.",
+    "Still waiting (session 04): copy your table, then start again, `docs/plan.md:76`.", "Approve the release notes."]);
+  // With no list, each line that says something is one, but the list's heading and the count.
+  r.file("next-prompt.md", "STOP: done\n\nThe deploy key needs your approval.\n**Waits for you**\nCheck the logs.\n\n**Remaining:** 0\n");
+  assert.deepEqual(build(r, { pointer: null }).waitsNow, ["The deploy key needs your approval.", "Check the logs."]);
+});
+
 test("buildData: an attended run's questions", () => {
   const r = fixtureRun({ attended: true });
   r.log(BASE, ONE);
@@ -886,6 +902,22 @@ test("an earlier chain's page is kept under its date", async () => {
   // the same chain's page is simply replaced
   await refresh(r.state, { page: true, now: BASE + 1561 * MIN, alive: () => true });
   assert.deepEqual(fs.readdirSync(r.state).filter((f) => /^dashboard-\d/.test(f)), ["dashboard-20261116-0300.html"]);
+});
+
+test("a page written before the runner logged its start stays the chain's page", async () => {
+  // start, then dashboard while the scheduler has not started the runner yet
+  const r = fixtureRun({ chainStartedAt: stamp(BASE) });
+  r.pointer({ pid: 0, finished: false, scheduledAt: stamp(BASE) });
+  const before = (await refresh(r.state, { page: true, now: BASE + 0.5 * MIN, alive: () => false })).data;
+  assert.equal(before.chain.state, "scheduled");
+  // the runner starts a minute later and the watcher writes again
+  r.log(BASE, [[1, "chain starts in /r, until the work is done, from session 1"], [1, "session 01 starts: A"]]);
+  r.pointer({ pid: 4242, finished: false, scheduledAt: stamp(BASE) });
+  const after = (await refresh(r.state, { page: true, now: BASE + 2 * MIN, alive: () => true })).data;
+  assert.equal(after.chain.state, "running");
+  // one chain: the page open since the first write takes the new data (dashboard.html's take()), and no dated page
+  assert.equal(after.chain.started, before.chain.started);
+  assert.deepEqual(fs.readdirSync(r.state).filter((f) => /^dashboard-\d/.test(f)), []);
 });
 
 test("a pass with nothing new writes nothing", async () => {

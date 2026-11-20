@@ -7,7 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { read, readJson, when, LOG, parseSession, transcriptBase, chainEvents, pointerOf, git, unitPrices, priced, reportCommit, stopWaits, questionLines } from "./run-read.mjs";
+import { read, readJson, when, LOG, parseSession, transcriptBase, chainEvents, pointerOf, git, unitPrices, priced, reportCommit, stopWaits, isWaitsHead, questionLines } from "./run-read.mjs";
 import { reportSection } from "./telegram-cards.mjs";
 import { workTree } from "./runs.mjs";
 import { strings, langOf, loadLang } from "./lang/index.mjs";
@@ -112,7 +112,9 @@ export function readChain(events, { since = null } = {}) {
     } else event(t, "other", text);
   }
   return {
-    started: started ?? since ?? firstLine,
+    // since first: the chain's start is the same before the runner's first line (a page written while the run was
+    // scheduled) and after it, and the page and keepEarlierPage tell a chain by it.
+    started: since ?? started ?? firstLine,
     endLine,
     sessions: [...sessions.values()].sort((a, b) => a.n - b.n),
     events: out,
@@ -288,7 +290,22 @@ const pad2 = (n) => String(n).padStart(2, "0");
 const localStamp = (ms) => new Date(ms).toLocaleString("sv-SE");
 const finite = (x) => (Number.isFinite(x) ? x : null);
 const asRead = (r) => ({ model: r.model, cost: r.usd || 0, usage: { units: r.units } });
-const listItem = (l) => l.replace(/^\s*(?:[-*] |\d+\. )/, "").trim();
+const ITEM = /^\s*(?:[-*+]|\d+[.)])\s+/;
+const listItem = (l) => l.replace(ITEM, "").trim();
+// What a STOP prompt's body (stopWaits) says waits, one entry an item: when the body holds a list, its items, each with
+// the indented lines under it, and nothing else (a summary, the list's heading, **Remaining:**); without a list, each
+// line that says something but a heading of that list and the count.
+function stopItems(lines, T) {
+  if (!lines.some((l) => ITEM.test(l))) return lines.filter((l) => !isWaitsHead(l, T) && !/^\s*\*\*Remaining:\*\*/.test(l)).map(listItem).filter(Boolean);
+  const items = [];
+  let inside = false;
+  for (const l of lines) {
+    if (ITEM.test(l)) { items.push(listItem(l)); inside = true; }
+    else if (inside && /^\s+\S/.test(l)) items[items.length - 1] += ` ${l.trim()}`;
+    else inside = false;
+  }
+  return items.filter(Boolean);
+}
 // A prompt's or an inbox note's first line that says something: a MODEL: or EFFORT: line is the runner's, a heading's
 // marks go.
 function firstLine(text) {
@@ -389,7 +406,7 @@ export function buildData(state, { now = Date.now(), prev = null, pointer = poin
   // What waits now, as the cards say it: a STOP prompt's list, else the last finished session's.
   const stop = stopWaits(read(path.join(state, "next-prompt.md")).trim(), T);
   const done = xs.findLast((x) => { const a = x.s.attempts.at(-1); return a?.endKnown && a.end != null; });
-  const waitsNow = stop ? stop.map(listItem).filter(Boolean) : done?.section?.waits ?? [];
+  const waitsNow = stop ? stopItems(stop, T) : done?.section?.waits ?? [];
   const waitsOlder = stop ? 0 : done?.section?.older ?? 0, waitsFrom = !stop && done?.section ? done.s.n : null;
 
   // Handover prompts and inbox notes. A prompt written after its session began was rewritten by a resume: it came at
