@@ -12,6 +12,7 @@ import { platformFor } from "./platform.mjs";
 const claude = fs.mkdtempSync(path.join(os.tmpdir(), "ns-runs-"));
 process.env.CLAUDE_CONFIG_DIR = claude;
 const { pointerFile, readPointer, writePointer, stopRun } = await import("./runs.mjs");
+const { refresh, FILES } = await import("./dashboard.mjs");
 
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -164,4 +165,66 @@ test("stopRun takes a pid whose command line names no runner for gone, and kills
   assert.deepEqual(await stopRun(repo, { now: true, state, platform }), { outcome: "gone", pid: 424242 });
   assert.deepEqual(killed, []);
   assert.equal(readPointer(repo).reason, "its runner was already gone");
+});
+
+// ---------------------------------------------------------------- the dashboard's last state before a kill
+// A state folder whose run is in session 01, as dashboard.mjs reads it. Its run.json names the Claude folder the
+// pointers are in, so that the dashboard finds the pointer stopRun marks.
+const running = () => {
+  const s = scene();
+  const t = Date.now() - 60_000, stamp = (ms) => new Date(ms).toLocaleString("sv-SE");
+  fs.writeFileSync(path.join(s.state, "run.json"), JSON.stringify({ claudeConfigDir: claude, lang: "en", repo: s.repo }));
+  fs.writeFileSync(path.join(s.state, "chain.log"), `[${stamp(t)}] chain starts in ${s.repo}\n[${stamp(t + 1000)}] session 01 starts: A\n`);
+  return s;
+};
+const dashAt = (state) => { const f = path.join(state, FILES.json); return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : null; };
+
+test("a stop now writes the final state before the kill", async () => {
+  const { repo, state } = running();
+  writePointer(repo, { pid: 424242, state, finished: false });
+  let seen = null, page = false, gone = false;
+  const platform = fakePlatform({ alive: () => !gone, killTree: () => { seen = dashAt(state); page = fs.existsSync(path.join(state, FILES.page)); gone = true; } });
+  assert.equal((await stopRun(repo, { now: true, state, via: "from Telegram", platform })).outcome, "now");
+  assert.ok(seen, "dashboard.json was there at the kill");
+  assert.equal(seen.chain.state, "ended");
+  assert.match(seen.chain.endReason, /^stopped now by the user/);
+  assert.equal(page, true);
+});
+
+test("a final write that throws or hangs does not hold the stop", async () => {
+  const finals = [async () => { throw new Error("disk"); }, () => { throw new Error("at once"); }, () => new Promise(() => {})];
+  for (const write of finals) {
+    const { repo, state } = running();
+    writePointer(repo, { pid: 424242, state, finished: false });
+    const calls = [];
+    let killed = 0, gone = false;
+    const platform = fakePlatform({ alive: () => !gone, killTree: () => { killed++; gone = true; } });
+    const t0 = Date.now();
+    const r = await stopRun(repo, { now: true, state, platform, final: (s) => { calls.push(s); return write(); }, finalMs: 50 });
+    assert.equal(r.outcome, "now");
+    assert.deepEqual(calls, [state]);
+    assert.equal(killed, 1);
+    assert.ok(Date.now() - t0 < 2_000, `the stop took ${Date.now() - t0} ms`);
+  }
+});
+
+test("a runner that outlives the kill reads as running again", async () => {
+  const { repo, state } = running();
+  writePointer(repo, { pid: 424242, state, finished: false });
+  let seen = null;
+  const platform = fakePlatform({ killTree: () => { seen = dashAt(state); } });
+  assert.equal((await stopRun(repo, { now: true, state, platform })).outcome, "failed");
+  assert.equal(seen?.chain.state, "ended");
+  const { data } = await refresh(state, { force: true, alive: () => true });
+  assert.equal(data.chain.state, "running");
+});
+
+test("a stop after the session writes nothing", async () => {
+  const { repo, state } = running();
+  writePointer(repo, { pid: 424242, state, finished: false });
+  let calls = 0;
+  const r = await stopRun(repo, { state, platform: fakePlatform(), final: async () => { calls++; } });
+  assert.equal(r.outcome, "after");
+  assert.equal(calls, 0);
+  assert.equal(dashAt(state), null);
 });

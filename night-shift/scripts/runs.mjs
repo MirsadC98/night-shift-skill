@@ -13,6 +13,11 @@ import { platform as live } from "./platform.mjs";
 const read = (f) => (fs.existsSync(f) ? fs.readFileSync(f, "utf8") : "");
 const now = () => new Date().toLocaleString("sv-SE");
 const same = live.samePath;
+// Loaded only here, with import(): dashboard.mjs imports this module, and neither imports a module with a top-level await.
+const finalState = async (state) => {
+  const { refresh } = await import("./dashboard.mjs");
+  await refresh(state, { page: true, force: true });
+};
 
 // Also the name of the repository's scheduled task (night-chain.mjs, scheduleRun).
 export const slug = (repo) => `${path.basename(repo)}-${crypto.createHash("sha1").update(repo.toLowerCase()).digest("hex").slice(0, 8)}`;
@@ -44,7 +49,9 @@ export const isRunner = (pid, { platform = live } = {}) => {
 // before(outcome) is awaited right before the kill; platform is as isRunner's. The runner starts the watcher, so the watcher is in the tree and
 // dies at the kill: it answers there. For the same reason the pointer is marked finished before the kill (the runner's
 // heal leaves the mark alone once STOP-REQUEST exists) and once more after it, for a caller that outlives the kill.
-export async function stopRun(repo, { now: hard = false, state = null, via = "", before = async () => {}, platform = live } = {}) {
+// final(state) writes the dashboard's last state between the first mark and the kill, since the watcher that would
+// write it dies too; at most finalMs is waited for it, and nothing it does changes the stop.
+export async function stopRun(repo, { now: hard = false, state = null, via = "", before = async () => {}, platform = live, final = finalState, finalMs = 5000 } = {}) {
   const ptr = repo ? readPointer(repo) : null;
   if (!ptr || ptr.finished || (state && !(ptr.state && same(ptr.state, state)))) return { outcome: "none" };
   fs.writeFileSync(path.join(ptr.state, "STOP-REQUEST"), now());
@@ -64,6 +71,11 @@ export async function stopRun(repo, { now: hard = false, state = null, via = "",
   const put = (data) => { try { writePointer(repo, data); } catch {} };
   const mark = () => put({ ...ptr, finished: true, finishedAt: now(), reason: `stopped now by the user${via ? ` ${via}` : ""}` });
   mark();
+  // The page reads the pointer just marked and says ended. A write that throws or hangs must not hold the stop back.
+  let timer;
+  const job = Promise.resolve().then(() => final(ptr.state)).catch(() => {});
+  await Promise.race([job, new Promise((r) => { timer = setTimeout(r, finalMs); })]);
+  clearTimeout(timer);
   platform.killTree(ptr.pid);
   // A runner that lives on keeps its pointer as it was, so `start` never runs a second chain beside it. A killed
   // process may take a moment to be gone.
