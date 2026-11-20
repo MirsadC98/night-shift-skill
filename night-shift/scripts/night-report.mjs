@@ -22,8 +22,8 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { read, readJson, when, blank, merge, lastActivity, parseSession, chainEvents, pointerOf, git, unitPrices, priced, reportCommit, stopWaits, questionLines, LOG } from "./run-read.mjs";
 import { sessionCard, eventLine, chainCard, statusCard, reportCard, reportSection, chainProgress, progressText, splitHtml } from "./telegram-cards.mjs";
 import { sessionPlan, resolveMode, isPremium, modelName as familyName, MAIN_MODEL, PREMIUM } from "./effort.mjs";
 import { strings, langOf, loadLang } from "./lang/index.mjs";
@@ -32,213 +32,25 @@ import { stopRun, workTree } from "./runs.mjs";
 import { platform } from "./platform.mjs";
 import { sendWebhook, webhookFile, plainText } from "./webhook.mjs";
 
+// questionLines lives with the other readers; night-chain.mjs (`wait`) imports it from here.
+export { questionLines };
+
 const SELF = fileURLToPath(import.meta.url);
 // A function: the runner sets CLAUDE_CONFIG_DIR from run.json after this module has loaded (claudeHome).
 const telegramFile = () => path.join(claudeHome(), "night-shift", "telegram.json");
 const QUIET_MINUTES = 30;
-// Anthropic's price ratios to fresh input. They only split a model's dollars
-// between rows; the dollars themselves are the sessions' own totals.
-const WEIGHT = { input: 1, read: 0.1, write5m: 1.25, write1h: 2, output: 5 };
 
-const read = (f) => (fs.existsSync(f) ? fs.readFileSync(f, "utf8") : "");
-// A file caught half-written (or by a crash) reads as its default: the watcher must outlive it.
-const readJson = (f, dflt = {}) => { try { const v = JSON.parse(read(f)); return v && typeof v === "object" ? v : dflt; } catch { return dflt; } };
 const { alive } = platform;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const jsonl = (f) => read(f).split("\n").flatMap((l) => { try { return l ? [JSON.parse(l)] : []; } catch { return []; } });
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 // HH:MM, as a night report's section heading writes a session's start (reportSection finds it by that);
 // a time the user reads goes through the language table's clock (T.clock) instead.
 const hm = (d) => d.toLocaleTimeString("sv-SE").slice(0, 5);
-const when = (at) => new Date(at.replace(" ", "T"));
 const tokens = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
 const usd = (n) => `$${n.toFixed(2)}`;
 const pct = (u, T) => (u == null ? "—" : T.pct(Math.round(u > 1 ? u : u * 100)));
 const minutes = (ms, T) => T.minutes(Math.round(ms / 60_000));
 const modelName = (m) => m.replace(/^claude-/, "").replace(/\[.*\]$/, "").replace(/-(\d+)-(\d+).*$/, " $1.$2");
-
-// ---------------------------------------------------------------- tokens
-const blank = () => ({ calls: 0, input: 0, read: 0, write: 0, output: 0, thinking: 0, units: 0 });
-function add(acc, u) {
-  const write = u.cache_creation_input_tokens || 0;
-  const w1h = u.cache_creation?.ephemeral_1h_input_tokens, w5m = u.cache_creation?.ephemeral_5m_input_tokens;
-  const writeUnits = w1h != null || w5m != null ? (w1h || 0) * WEIGHT.write1h + (w5m || 0) * WEIGHT.write5m : write * WEIGHT.write1h;
-  acc.calls++;
-  acc.input += u.input_tokens || 0;
-  acc.read += u.cache_read_input_tokens || 0;
-  acc.write += write;
-  acc.output += u.output_tokens || 0;
-  acc.thinking += u.output_tokens_details?.thinking_tokens || 0;
-  acc.units += (u.input_tokens || 0) * WEIGHT.input + (u.cache_read_input_tokens || 0) * WEIGHT.read + writeUnits + (u.output_tokens || 0) * WEIGHT.output;
-}
-const merge = (a, b) => { for (const k of Object.keys(a)) a[k] += b[k]; return a; };
-
-// One response is spread over several lines that repeat its id; the last one counts.
-function usageByModel(entries, keep = () => true) {
-  const last = new Map();
-  for (const j of entries) {
-    if (j.type === "assistant" && j.message?.usage && j.message.model !== "<synthetic>" && keep(j)) last.set(j.message.id || j.requestId || last.size, j);
-  }
-  const byModel = {};
-  for (const j of last.values()) add((byModel[j.message.model] ||= blank()), j.message.usage);
-  return byModel;
-}
-
-// The Claude folder the run used: the one start kept in run.json (CLAUDE_CONFIG_DIR), so a shell without the variable
-// still finds the run's transcripts and runner; else this process's (claudeHome).
-const claudeOf = (state) => readJson(path.join(state, "run.json")).claudeConfigDir || claudeHome();
-// <projects>/<project>/<sid>: the main transcript is <sid>.jsonl, subagents live under <sid>/.
-function transcriptBase(sid, state) {
-  const root = path.join(claudeOf(state), "projects");
-  for (const p of sid && fs.existsSync(root) ? fs.readdirSync(root) : []) {
-    const base = path.join(root, p, sid);
-    if (fs.existsSync(`${base}.jsonl`) || fs.existsSync(base)) return base;
-  }
-  return null;
-}
-
-// Last sign of life of a session: its stream, or any of its agents' transcripts
-// (a session waiting on a long workflow writes nothing itself).
-function lastActivity(state, nn) {
-  const file = path.join(state, `session-${nn}.jsonl`);
-  if (!fs.existsSync(file)) return Date.now();
-  let latest = fs.statSync(file).mtimeMs;
-  const fd = fs.openSync(file, "r"), head = Buffer.alloc(65536);
-  const sid = /"session_id":"([^"]+)"/.exec(head.toString("utf8", 0, fs.readSync(fd, head, 0, head.length, 0)))?.[1];
-  fs.closeSync(fd);
-  const base = transcriptBase(sid, state);
-  const walk = (d) => {
-    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
-      const f = path.join(d, e.name);
-      if (e.isDirectory()) walk(f);
-      else latest = Math.max(latest, fs.statSync(f).mtimeMs);
-    }
-  };
-  if (base && fs.existsSync(`${base}.jsonl`)) latest = Math.max(latest, fs.statSync(`${base}.jsonl`).mtimeMs);
-  if (base && fs.existsSync(base)) walk(base);
-  return latest;
-}
-
-// Subagents and workflow agents of one session, one row per kind and model.
-// Their transcripts undercount output tokens; parseSession tops that up from the session's totals.
-function agentRows(dir) {
-  const rows = {}, workflows = [];
-  const walk = (d) => {
-    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
-      const f = path.join(d, e.name);
-      if (e.isDirectory()) walk(f);
-      else if (/^agent-.*\.jsonl$/.test(e.name)) {
-        const kind = /[\\/]workflows[\\/]/.test(f) ? "wf" : "alt";
-        const byModel = usageByModel(jsonl(f));
-        const main = Object.entries(byModel).sort((a, b) => b[1].units - a[1].units)[0];
-        for (const [model, u] of Object.entries(byModel)) {
-          const row = (rows[`${kind}|${model}`] ||= { kind, model, agents: 0, usage: blank() });
-          merge(row.usage, u);
-          if (model === main[0]) row.agents++;
-        }
-      }
-    }
-  };
-  if (dir && fs.existsSync(path.join(dir, "subagents"))) walk(path.join(dir, "subagents"));
-  const wfDir = dir && path.join(dir, "workflows");
-  for (const f of wfDir && fs.existsSync(wfDir) ? fs.readdirSync(wfDir).filter((n) => n.endsWith(".json")) : []) {
-    const name = /name:\s*['"]([^'"]+)/.exec(JSON.parse(read(path.join(wfDir, f))).script || "")?.[1];
-    if (name) workflows.push(name);
-  }
-  return { rows: Object.values(rows), workflows };
-}
-
-// ---------------------------------------------------------------- one session
-// A guard denial is a failed call whose first line is the hook's (`PreToolUse:Bash hook error: night-shift guard:
-// <reason>. Do not work around it; …`). Output that only shows the guard's text, its source read or the hook run
-// by hand, is none (2026-11-19: a session that read guard.mjs counted as refused, its source as the reason).
-const DENIAL = /^[^\n]*night-shift guard: /;
-const denialReason = (t) => {
-  const r = t.slice(t.indexOf("night-shift guard: ") + 19).split(". Do not work around it")[0].replace(/\s+/g, " ").trim();
-  return r.length > 160 ? `${r.slice(0, 159)}…` : r;
-};
-
-// A model billed in the totals that no transcript row names (calls the transcripts do not record): its own row,
-// with the totals' tokens and dollars (its keys added up) and no count of calls.
-function addUntracked(row, mu) {
-  add(row.usage, { input_tokens: mu.inputTokens, cache_read_input_tokens: mu.cacheReadInputTokens, cache_creation_input_tokens: mu.cacheCreationInputTokens, output_tokens: mu.outputTokens });
-  row.usage.calls = 0;
-  row.cost += mu.costUSD || 0;
-  return row;
-}
-const untrackedRow = (model, mu) => addUntracked({ kind: "ana", model, agents: 0, usage: blank(), cost: 0, untracked: true }, mu);
-
-// T9: a session's start, the context its first main-thread call read (input, cache read and cache write): what the
-// header, the prompt, the skills and the tools cost before any work. null when the session made no call.
-function startTokens(entries) {
-  const u = entries.find((j) => j.type === "assistant" && !j.parent_tool_use_id && !j.isSidechain && j.message?.usage && j.message.model !== "<synthetic>")?.message.usage;
-  return u ? (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0) : null;
-}
-
-function parseSession(state, nn) {
-  const file = path.join(state, `session-${nn}.jsonl`);
-  const entries = jsonl(file);
-  const sid = entries.find((j) => j.session_id)?.session_id;
-  // Result lines are cumulative: a session writes one each time a background task wakes it,
-  // and a session resumed after a usage limit carries its cost on (measured on run 2's #07,
-  // 2026-10-30). The last one is the whole session; never add them up.
-  const result = entries.findLast((j) => j.type === "result") || null;
-  // The stream's usage lines stop at the start of each response, so main-thread
-  // tokens come from the session's transcript on disk.
-  const base = transcriptBase(sid, state);
-  const mainEntries = base && fs.existsSync(`${base}.jsonl`) ? jsonl(`${base}.jsonl`) : entries;
-  const rows = Object.entries(usageByModel(mainEntries, (j) => !j.parent_tool_use_id && !j.isSidechain))
-    .map(([model, usage]) => ({ kind: "ana", model, agents: 0, usage }));
-  const agents = agentRows(base);
-  rows.push(...agents.rows);
-
-  // Once the session has its totals: give the agents the output their transcripts
-  // missed, then split each model's dollars over its rows by weighted tokens.
-  if (result?.modelUsage) {
-    // One model's keys ("…[1m]" for the main thread, the plain id for its subagents) bill the same rows: added up first,
-    // so that the output the rows missed is counted once, against both keys' output.
-    const byModel = new Map();
-    for (const [key, mu] of Object.entries(result.modelUsage)) {
-      const model = key.replace(/\[.*\]$/, ""), sum = byModel.get(model) || {};
-      for (const f of ["inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens", "costUSD"]) sum[f] = (sum[f] || 0) + (Number(mu?.[f]) || 0);
-      byModel.set(model, sum);
-    }
-    for (const [model, mu] of byModel) {
-      const mine = rows.filter((r) => r.model === model);
-      if (!mine.length) { if (mu.costUSD || mu.inputTokens || mu.outputTokens) rows.push(untrackedRow(model, mu)); continue; }
-      const counted = mine.reduce((s, r) => s + r.usage.output, 0);
-      const agentsOf = mine.filter((r) => r.kind !== "ana");
-      const calls = agentsOf.reduce((s, r) => s + r.usage.calls, 0);
-      const missing = Math.max(0, (mu.outputTokens || 0) - counted);
-      for (const r of agentsOf) {
-        const extra = calls ? Math.round(missing * r.usage.calls / calls) : 0;
-        r.usage.output += extra;
-        r.usage.units += extra * WEIGHT.output;
-      }
-      const units = mine.reduce((s, r) => s + r.usage.units, 0);
-      for (const r of mine) r.cost = (r.cost || 0) + (units ? mu.costUSD * r.usage.units / units : 0);
-    }
-  }
-  const tools = entries.filter((j) => j.type === "assistant" && !j.parent_tool_use_id)
-    .flatMap((j) => (j.message.content || []).filter((c) => c.type === "tool_use"));
-  const toolResults = entries.filter((j) => j.type === "user" && Array.isArray(j.message?.content))
-    .flatMap((j) => j.message.content.filter((c) => c.type === "tool_result"));
-  const text = (c) => (typeof c.content === "string" ? c.content : (c.content || []).map((p) => p.text || "").join(" "));
-  const last = tools.at(-1);
-  return {
-    nn, rows, result, workflows: agents.workflows,
-    startCtx: startTokens(mainEntries),
-    // The effort each main-thread call really ran at (settings can drift: 2026-10-30, xhigh → high).
-    efforts: [...new Set(mainEntries.filter((j) => j.type === "assistant" && !j.isSidechain && j.perTurnEffort).map((j) => j.perTurnEffort))],
-    limits: entries.filter((j) => j.type === "rate_limit_event").map((j) => j.rate_limit_info).filter(Boolean),
-    denials: toolResults.filter((c) => c.is_error === true).map(text).filter((t) => DENIAL.test(t)).map(denialReason),
-    toolErrors: toolResults.filter((c) => c.is_error).length,
-    compactions: entries.filter((j) => j.type === "system" && /compact/.test(j.subtype || "")).length,
-    lastStep: last ? (last.input?.description || last.input?.skill || last.input?.file_path || last.name) : null,
-    mtime: lastActivity(state, nn),
-    stamps: mainEntries.map((j) => Date.parse(j.timestamp)).filter(Number.isFinite),
-  };
-}
 
 // A job resumed after a restart or a usage limit sat idle from its last transcript line before
 // the resume until the resume (run 2's #35 spanned a four-day power cut, 2026-11-01 → 11-05).
@@ -250,25 +62,7 @@ const idleMs = (s) => (s.resumes || []).reduce((sum, at) => {
 const workMs = (s) => spanMs(s) - idleMs(s);
 
 // ---------------------------------------------------------------- the run
-function chainEvents(state) {
-  return read(path.join(state, "chain.log")).split("\n").flatMap((l) => {
-    const m = /^\[([^\]]+)\] (.*)$/.exec(l);
-    return m ? [{ at: m[1], text: m[2] }] : [];
-  });
-}
-
-function runnerPid(state) {
-  const dir = path.join(claudeOf(state), "night-shift", "runs");
-  for (const f of fs.existsSync(dir) ? fs.readdirSync(dir) : []) {
-    try {
-      const p = JSON.parse(read(path.join(dir, f)));
-      if (p.state && path.resolve(p.state) === path.resolve(state)) return p.finished ? 0 : p.pid;
-    } catch {}
-  }
-  return 0;
-}
-
-const git = (repo, args) => { try { return execFileSync("git", args, { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true }).trim(); } catch { return ""; } };
+const runnerPid = (state) => { const p = pointerOf(state); return p && !p.finished ? p.pid : 0; };
 
 // What the full report and the Telegram cards both read: the run, its jobs with their tokens, problems.
 function collect(state, pid = null) {
@@ -282,14 +76,14 @@ function collect(state, pid = null) {
     let m;
     // A number started again (a retry, a restarted chain) replaces its earlier try;
     // a resumed one is the same job going on after a usage limit.
-    if ((m = /^session (\d+) starts: (.*)$/.exec(e.text))) {
+    if ((m = LOG.starts.exec(e.text))) {
       const at = sessions.findIndex((s) => s.nn === m[1]);
       sessions.splice(at < 0 ? sessions.length : at, at < 0 ? 0 : 1, { nn: m[1], start: e.at, task: m[2] });
-    } else if ((m = /^session (\d+) resumes /.exec(e.text))) {
+    } else if ((m = LOG.resumes.exec(e.text))) {
       const s = sessions.findLast((x) => x.nn === m[1]);
       if (s) Object.assign(s, { end: null, resumes: [...(s.resumes || []), e.at] });
     }
-    else if ((m = /^session (\d+) ends: (.*)$/.exec(e.text))) Object.assign(sessions.findLast((s) => s.nn === m[1]) || {}, { end: e.at, summary: m[2] });
+    else if ((m = LOG.ends.exec(e.text))) Object.assign(sessions.findLast((s) => s.nn === m[1]) || {}, { end: e.at, summary: m[2] });
     // What the runner said about a session's model and handover (night-chain.mjs, 2026-11-15 on).
     else if ((m = /^session (\d+)(?::| )/.exec(e.text))) {
       const s = sessions.findLast((x) => x.nn === m[1]);
@@ -298,8 +92,8 @@ function collect(state, pid = null) {
     }
   }
   // A restarted chain logs "chain starts" again; only an end after the last start counts.
-  const ended = events.slice(events.findLastIndex((e) => e.text.startsWith("chain starts ")) + 1)
-    .findLast((e) => e.text.startsWith("chain ends: "));
+  const ended = events.slice(events.findLastIndex((e) => e.text.startsWith(LOG.chainStarts)) + 1)
+    .findLast((e) => e.text.startsWith(LOG.chainEnds));
   const runner = pid ?? runnerPid(state);
   const running = !ended && runner && alive(runner);
   const parsed = sessions.map((s) => ({ ...s, ...parseSession(state, s.nn) }));
@@ -375,9 +169,6 @@ function runnerNote(text, T, main = null) {
 export const stateLang = (state, repo) => langOf({ repo, ...readJson(path.join(state, "run.json")) });
 export const stateStrings = (state, repo) => strings(stateLang(state, repo));
 
-// A night-report commit (`docs: night report …`, or the phrase of the run's own language) is no job's work.
-const reText = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const reportCommit = (T) => new RegExp(`^\\S+ docs: (?:${[...new Set([strings("en").reportCommit, T.reportCommit])].filter(Boolean).map(reText).join("|")})`);
 
 // A job's night-report section, read once per collect (the report runs to thousands of lines).
 function sectionOf(c, s) {
@@ -423,17 +214,6 @@ function progressOf(c, upto = null) {
   return progressText(p, now, c.T);
 }
 
-// Dollars and weighted tokens of each model over sessions that have their totals; a row priced at them.
-function unitPrices(sessions) {
-  const price = {};
-  for (const r of sessions.flatMap((s) => s.rows)) {
-    const p = (price[r.model] ||= { cost: 0, units: 0 });
-    p.cost += r.cost || 0;
-    p.units += r.usage.units;
-  }
-  return price;
-}
-const priced = (r, price) => (price[r.model]?.units ? r.usage.units * price[r.model].cost / price[r.model].units : 0);
 // F5: what session nn cost when it wrote no result line (killed at --session-hours, crashed), for --max-usd: its
 // transcript priced as a running session's is above, at the other sessions' totals in this state folder; 0 when none
 // of them has a total for its models.
@@ -666,28 +446,9 @@ export function userWaits(state) {
   return waitsOf(collect(state, 0));
 }
 
-// The label `wait` gives the list, from a table's own function, which may throw or return something else.
-function waitsLabel(t) {
-  try {
-    const text = t.cli.userWaits(["-"]);
-    return typeof text === "string" ? text.split("\n")[0].replace(/:\s*$/, "") : "";
-  } catch { return ""; }
-}
-
-// The heading a STOP prompt's list may open with: the skill's **Waits for you**, or the label the cards or
-// `wait` give that list, in English or in the run's own language. The whole line, markup and a colon aside, is
-// the heading: an item that starts with the same words stays.
-function isWaitsHead(line = "", T) {
-  const text = line.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "").toLowerCase();
-  return [strings("en"), T].flatMap((t) => [t.waitsHead, waitsLabel(t)]).some((h) => h && text === h.toLowerCase());
-}
-
 function waitsOf(c) {
-  if (/^STOP\b/i.test(c.nextPrompt)) {
-    const body = c.nextPrompt.split("\n").slice(1).join("\n").trim().split("\n");
-    if (isWaitsHead(body[0], c.T)) body.shift();
-    return body.join("\n").trim() ? body.join("\n").trim().split("\n") : [];
-  }
+  const stop = stopWaits(c.nextPrompt, c.T);
+  if (stop) return stop;
   const last = c.parsed.findLast((s) => s.end);
   const f = last && jobFacts(c, last);
   return f ? [...f.waits.map((w) => `- ${w}`), ...(f.older ? [`- ${c.T.olderInReport(f.older, f.nn)}`] : [])] : [];
@@ -814,15 +575,6 @@ export async function notify(state, headline, opt = {}) {
   return outcome;
 }
 
-// C3 (2026-11-19): an attended run's questions, <state>/questions.md: the lines that open with "Q<n> · ", each once, in the
-// order written. A line counts once it ends in a newline, so one still being written, or cut off by stop --now, is not
-// read half. The watcher and `wait` (night-chain.mjs) keep what they reported by the line's text, not by a count: a line a
-// session rewrote or removed then neither hides a later question nor reports the rest again.
-// A BOM goes too: Windows PowerShell 5's Set-Content -Encoding UTF8 starts the file with one, which hid its first question.
-export function questionLines(state) {
-  const lines = read(path.join(state, "questions.md")).replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").split("\n").slice(0, -1).map((l) => l.trimEnd());
-  return [...new Set(lines.filter((l) => /^Q\d+ · /.test(l)))];
-}
 
 // ---------------------------------------------------------------- watch
 async function watch(opt) {
