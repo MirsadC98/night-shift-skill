@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { read, readJson, when, LOG, parseSession, transcriptBase, chainEvents, pointerOf, git, unitPrices, priced, reportCommit, stopWaits, questionLines } from "./run-read.mjs";
 import { reportSection } from "./telegram-cards.mjs";
 import { workTree } from "./runs.mjs";
-import { strings, langOf } from "./lang/index.mjs";
+import { strings, langOf, loadLang } from "./lang/index.mjs";
 import { platform } from "./platform.mjs";
 import { VERSION } from "./version.mjs";
 import { MODEL_TABLE, familyOf } from "./effort.mjs";
@@ -465,4 +465,85 @@ const embed = (value) => JSON.stringify(value).replace(/</g, "\\u003c");
 export function pageHtml(data, labels) {
   const template = fs.readFileSync(path.join(ASSETS, "dashboard.html"), "utf8");
   return template.replace(/\/\*__(DATA|LABELS)__\*\//g, (place, name) => embed(name === "DATA" ? data : labels));
+}
+
+// ---------------------------------------------------------------------------- the files in the state folder
+export const FILES = { json: "dashboard.json", js: "dashboard-data.js", page: "dashboard.html" };
+
+// One file through a temporary name of this process in the same folder, renamed over the old one. A rename that throws
+// (a reader holds the file on Windows) leaves the old file, removes the temporary one and gives false: the next pass
+// tries again.
+function put(state, name, text, rename) {
+  const file = path.join(state, name), tmp = `${file}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, text);
+    rename(tmp, file);
+    return true;
+  } catch {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* nothing left to remove */ }
+    return false;
+  }
+}
+
+// A folder that holds another chain's page keeps it under that chain's start (local time); true when the new page may
+// be written. A rename that fails writes no page this time, so the earlier chain's page is never lost.
+function keepEarlierPage(state, data, rename) {
+  const page = path.join(state, FILES.page);
+  if (!fs.existsSync(page)) return true;
+  const started = readJson(path.join(state, FILES.json)).chain?.started;
+  if (!Number.isFinite(started) || started === data.chain?.started) return true;
+  const d = new Date(started);
+  const name = `dashboard-${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}.html`;
+  try { rename(page, path.join(state, name)); return true; } catch { return false; }
+}
+
+// The data as dashboard.json and as dashboard-data.js from one string, and with page the page too; each true when that
+// file was replaced.
+export function writeDashboard(state, data, { page = false, labels = null, rename = fs.renameSync } = {}) {
+  const fresh = page && keepEarlierPage(state, data, rename);
+  const text = JSON.stringify(data);
+  return {
+    json: put(state, FILES.json, text, rename),
+    js: put(state, FILES.js, `nightShiftData(${text});\n`, rename),
+    page: fresh ? put(state, FILES.page, pageHtml(data, labels ?? labelsFor(data.lang || "en")), rename) : false,
+  };
+}
+
+// What a pass reads, as one string: when it is the same as at the last write and that write is under a minute old,
+// the pass has nothing to do. The newest session's stream and transcripts stand for the running one.
+function sourcesOf(state, pointer, known) {
+  const run = readJson(path.join(state, "run.json"));
+  const part = (f) => { const s = f ? statOf(f) : null; return s ? `${s.size}:${s.mtime}` : "-"; };
+  const tree = workTree(run), prompts = treeStat(path.join(state, "prompts"));
+  let streams = [];
+  try { streams = fs.readdirSync(state).map((f) => /^session-(\d+)\.jsonl$/.exec(f)?.[1]).filter(Boolean).map(Number); } catch { /* no folder */ }
+  const last = streams.length ? Math.max(...streams) : null;
+  return [
+    ...["chain.log", "run.json", "questions.md", "inbox.md", "next-prompt.md"].map((f) => part(path.join(state, f))),
+    part(pointer?.file), part(tree ? path.join(tree, run.report || "NIGHT_RUNS.md") : null),
+    `${prompts.count}:${prompts.total}:${prompts.newest}`,
+    last == null ? "-" : `${last}:${blockSignature(state, last, known(last)).sig}`,
+  ].join("|");
+}
+
+// The last write per state folder in this process: its sources, its time and its data.
+const lastWrite = new Map();
+
+// Brings a state folder's dashboard files up to date: builds the data with the last dashboard.json as its cache and
+// writes it, the page too with page. Without force or page a pass whose sources did not change writes nothing until
+// the last write is a minute old. The sources and the time are kept only when dashboard.json was replaced, so a rename
+// that failed is tried again on the next pass.
+export async function refresh(state, { now = Date.now(), pointer = pointerOf(state), alive = platform.alive, page = false, force = false } = {}) {
+  const key = path.resolve(state), last = lastWrite.get(key), file = path.join(state, FILES.page);
+  const known = (n) => last?.data.sessions?.find((s) => s.n === n)?.src ?? null;
+  const sig = sourcesOf(state, pointer, known);
+  if (last && !force && !page && last.sig === sig && now - last.at < MIN) return { data: last.data, wrote: false, file };
+  const lang = langOf(readJson(path.join(state, "run.json")));
+  await loadLang(lang);
+  let prev = null;
+  try { prev = JSON.parse(fs.readFileSync(path.join(state, FILES.json), "utf8")); } catch { prev = null; }
+  const data = buildData(state, { now, prev, pointer, alive });
+  const wrote = writeDashboard(state, data, { page, labels: page ? labelsFor(lang) : null }).json;
+  if (wrote) lastWrite.set(key, { sig, at: now, data });
+  return { data, wrote, file };
 }

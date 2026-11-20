@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tempRoot } from "./config.mjs";
 import { parseSession } from "./run-read.mjs";
-import { readChain, sessionBlock, blockSignature, BLOCK_KEYS, CACHE_VERSION, buildData, SCHEMA, gitLog, demoData, labelsFor, pageHtml } from "./dashboard.mjs";
+import { readChain, sessionBlock, blockSignature, BLOCK_KEYS, CACHE_VERSION, buildData, SCHEMA, gitLog, demoData, labelsFor, pageHtml, FILES, writeDashboard, refresh } from "./dashboard.mjs";
 import { loadLang, langFile } from "./lang/index.mjs";
 import en from "./lang/en.mjs";
 import { reached } from "./fixtures/imports.mjs";
@@ -826,4 +826,89 @@ test("a language whose table was not loaded reads as English", () => {
   assert.deepEqual(Object.keys(labelsFor("zz").sets), ["en"]);
   assert.equal(labelsFor("zz").start, "en");
   assert.deepEqual(Object.keys(labelsFor("en", { also: "zz" }).sets), ["en"]);
+});
+
+// ---------------------------------------------------------------- the files
+const tmpsIn = (dir) => fs.readdirSync(dir).filter((f) => f.endsWith(".tmp"));
+const fileOf = (r, name) => fs.readFileSync(path.join(r.state, name), "utf8");
+function finishedRun() {
+  const r = twoSessions();
+  r.log(BASE, [...TWO, [41, "chain ends: STOP: done"]]);
+  r.pointer({ pid: 4242, finished: true, finishedAt: stamp(BASE + 41 * MIN), reason: "STOP: done" });
+  return r;
+}
+
+test("three files, the two data files from one string", async () => {
+  const r = finishedRun();
+  const out = await refresh(r.state, { page: true, now: BASE + 120 * MIN, alive: () => true });
+  const json = fileOf(r, FILES.json);
+  assert.equal(fileOf(r, FILES.js), `nightShiftData(${json});\n`);
+  assert.deepEqual(embedded(fileOf(r, FILES.page), "chain-data"), JSON.parse(json));
+  assert.deepEqual(out.data, JSON.parse(json));
+  assert.equal(out.wrote, true);
+  assert.equal(out.file, path.join(r.state, FILES.page));
+  assert.deepEqual(tmpsIn(r.state), []);
+});
+
+test("a rename that fails keeps the old file", () => {
+  const r = finishedRun();
+  const data = build(r);
+  writeDashboard(r.state, data);
+  const before = fileOf(r, FILES.json);
+  const rename = (from, to) => { if (path.basename(to) === FILES.json) throw new Error("EBUSY: held by a reader"); fs.renameSync(from, to); };
+  const out = writeDashboard(r.state, { ...data, generatedAt: data.generatedAt + MIN }, { rename });
+  assert.equal(out.json, false);
+  assert.equal(out.js, true);
+  assert.equal(out.page, false);
+  assert.equal(fileOf(r, FILES.json), before);
+  assert.deepEqual(tmpsIn(r.state), []);
+});
+
+test("two writers do not share a temporary name", () => {
+  const r = finishedRun();
+  const other = path.join(r.state, `${FILES.json}.1.tmp`);
+  fs.writeFileSync(other, "another writer's");
+  assert.equal(writeDashboard(r.state, build(r)).json, true);
+  assert.equal(fs.readFileSync(other, "utf8"), "another writer's");
+  assert.deepEqual(tmpsIn(r.state), [`${FILES.json}.1.tmp`]);
+});
+
+test("an earlier chain's page is kept under its date", async () => {
+  const r = finishedRun();
+  // the folder holds the page and data of a chain started at 03:00 on 2026-11-16
+  r.file(FILES.json, JSON.stringify({ schema: SCHEMA, chain: { started: BASE } }));
+  r.file(FILES.page, "the earlier chain's page");
+  // and a new chain started there a day later
+  r.log(BASE + 1440 * MIN, [...TWO, [41, "chain ends: STOP: done"]]);
+  await refresh(r.state, { page: true, now: BASE + 1560 * MIN, alive: () => true });
+  assert.equal(fileOf(r, "dashboard-20261116-0300.html"), "the earlier chain's page");
+  assert.equal(embedded(fileOf(r, FILES.page), "chain-data").chain.started, BASE + 1440 * MIN);
+  // the same chain's page is simply replaced
+  await refresh(r.state, { page: true, now: BASE + 1561 * MIN, alive: () => true });
+  assert.deepEqual(fs.readdirSync(r.state).filter((f) => /^dashboard-\d/.test(f)), ["dashboard-20261116-0300.html"]);
+});
+
+test("a pass with nothing new writes nothing", async () => {
+  const r = finishedRun();
+  const at = BASE + 120 * MIN, opt = { alive: () => true };
+  assert.equal((await refresh(r.state, { now: at, ...opt })).wrote, true);
+  const again = await refresh(r.state, { now: at, ...opt });
+  assert.equal(again.wrote, false);
+  assert.equal(again.data.generatedAt, at);
+  assert.equal((await refresh(r.state, { now: at + 61_000, ...opt })).wrote, true);
+  fs.appendFileSync(path.join(r.state, "chain.log"), `[${stamp(BASE + 42 * MIN)}] runner reloads its code\n`);
+  assert.equal((await refresh(r.state, { now: at + 61_000, ...opt })).wrote, true);
+  // a page or a forced pass always writes
+  assert.equal((await refresh(r.state, { now: at + 61_000, force: true, ...opt })).wrote, true);
+  assert.equal((await refresh(r.state, { now: at + 61_000, page: true, ...opt })).wrote, true);
+});
+
+test("a broken dashboard.json is a full build", async () => {
+  const r = finishedRun();
+  r.file(FILES.json, "{");
+  const out = await refresh(r.state, { now: BASE + 120 * MIN, alive: () => true });
+  assert.equal(out.wrote, true);
+  const d = JSON.parse(fileOf(r, FILES.json));
+  assert.equal(d.schema, SCHEMA);
+  assert.deepEqual(d.sessions.map((s) => [s.n, s.usd]), [[1, 2], [2, 3]]);
 });
