@@ -1313,11 +1313,11 @@ test("a STOP prompt's list loses a line that is only its heading, never an item 
   putTable(home);
   setLang(state, "xx");
   assert.equal((await loadLang("xx", home)).error, undefined);
-  const waits = (body) => { fs.writeFileSync(path.join(state, "next-prompt.md"), `STOP: done\n\n${body}`); return userWaits(state); };
+  const waits = (body) => { fs.writeFileSync(path.join(state, "next-prompt.md"), `STOP: done\n\n${body}`); return userWaits(state).lines; };
   for (const head of ["**Waits for you**", "## Waits for you:", "Waiting for the user:", "xx·waits:", "**xx·waits**"])
     assert.deepEqual(waits(`${head}\n- a\n- b`), ["- a", "- b"], head);
   assert.deepEqual(waits("- Waiting for the user's decision on X\n- b"), ["- Waiting for the user's decision on X", "- b"]);
-  assert.deepEqual(waits("Waiting for the user to merge #12"), ["Waiting for the user to merge #12"]);
+  assert.deepEqual(waits("Waiting for the user:\nWaiting for the user to merge #12"), ["Waiting for the user to merge #12"]);
   assert.deepEqual(waits("Waits for you to merge #12\n- b"), ["Waits for you to merge #12", "- b"]);
   assert.deepEqual(waits("xx·waits to merge\n- b"), ["xx·waits to merge", "- b"]);
   // a table whose own list label throws still leaves the English headings to match
@@ -2082,6 +2082,16 @@ test("status and wait print the run's language: the user's table under its code,
   assert.match(enWait.stdout, /Waiting for the user: no items listed/);
   assert.match(enWait.stdout, /^Report: .* · full status: node /m);
   assert.doesNotMatch(enWait.stdout, /xx·/);
+});
+
+test("wait on a STOP prompt that only says nothing waits lists no item and prints the sentence under it", () => {
+  const c = finishedRun("en");
+  // 2026-11-20, a real chain's last prompt (in the run's language there): wait printed this sentence as the list of what waits for the user
+  const prose = "Both pieces of the plan are done: `23b37d4` notes: piece one, the night report `090d978`. Nothing waits for you.";
+  fs.writeFileSync(path.join(c.state, "next-prompt.md"), `STOP: the plan is done\n\n${prose}\n`);
+  const r = c.run("wait");
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(r.stdout.includes(`\nWaiting for the user: no items listed\n${prose}\n\nReport: `), r.stdout);
 });
 
 test("status and wait on a run whose table is gone print English and say why on stderr", () => {

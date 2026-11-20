@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { buildReport, sessionMessage, chainMessage, questionLines } from "./night-report.mjs";
+import { buildReport, sessionMessage, chainMessage, reportMessage, userWaits, questionLines } from "./night-report.mjs";
 import { reportSection } from "./telegram-cards.mjs";
 import { loadLang } from "./lang/index.mjs";
 // A CLAUDE_CONFIG_DIR of the user's own would move every file these tests read or write (claudeHome in config.mjs).
@@ -234,4 +234,19 @@ test("questionLines reads a questions.md that starts with a BOM and has CRLF lin
   const state = fs.mkdtempSync(path.join(os.tmpdir(), "night-questions-"));
   fs.writeFileSync(path.join(state, "questions.md"), "\uFEFFQ1 · Which name? · picked A · B changes the menu\r\nQ2 · Ship it? · picked yes · no keeps it local\r\nQ3 · half-written");
   assert.deepEqual(questionLines(state), ["Q1 · Which name? · picked A · B changes the menu", "Q2 · Ship it? · picked yes · no keeps it local"]);
+});
+
+test("the report card and wait count what a STOP prompt lists; a STOP that only says nothing waits is a note", () => {
+  const state = finished([success({ "claude-opus-5-5": used(10, 7, 1.2) }, 1.2)]);
+  const stop = (prompt) => { fs.writeFileSync(path.join(state, "next-prompt.md"), prompt); return reportMessage(state, 0).text; };
+  // 2026-11-20, a real chain's last prompt (in the run's language there): the card said "Waits for you · 1" and wait printed the sentence as its list
+  const prose = "Both pieces of the plan are done: `23b37d4` notes: piece one, the night report `090d978`. Nothing waits for you.";
+  assert.doesNotMatch(stop(`STOP: the plan is done\n\n${prose}`), /Waits for you/);
+  assert.deepEqual(userWaits(state), { lines: [], note: [prose] });
+  // a list is counted by its items; wait prints the body as the session wrote it
+  const listed = "The last piece is in.\n\nWaiting on you:\n- **Push** the branch\n- approve `notes.md`\n\n**Remaining:** 0";
+  assert.match(stop(`STOP: done\n\n${listed}`), /<b>Waits for you<\/b> · 2\n• Push the branch\n• approve notes\.md$/);
+  assert.deepEqual(userWaits(state), { lines: listed.split("\n"), note: [] });
+  stop("STOP: done");
+  assert.deepEqual(userWaits(state), { lines: [], note: [] });
 });

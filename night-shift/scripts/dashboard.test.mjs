@@ -578,9 +578,19 @@ test("buildData: a STOP prompt's list is what waits, not its prose, its heading 
     "**Remaining:** 0", ""].join("\n"));
   assert.deepEqual(build(r, { pointer: null }).waitsNow, ["Still waiting (session 23): run `claude plugin validate .`, `docs/plan.md:134`.",
     "Still waiting (session 04): copy your table, then start again, `docs/plan.md:76`.", "Approve the release notes."]);
-  // With no list, each line that says something is one, but the list's heading and the count.
-  r.file("next-prompt.md", "STOP: done\n\nThe deploy key needs your approval.\n**Waits for you**\nCheck the logs.\n\n**Remaining:** 0\n");
-  assert.deepEqual(build(r, { pointer: null }).waitsNow, ["The deploy key needs your approval.", "Check the logs."]);
+  // With no list, the lines under the list's heading are the items, but the count; the prose above it is none.
+  r.file("next-prompt.md", "STOP: done\n\nThe deploy key is in place.\n**Waits for you**\nCheck the logs.\n\n**Remaining:** 0\n");
+  assert.deepEqual(build(r, { pointer: null }).waitsNow, ["Check the logs."]);
+});
+
+test("buildData: a STOP prompt that only says nothing waits shows nothing waiting", () => {
+  const r = twoSessions();
+  r.log(BASE, TWO);
+  // 2026-11-20, a real chain's last prompt (in the run's language there): its one sentence was the single entry of
+  // waitsNow, and the page said one thing waits
+  r.file("next-prompt.md", "STOP: the plan is done\n\nBoth pieces of the plan are done: `23b37d4` notes: piece one, `d2a0129` notes: piece two, the night report `090d978`. Nothing waits for you.\n");
+  const d = build(r, { pointer: null });
+  assert.deepEqual([d.waitsNow, d.waitsFrom, d.waitsOlder], [[], null, 0]);
 });
 
 test("buildData: an attended run's questions", () => {

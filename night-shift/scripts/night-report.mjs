@@ -23,7 +23,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { read, readJson, when, blank, merge, lastActivity, parseSession, chainEvents, pointerOf, git, unitPrices, priced, reportCommit, stopWaits, questionLines, LOG } from "./run-read.mjs";
+import { read, readJson, when, blank, merge, lastActivity, parseSession, chainEvents, pointerOf, git, unitPrices, priced, reportCommit, stopWaits, stopItems, questionLines, LOG } from "./run-read.mjs";
 import { sessionCard, eventLine, chainCard, statusCard, reportCard, reportSection, chainProgress, progressText, splitHtml } from "./telegram-cards.mjs";
 import { sessionPlan, resolveMode, isPremium, modelName as familyName, MAIN_MODEL, PREMIUM } from "./effort.mjs";
 import { strings, langOf, loadLang } from "./lang/index.mjs";
@@ -400,9 +400,8 @@ export function chainMessage(state, reason, pid) {
   const jobs = runJobs(c);
   const facts = jobs.map((s) => jobFacts(c, s));
   const limits = jobs.flatMap((s) => s.limits).map((l) => l.unifiedWindows?.seven_day?.utilization).filter((u) => u != null);
-  // A STOP prompt lists what waits for the user under its first line.
-  const waitList = /^STOP\b/i.test(c.nextPrompt) ? c.nextPrompt.split("\n").slice(1).map((l) => /^\s*(?:[-*] |\d+\. )(.*)$/.exec(l)?.[1])
-    .filter(Boolean).map((l) => l.replace(/\*\*|`/g, "").slice(0, 100)) : [];
+  // A STOP prompt lists what waits for the user under its first line (stopItems, the one reading of that list).
+  const waitList = (stopItems(c.nextPrompt, c.T) ?? []).map((l) => l.replace(/\*\*|`/g, "").slice(0, 100)).filter(Boolean);
   return chainCard({
     project: path.basename(c.run.repo || c.state), reason,
     jobs: facts.map((f) => ({ nn: f.nn, ok: f.ok, title: f.title || firstCommit(f), took: f.took })),
@@ -436,14 +435,19 @@ export function reportMessage(state, pid) {
       : { nn: s.nn, running: true, took: minutes(workMs(s), T), step: s.lastStep && String(s.lastStep).slice(0, 60) })),
     // A day's folder can hold an earlier run: its jobs' problems are not this run's.
     problems: c.issues.filter((i) => { const m = /#(\d+)/.exec(i); return !m || jobs.some((s) => s.nn === m[1]); }),
-    waits: waitsOf(c).map((l) => l.replace(/^\s*(?:[-*] |\d+\. )/, "").replace(/\*\*|`/g, "").slice(0, 100)).filter(Boolean),
+    // A STOP prompt's items (stopItems: its list, never its prose), else the last finished job's.
+    waits: (stopItems(c.nextPrompt, c.T) ?? waitsOf(c).map((l) => l.replace(/^\s*(?:[-*] |\d+\. )/, ""))).map((l) => l.replace(/\*\*|`/g, "").slice(0, 100)).filter(Boolean),
   }, T);
 }
 
-// What waits for the user once the chain is over: a STOP prompt's body (without its own
-// heading), else the last finished job's **Waits for you** (its new items, the carried ones counted).
+// What waits for the user once the chain is over, for `wait` to print: `lines`, a STOP prompt's body (without its own
+// heading) when it lists something (stopItems), else the last finished job's **Waits for you** (its new items, the
+// carried ones counted); `note`, the body of a STOP prompt that lists nothing, which says so in its own words or
+// names what waits in a sentence. `wait` prints a note under "no items listed": never as an item, and never dropped.
 export function userWaits(state) {
-  return waitsOf(collect(state, 0));
+  const c = collect(state, 0);
+  const listed = stopItems(c.nextPrompt, c.T);
+  return listed && !listed.length ? { lines: [], note: stopWaits(c.nextPrompt, c.T) } : { lines: waitsOf(c), note: [] };
 }
 
 function waitsOf(c) {

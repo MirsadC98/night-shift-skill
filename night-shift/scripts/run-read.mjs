@@ -281,6 +281,34 @@ export function stopWaits(nextPrompt, T) {
   return body.join("\n").trim() ? body.join("\n").trim().split("\n") : [];
 }
 
+// What a STOP prompt lists as waiting, one entry an item without its list marker, or null when the prompt is no STOP.
+// An item is a list item ("- a", "* a", "1. a"), with the indented lines under it. A body without a list has items only
+// under a heading of that list (isWaitsHead): the lines below it, but the count. Everything else is prose and no item:
+// a summary, a heading in other words, **Remaining:**, and a closing sentence that says nothing waits (2026-11-20: one
+// such sentence was the page's one thing waiting, the card's "Waits for you · 1" and wait's list). The price: a
+// STOP prompt that names what waits in a plain sentence, with neither a list nor that heading, is counted as nothing;
+// `wait` still prints its body, under "no items listed" (night-report.mjs's userWaits). A list item that is only the
+// night report's word for nothing ("- New: none.", "- none") is no item either, as in a report's section.
+const ITEM = /^\s*(?:[-*+]|\d+[.)])\s+/;
+const listItem = (l) => l.replace(ITEM, "").trim();
+const isNone = (item) => /^(?:new\s*:\s*)?none[\s.]*$/i.test(item.replace(/[*`]/g, ""));
+export function stopItems(nextPrompt, T) {
+  if (!/^STOP\b/i.test(nextPrompt)) return null;
+  const lines = nextPrompt.split("\n").slice(1);
+  if (!lines.some((l) => ITEM.test(l))) {
+    const at = lines.findIndex((l) => isWaitsHead(l, T));
+    return at < 0 ? [] : lines.slice(at + 1).filter((l) => !isWaitsHead(l, T) && !/^\s*\*\*Remaining:\*\*/.test(l)).map((l) => l.trim()).filter(Boolean);
+  }
+  const items = [];
+  let inside = false;
+  for (const l of lines) {
+    if (ITEM.test(l)) { items.push(listItem(l)); inside = true; }
+    else if (inside && /^\s+\S/.test(l)) items[items.length - 1] += ` ${l.trim()}`;
+    else inside = false;
+  }
+  return items.filter((i) => i && !isNone(i));
+}
+
 // C3 (2026-11-19): an attended run's questions, <state>/questions.md: the lines that open with "Q<n> · ", each once, in the
 // order written. A line counts once it ends in a newline, so one still being written, or cut off by stop --now, is not
 // read half. The watcher and `wait` (night-chain.mjs) keep what they reported by the line's text, not by a count: a line a

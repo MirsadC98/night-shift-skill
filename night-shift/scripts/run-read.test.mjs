@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { tempRoot } from "./config.mjs";
-import { parseSession, pointerOf, stopWaits } from "./run-read.mjs";
+import { parseSession, pointerOf, stopWaits, stopItems } from "./run-read.mjs";
 import { strings } from "./lang/index.mjs";
 import { reached } from "./fixtures/imports.mjs";
 // A CLAUDE_CONFIG_DIR of the user's own would move every file these tests read or write (claudeHome in config.mjs).
@@ -63,4 +63,24 @@ test("stopWaits reads a STOP prompt's body without its heading", () => {
   assert.deepEqual(stopWaits("STOP: done\n**Waits for you**\n- a\n- b", T), ["- a", "- b"]);
   assert.deepEqual(stopWaits("STOP: done", T), []);
   assert.equal(stopWaits("go on", T), null);
+});
+
+test("stopItems counts what a STOP prompt lists, never its prose", () => {
+  const T = strings("en");
+  // 2026-11-20, a real chain's last prompt (in the run's language there): one closing sentence that says nothing waits was shown as the one thing waiting
+  assert.deepEqual(stopItems("STOP: the plan is done\n\nBoth pieces of the plan are done: `23b37d4` notes: piece one, the night report `090d978`. Nothing waits for you.", T), []);
+  assert.deepEqual(stopItems("STOP: done\n\nAll three pieces are committed.\nNothing waits for you.\n\n**Remaining:** 0", T), []);
+  assert.deepEqual(stopItems("STOP: done", T), []);
+  assert.equal(stopItems("go on", T), null);
+  // a list is its items, each with the indented lines under it; the prose around it is none
+  assert.deepEqual(stopItems("STOP: done\n\nThe last piece is in.\n\nWaiting on you:\n- push the branch,\n  12 commits\n* approve the notes\n2) the key\n\n**Remaining:** 0", T),
+    ["push the branch, 12 commits", "approve the notes", "the key"]);
+  assert.deepEqual(stopItems("STOP: done\r\n**Waits for you**\r\n- a\r\n- b\r\n", T), ["a", "b"]);
+  // the night report's own word for nothing ("- New: none.", SKILL.md) is no item in a STOP prompt either; an item that only starts with it is
+  assert.deepEqual(stopItems("STOP: done\n**Waits for you**\n- New: none.\n\n**Remaining:** 0", T), []);
+  assert.deepEqual(stopItems("STOP: done\n- **None**\n", T), []);
+  assert.deepEqual(stopItems("STOP: done\n- none of the keys work: send a new one\n- New: none yet, but read `a.md`", T), ["none of the keys work: send a new one", "New: none yet, but read `a.md`"]);
+  // without a list, the lines under the list's heading are the items: a session that wrote the heading says something waits
+  assert.deepEqual(stopItems("STOP: done\n**Waits for you**\nCheck the logs.", T), ["Check the logs."]);
+  assert.deepEqual(stopItems("STOP: done\n\nThe deploy key is in place.\n\nWaiting for the user:\n\nCheck the logs.\nApprove the push.\n\n**Remaining:** 0\n", T), ["Check the logs.", "Approve the push."]);
 });

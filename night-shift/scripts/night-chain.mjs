@@ -1378,7 +1378,7 @@ async function waitChain(opt) {
     const asked = unseen();
     keep(asked);
     console.log([...report(statusHead(pointerOr(repo) || first, false, T, repo)),
-      T.cli.userWaits(waits), "",
+      T.cli.userWaits(waits.lines), ...waits.note, "",
       ...(asked.length ? [T.cli.asked, ...asked, ""] : []),
       T.cli.reportLine(path.resolve(workTree(run) || repo, run.report || "NIGHT_RUNS.md"), `node "${SELF}" status --repo "${repo}"`)].join("\n"));
   };
